@@ -3,6 +3,7 @@
 import logging
 from datetime import datetime
 from typing import Optional, Dict, List
+import numpy as np
 import pandas as pd
 
 logging.basicConfig(
@@ -19,15 +20,26 @@ from core.variable_screen import VariableScreener
 from core.ddf_fields import DDF_FIELDS
 from host_galaxy.morphology_filter import MorphologyFilter
 from cache.alert_cache import AlertCache
+from utils.extinction import get_extinction_batch
+from utils.ned_query import query_ned_batch
 
 
 class SupernovaMonitor:
     """Main monitoring pipeline for SN Ia in Rubin DDFs."""
 
-    def __init__(self, cache_dir: str = './cache/data'):
+    def __init__(self, cache_dir: str = './cache/data',
+                 use_alerce_db: bool = True,
+                 apply_extinction: bool = True,
+                 query_ned: bool = True):
         self.cache_dir = cache_dir
         self.cache = AlertCache(cache_dir)
-        self.aggregator = AlertAggregator(cache_dir)
+        self.apply_extinction = apply_extinction
+        self.query_ned = query_ned
+        self.use_alerce_db = use_alerce_db
+        self.aggregator = AlertAggregator(
+            cache_dir,
+            apply_extinction=apply_extinction,
+        )
         self.morphology_filter = MorphologyFilter(cache_dir)
         self.variable_screener = VariableScreener()
         self.atlas_client = AtlasClient()
@@ -45,13 +57,17 @@ class SupernovaMonitor:
             logger.warning(f"Failed to initialize ANTARES: {e}")
 
         try:
-            self.brokers['ALeRCE'] = AlerceClient(self.cache_dir, survey='ztf')
-            logger.info("ALeRCE (ZTF) client initialized")
+            self.brokers['ALeRCE'] = AlerceClient(
+                self.cache_dir, survey='ztf', use_db=self.use_alerce_db,
+            )
+            logger.info("ALeRCE (ZTF) client initialized (db=%s)", self.use_alerce_db)
         except Exception as e:
             logger.warning(f"Failed to initialize ALeRCE ZTF: {e}")
 
         try:
-            self.brokers['ALeRCE-LSST'] = AlerceClient(self.cache_dir, survey='lsst')
+            self.brokers['ALeRCE-LSST'] = AlerceClient(
+                self.cache_dir, survey='lsst', use_db=self.use_alerce_db,
+            )
             logger.info("ALeRCE (LSST) client initialized")
         except Exception as e:
             logger.warning(f"Failed to initialize ALeRCE LSST: {e}")
@@ -139,6 +155,9 @@ class SupernovaMonitor:
                      f"require_rubin={require_rubin}, "
                      f"elliptical_filter={filter_elliptical}, "
                      f"atlas_enrichment={atlas_enrichment}")
+        logger.info(f"Features: extinction={self.apply_extinction}, "
+                     f"alerce_db={self.use_alerce_db}, "
+                     f"ned_redshifts={self.query_ned}")
         logger.info("=" * 60)
 
         # Step 1: Query brokers (restricted to DDFs)
@@ -197,11 +216,21 @@ class SupernovaMonitor:
             self._last_merged_alerts = merged_alerts
             return ia_candidates
 
-        # Step 5: Optionally filter for elliptical galaxies
+        # Step 5: NED redshift lookups
+        if self.query_ned and len(ia_candidates) > 0:
+            logger.info("Querying NED for host galaxy redshifts...")
+            try:
+                ia_candidates = query_ned_batch(ia_candidates, cache=self.cache)
+                n_z = ia_candidates['ned_redshift'].notna().sum()
+                logger.info(f"Step 5: NED redshifts for {n_z}/{len(ia_candidates)} candidates")
+            except Exception as e:
+                logger.warning("NED redshift lookup failed: %s", e)
+
+        # Step 6: Optionally filter for elliptical galaxies
         if filter_elliptical:
             logger.info("Filtering for elliptical galaxy hosts...")
             elliptical_candidates = self.morphology_filter.filter_elliptical(ia_candidates)
-            logger.info(f"Step 5: {len(elliptical_candidates)} candidates in elliptical galaxies")
+            logger.info(f"Step 6: {len(elliptical_candidates)} candidates in elliptical galaxies")
 
             if len(elliptical_candidates) == 0:
                 logger.warning("No candidates in elliptical galaxies. "
@@ -209,12 +238,12 @@ class SupernovaMonitor:
             else:
                 ia_candidates = elliptical_candidates
 
-        # Step 6: Enrich with ATLAS forced photometry
+        # Step 7: Enrich with ATLAS forced photometry
         if atlas_enrichment and self.atlas_client.available:
             logger.info("Enriching with ATLAS forced photometry...")
             ia_candidates = self.atlas_client.enrich_candidates(ia_candidates)
             n_atlas = ia_candidates['atlas_has_data'].sum() if 'atlas_has_data' in ia_candidates.columns else 0
-            logger.info(f"Step 6: {n_atlas}/{len(ia_candidates)} candidates have ATLAS data")
+            logger.info(f"Step 7: {n_atlas}/{len(ia_candidates)} candidates have ATLAS data")
         elif atlas_enrichment:
             logger.warning("ATLAS credentials not configured; skipping enrichment")
 

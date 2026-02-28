@@ -7,6 +7,7 @@ import numpy as np
 from datetime import datetime
 
 from utils.coordinates import CoordinateUtils
+from utils.extinction import get_extinction_batch
 from cache.alert_cache import AlertCache
 
 logger = logging.getLogger(__name__)
@@ -20,9 +21,11 @@ ANTARES_TRANSIENT_TAGS = {'high_amplitude_transient_candidate'}
 class AlertAggregator:
     """Aggregate and merge alerts from multiple brokers."""
 
-    def __init__(self, cache_dir: str = './cache/data', match_tolerance_arcsec: float = 1.0):
+    def __init__(self, cache_dir: str = './cache/data', match_tolerance_arcsec: float = 1.0,
+                 apply_extinction: bool = True):
         self.cache = AlertCache(cache_dir)
         self.match_tolerance = match_tolerance_arcsec
+        self.apply_extinction = apply_extinction
 
     def merge_alerts(self, alerts_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """Merge alerts from multiple brokers into a deduplicated DataFrame."""
@@ -48,6 +51,17 @@ class AlertAggregator:
 
         merged_df = self._deduplicate_by_coordinates(combined_df)
         merged_df = self._add_classification_columns(merged_df)
+
+        # Galactic extinction lookup
+        if self.apply_extinction and len(merged_df) > 0:
+            try:
+                logger.info("Querying galactic extinction for %d objects...", len(merged_df))
+                merged_df = get_extinction_batch(merged_df, cache=self.cache)
+                n_with_ext = merged_df['A_g'].notna().sum()
+                logger.info("Extinction values obtained for %d/%d objects",
+                            n_with_ext, len(merged_df))
+            except Exception as e:
+                logger.warning("Extinction lookup failed: %s", e)
 
         if len(merged_df) > 0:
             try:

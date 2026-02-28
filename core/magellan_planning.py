@@ -89,7 +89,8 @@ def compute_merit(delta_t, peak_mag,
         Time since peak in days (MJD_now - peak_mjd). Sign preserved but
         the Gaussian uses delta_t^2, so it is symmetric.
     peak_mag : float or array-like
-        Estimated peak apparent magnitude (AB).
+        Estimated peak apparent magnitude (AB). Preferably extinction-
+        corrected (peak_mag_corrected) — use that column when available.
     tau : float
         Time decay half-width in days (default 10).
     mag_optimal : float

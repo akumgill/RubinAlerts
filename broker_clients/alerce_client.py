@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 
 from .base_client import BaseBrokerClient
+from .alerce_db_client import AlerceDBClient
 from core.ddf_fields import DDF_FIELDS, DDF_SEARCH_RADIUS_DEG
 
 logger = logging.getLogger(__name__)
@@ -39,11 +40,14 @@ class AlerceClient(BaseBrokerClient):
       from Rubin/LSST alert stream data.
     """
 
-    def __init__(self, cache_dir: str = './cache/data', survey: str = 'ztf'):
+    def __init__(self, cache_dir: str = './cache/data', survey: str = 'ztf',
+                 use_db: bool = True):
         broker_name = 'ALeRCE' if survey == 'ztf' else 'ALeRCE-LSST'
         super().__init__(broker_name, cache_dir)
         self.survey = survey
         self.alerce = None
+        self.use_db = use_db
+        self.db_client = AlerceDBClient() if use_db else None
         self._initialize_client()
         os.makedirs(cache_dir, exist_ok=True)
 
@@ -107,6 +111,19 @@ class AlerceClient(BaseBrokerClient):
                 ddf_fields=ddf_fields,
             )
         else:
+            # Try direct DB access for ZTF (much faster for bulk queries)
+            if self.use_db and self.db_client and self.db_client.available:
+                try:
+                    return self._query_alerts_via_db(
+                        class_name=class_name,
+                        min_probability=min_probability,
+                        days_back=days_back,
+                        limit=limit,
+                        ddf_fields=ddf_fields,
+                    )
+                except Exception as e:
+                    logger.warning("ALeRCE DB query failed, falling back to REST API: %s", e)
+
             return self._query_alerts_ztf(
                 class_name=class_name,
                 min_probability=min_probability,
@@ -115,7 +132,133 @@ class AlerceClient(BaseBrokerClient):
                 ddf_fields=ddf_fields,
             )
 
-    # --- ZTF query path (unchanged) ---
+    # --- ZTF query via direct database ---
+
+    def _query_alerts_via_db(self,
+                             class_name: str = 'SNIa',
+                             min_probability: float = 0.5,
+                             days_back: int = 30,
+                             limit: int = 200,
+                             ddf_fields: Optional[List[Dict]] = None) -> pd.DataFrame:
+        """Query ALeRCE ZTF via direct PostgreSQL database access.
+
+        Faster than REST API for bulk queries. Falls back to REST on failure.
+        """
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+        from astropy.time import Time
+
+        logger.info("Querying ALeRCE via direct database access...")
+        self.db_client.connect()
+
+        # Get SN candidates from DB
+        candidates = self.db_client.query_sn_candidates(
+            min_prob=min_probability,
+            classifier='lc_classifier',
+        )
+
+        if len(candidates) == 0:
+            logger.info("No SN candidates from ALeRCE DB")
+            return pd.DataFrame()
+
+        # Get unique objects with their top classification
+        top = candidates[candidates['ranking'] == 1].copy()
+        if len(top) == 0:
+            top = candidates.drop_duplicates('oid', keep='first')
+
+        # Filter by DDF field coordinates
+        fields = ddf_fields or DDF_FIELDS
+        obj_coords = SkyCoord(
+            ra=top['meanra'].values * u.deg,
+            dec=top['meandec'].values * u.deg,
+        )
+
+        in_any_ddf = np.zeros(len(top), dtype=bool)
+        ddf_assignments = [''] * len(top)
+
+        for field in fields:
+            center = SkyCoord(ra=field['ra'] * u.deg, dec=field['dec'] * u.deg)
+            seps = obj_coords.separation(center)
+            in_field = seps <= DDF_SEARCH_RADIUS_DEG * u.deg
+            for idx_pos in np.where(in_field)[0]:
+                if not in_any_ddf[idx_pos]:
+                    ddf_assignments[idx_pos] = field['name']
+            in_any_ddf |= in_field
+
+        ddf_top = top[in_any_ddf].copy()
+        ddf_names = [ddf_assignments[i] for i in np.where(in_any_ddf)[0]]
+
+        logger.info("ALeRCE DB: %d/%d candidates in DDFs", len(ddf_top), len(top))
+
+        if len(ddf_top) == 0:
+            return pd.DataFrame()
+
+        # Limit results
+        if len(ddf_top) > limit:
+            ddf_top = ddf_top.head(limit)
+            ddf_names = ddf_names[:limit]
+
+        # Get full probabilities for DDF candidates
+        oids = ddf_top['oid'].tolist()
+        prob_df = self.db_client.query_probabilities(oids)
+
+        # Get PS1 host data
+        ps1_df = self.db_client.query_ps1_host(oids)
+
+        # Build standard alert format
+        alerts_list = []
+        prob_lookup = {}
+        if len(prob_df) > 0:
+            prob_lookup = prob_df.set_index('oid').to_dict('index')
+
+        ps1_lookup = {}
+        if len(ps1_df) > 0:
+            ps1_lookup = ps1_df.set_index('oid').to_dict('index')
+
+        for (_, row), ddf_name in zip(ddf_top.iterrows(), ddf_names):
+            oid = row['oid']
+            alert = {
+                'object_id': oid,
+                'ra': row['meanra'],
+                'dec': row['meandec'],
+                'discovery_date': row.get('firstMJD'),
+                'last_mjd': None,
+                'n_detections': row.get('ndet'),
+                'sn_ia_prob': row.get('probability'),
+                'classifier': row.get('classifier_name', 'lc_classifier'),
+                'class': row.get('class_name', class_name),
+                'stellar': False,
+                'magnitude': row.get('g_r_max'),
+                'broker': 'ALeRCE',
+                'alerce_survey': 'ztf',
+                'ddf_field': ddf_name,
+            }
+
+            # Add all class probabilities
+            probs = prob_lookup.get(oid, {})
+            for key, val in probs.items():
+                if key.startswith('prob_') and pd.notna(val):
+                    alert[key] = float(val)
+
+            # Add PS1 host data
+            ps1 = ps1_lookup.get(oid, {})
+            if ps1:
+                alert['ps1_sgscore'] = ps1.get('sgscore1')
+                alert['ps1_g_r_host'] = ps1.get('g_r_host')
+                alert['ps1_r_i_host'] = ps1.get('r_i_host')
+
+            alerts_list.append(alert)
+
+        df = pd.DataFrame(alerts_list)
+        logger.info("ALeRCE DB: Retrieved %d alerts from DDFs", len(df))
+
+        if len(df) > 0 and 'ddf_field' in df.columns:
+            for field_name, count in df['ddf_field'].value_counts().items():
+                logger.info("    %s: %d", field_name, count)
+
+        return df
+
+    # --- ZTF query path via REST API ---
 
     def _query_alerts_ztf(self,
                           class_name: str = 'SNIa',

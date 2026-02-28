@@ -1,8 +1,9 @@
 """Light curve peak fitting for SN Ia candidates.
 
-Provides two fitting methods:
+Provides three fitting methods:
 1. Inverted parabola (per-band) — always available, uses scipy.optimize.curve_fit
 2. SALT2/SALT3 template (multi-band) — optional, requires sncosmo
+3. Villar SPM (per-band) — uses precomputed ALeRCE features, no fitting needed
 
 All fitting is done in flux space (nanoJanskys) to handle negative
 difference-imaging values naturally.
@@ -59,7 +60,7 @@ def _inverted_parabola(t, peak_flux, t0, a):
     return peak_flux - a * (t - t0) ** 2
 
 
-def fit_parabola_single_band(mjd, flux, flux_err, band_name='?'):
+def fit_parabola_single_band(mjd, flux, flux_err, band_name='?', A_band=None):
     """Fit an inverted parabola to a single band's flux light curve.
 
     Parameters
@@ -72,11 +73,15 @@ def fit_parabola_single_band(mjd, flux, flux_err, band_name='?'):
         Flux uncertainties (nJy).
     band_name : str
         Band label for logging.
+    A_band : float, optional
+        Galactic extinction A_SFD for this band (magnitudes).
+        If provided, peak_mag_corrected = peak_mag - A_band is added.
 
     Returns
     -------
     dict with keys: peak_mjd, peak_flux, peak_mag, peak_mag_err,
-                    curvature, chi2_dof, n_points, band, status
+                    peak_mag_corrected, A_band, curvature, chi2_dof,
+                    n_points, band, status
     """
     mjd = np.asarray(mjd, dtype=float)
     flux = np.asarray(flux, dtype=float)
@@ -94,6 +99,8 @@ def fit_parabola_single_band(mjd, flux, flux_err, band_name='?'):
         'peak_flux': np.nan,
         'peak_mag': np.nan,
         'peak_mag_err': np.nan,
+        'peak_mag_corrected': np.nan,
+        'A_band': A_band if A_band is not None else np.nan,
         'curvature': np.nan,
         'chi2_dof': np.nan,
         'status': 'insufficient_data',
@@ -144,11 +151,18 @@ def fit_parabola_single_band(mjd, flux, flux_err, band_name='?'):
     else:
         status = 'ok'
 
+    # Extinction-corrected magnitude
+    peak_mag_corrected = np.nan
+    if not np.isnan(peak_mag) and A_band is not None and not np.isnan(A_band):
+        peak_mag_corrected = peak_mag - A_band
+
     result.update({
         'peak_mjd': t0,
         'peak_flux': peak_flux,
         'peak_mag': peak_mag,
         'peak_mag_err': peak_mag_err,
+        'peak_mag_corrected': peak_mag_corrected,
+        'A_band': A_band if A_band is not None else np.nan,
         'curvature': a,
         'chi2_dof': chi2_dof,
         'status': status,
@@ -160,7 +174,7 @@ def fit_parabola_single_band(mjd, flux, flux_err, band_name='?'):
 # Multi-band parabola wrapper
 # ---------------------------------------------------------------------------
 
-def fit_parabola(lc_df, bands=None):
+def fit_parabola(lc_df, bands=None, extinction=None):
     """Fit inverted parabola to each band independently.
 
     Parameters
@@ -170,6 +184,8 @@ def fit_parabola(lc_df, bands=None):
         band_name (or band).
     bands : list of str, optional
         Bands to fit. If None, fits all available bands.
+    extinction : dict, optional
+        Mapping of band letter to A_SFD value (e.g. {'g': 0.08, 'r': 0.06}).
 
     Returns
     -------
@@ -192,15 +208,18 @@ def fit_parabola(lc_df, bands=None):
     if bands is None:
         bands = available_bands
 
+    extinction = extinction or {}
+
     per_band = {}
     for b in bands:
         mask = df['band'] == b
         if mask.sum() == 0:
             continue
         sub = df[mask]
+        a_band = extinction.get(b)
         result = fit_parabola_single_band(
             sub['mjd'].values, sub['flux'].values, sub['flux_err'].values,
-            band_name=b,
+            band_name=b, A_band=a_band,
         )
         per_band[b] = result
 
@@ -338,6 +357,166 @@ def fit_salt(lc_df, model_name='salt2', z=None, z_range=(0.01, 1.2)):
 
 
 # ---------------------------------------------------------------------------
+# Villar SPM model (Villar et al. 2019)
+# ---------------------------------------------------------------------------
+
+# ALeRCE stores SPM_A normalized by 1e26. To convert to AB magnitudes:
+# mag = -2.5 * log10(flux) + 2.5*26 - 48.6
+VILLAR_FLUX_ZP = 2.5 * 26 - 48.6  # = 16.4
+
+# ZTF filter ID → band letter
+VILLAR_FID_MAP = {1: 'g', 2: 'r'}
+
+
+def villar_flux(mjd, firstmjd, A, t0, beta, gamma, tau_rise, tau_fall):
+    """Evaluate the Villar SPM (Supernova Parametric Model) in flux space.
+
+    Parameters
+    ----------
+    mjd : array-like
+        Observation times (MJD).
+    firstmjd : float
+        First detection MJD (t0 and gamma are relative to this).
+    A : float
+        Amplitude (in 1e26 flux units as stored by ALeRCE).
+    t0 : float
+        Explosion time offset from firstmjd (days).
+    beta : float
+        Linear decline fraction (0–1, dimensionless).
+    gamma : float
+        Time from explosion to peak (days).
+    tau_rise : float
+        Rise timescale (days).
+    tau_fall : float
+        Decline timescale (days).
+
+    Returns
+    -------
+    array of flux values (in ALeRCE 1e26 units).
+    """
+    mjd = np.asarray(mjd, dtype=float)
+    mjd0 = t0 + firstmjd       # explosion epoch
+    mjd1 = mjd0 + gamma        # peak epoch
+
+    F = np.zeros_like(mjd)
+    rising = mjd < mjd1
+
+    if rising.any():
+        dt = mjd[rising] - mjd0
+        den = 1.0 + np.exp(-dt / tau_rise)
+        F[rising] = A * (1.0 - beta * dt / gamma) / den
+
+    falling = ~rising
+    if falling.any():
+        dt_rise = mjd[falling] - mjd0
+        dt_fall = mjd[falling] - mjd1
+        den = 1.0 + np.exp(-dt_rise / tau_rise)
+        F[falling] = A * (1.0 - beta) * np.exp(-dt_fall / tau_fall) / den
+
+    return F
+
+
+def villar_peak_from_params(firstmjd, A, t0, gamma, beta, tau_rise, chi=None):
+    """Extract peak time and magnitude from Villar SPM parameters.
+
+    Parameters
+    ----------
+    firstmjd : float
+        First detection MJD.
+    A, t0, gamma, beta, tau_rise : float
+        SPM parameters from ALeRCE feature table.
+    chi : float, optional
+        SPM goodness of fit (chi-squared).
+
+    Returns
+    -------
+    dict with peak_mjd, peak_mag, villar_chi, status.
+    """
+    result = {
+        'peak_mjd': np.nan,
+        'peak_mag': np.nan,
+        'villar_chi': chi if chi is not None else np.nan,
+        'status': 'no_params',
+    }
+
+    # Validate parameters
+    if any(np.isnan(v) for v in [firstmjd, A, t0, gamma]):
+        return result
+
+    if A <= 0 or gamma <= 0:
+        result['status'] = 'invalid_params'
+        return result
+
+    # Peak time
+    peak_mjd = firstmjd + t0 + gamma
+    result['peak_mjd'] = peak_mjd
+
+    # Evaluate flux at peak — at the peak, the rising formula gives F ≈ A*(1-beta) / denominator
+    # More precisely, evaluate the model at the peak time
+    peak_flux = villar_flux(
+        np.array([peak_mjd]), firstmjd,
+        A, t0, beta, gamma, tau_rise, tau_rise,  # tau_fall unused at peak
+    )[0]
+
+    if peak_flux > 0:
+        result['peak_mag'] = -2.5 * np.log10(peak_flux) + VILLAR_FLUX_ZP
+        result['status'] = 'ok'
+    else:
+        result['status'] = 'negative_flux'
+
+    return result
+
+
+def extract_villar_peaks(features_df, firstmjd_lookup):
+    """Extract peak estimates from ALeRCE SPM features for multiple objects.
+
+    Parameters
+    ----------
+    features_df : pd.DataFrame
+        Pivoted SPM features from AlerceDBClient.query_features().
+        Columns like: oid, SPM_A_1, SPM_A_2, SPM_t0_1, SPM_gamma_1, etc.
+    firstmjd_lookup : dict
+        Mapping of oid → firstMJD.
+
+    Returns
+    -------
+    dict of {oid: {band: villar_result_dict}}
+    """
+    results = {}
+
+    for _, row in features_df.iterrows():
+        oid = row.get('oid')
+        if not oid:
+            continue
+
+        firstmjd = firstmjd_lookup.get(oid)
+        if firstmjd is None or np.isnan(firstmjd):
+            continue
+
+        oid_results = {}
+        for fid, band in VILLAR_FID_MAP.items():
+            sfx = f'_{fid}'
+            A = row.get(f'SPM_A{sfx}', np.nan)
+            t0 = row.get(f'SPM_t0{sfx}', np.nan)
+            beta = row.get(f'SPM_beta{sfx}', np.nan)
+            gamma = row.get(f'SPM_gamma{sfx}', np.nan)
+            tau_rise = row.get(f'SPM_tau_rise{sfx}', np.nan)
+            chi = row.get(f'SPM_chi{sfx}', np.nan)
+
+            if not np.isnan(A):
+                peak = villar_peak_from_params(
+                    firstmjd, A, t0, gamma, beta, tau_rise, chi=chi,
+                )
+                peak['band'] = band
+                oid_results[band] = peak
+
+        if oid_results:
+            results[oid] = oid_results
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # PeakFitter: batch orchestrator
 # ---------------------------------------------------------------------------
 
@@ -354,8 +533,21 @@ class PeakFitter:
         self.monitor = monitor
 
     def fit_candidate(self, object_id, broker='ALeRCE-LSST',
-                      use_salt=False, z=None):
+                      use_salt=False, z=None, extinction=None):
         """Fit peak for one candidate.
+
+        Parameters
+        ----------
+        object_id : str
+            Object identifier for light curve retrieval.
+        broker : str
+            Broker to query for light curve.
+        use_salt : bool
+            Whether to attempt SALT2 fit.
+        z : float, optional
+            Fixed redshift for SALT fit.
+        extinction : dict, optional
+            Mapping of band letter to A_SFD value.
 
         Returns
         -------
@@ -371,11 +563,12 @@ class PeakFitter:
                 result['salt'] = {'status': 'no_data', 'method': 'salt'}
             return result
 
-        result['parabola'] = fit_parabola(lc)
+        result['parabola'] = fit_parabola(lc, extinction=extinction)
 
         if use_salt:
             result['salt'] = fit_salt(lc, z=z)
 
+        # Villar params are added externally via enrich_with_villar()
         return result
 
     def fit_all_candidates(self, candidates_df, broker='ALeRCE-LSST',
@@ -386,7 +579,8 @@ class PeakFitter:
         Parameters
         ----------
         candidates_df : pd.DataFrame
-            Candidates table from the pipeline.
+            Candidates table from the pipeline.  If columns A_g, A_r, etc.
+            are present, extinction corrections are applied per-candidate.
         broker : str
             Broker to use for light curve retrieval.
         id_column : str
@@ -410,13 +604,30 @@ class PeakFitter:
         if max_candidates is not None:
             ids = ids.head(max_candidates)
 
+        # Build extinction lookup keyed by object ID
+        has_extinction = any(f'A_{b}' in candidates_df.columns for b in 'ugriz')
+        ext_lookup = {}
+        if has_extinction:
+            for _, row in candidates_df.iterrows():
+                oid = row.get(id_column)
+                if pd.notna(oid):
+                    ext = {}
+                    for b in 'ugriz':
+                        col = f'A_{b}'
+                        if col in candidates_df.columns and pd.notna(row.get(col)):
+                            ext[b] = float(row[col])
+                    if ext:
+                        ext_lookup[oid] = ext
+
         logger.info("Fitting %d candidates from %s...", len(ids), broker)
 
         fit_results = {}
         for i, oid in enumerate(ids):
             try:
+                extinction = ext_lookup.get(oid)
                 fit_results[oid] = self.fit_candidate(
                     oid, broker=broker, use_salt=use_salt,
+                    extinction=extinction,
                 )
                 status = 'no data'
                 best = fit_results[oid]['parabola'].get('best')
@@ -436,6 +647,31 @@ class PeakFitter:
             if r['parabola'].get('best') and r['parabola']['best']['status'] == 'ok'
         )
         logger.info("Fitting complete: %d/%d with status 'ok'", n_ok, len(fit_results))
+        return fit_results
+
+    @staticmethod
+    def enrich_with_villar(fit_results, villar_peaks):
+        """Add Villar SPM peak estimates to existing fit results.
+
+        Parameters
+        ----------
+        fit_results : dict
+            Output from fit_all_candidates().
+        villar_peaks : dict
+            Output from extract_villar_peaks(): {oid: {band: result_dict}}.
+
+        Returns
+        -------
+        Updated fit_results dict (modified in place).
+        """
+        n_enriched = 0
+        for oid, band_results in villar_peaks.items():
+            if oid in fit_results:
+                fit_results[oid]['villar'] = band_results
+                n_enriched += 1
+
+        logger.info("Villar SPM: enriched %d/%d candidates",
+                    n_enriched, len(fit_results))
         return fit_results
 
     @staticmethod
@@ -465,6 +701,8 @@ class PeakFitter:
                 'peak_flux': best['peak_flux'] if best else np.nan,
                 'peak_mag': best['peak_mag'] if best else np.nan,
                 'peak_mag_err': best['peak_mag_err'] if best else np.nan,
+                'peak_mag_corrected': best.get('peak_mag_corrected', np.nan) if best else np.nan,
+                'A_band': best.get('A_band', np.nan) if best else np.nan,
                 'chi2_dof': best['chi2_dof'] if best else np.nan,
                 'fit_status': best['status'] if best else 'no_data',
                 'bands_ok': ', '.join(bands_ok),
@@ -482,6 +720,21 @@ class PeakFitter:
                     row['salt_chi2_dof'] = salt.get('chi2_dof', np.nan)
                     row['salt_z'] = salt.get('z', np.nan)
 
+            # Villar SPM columns
+            villar = res.get('villar')
+            if villar:
+                # Pick best band by priority
+                villar_best = None
+                for b in BAND_PRIORITY:
+                    if b in villar and villar[b].get('status') == 'ok':
+                        villar_best = villar[b]
+                        break
+                if villar_best:
+                    row['villar_peak_mjd'] = villar_best.get('peak_mjd', np.nan)
+                    row['villar_peak_mag'] = villar_best.get('peak_mag', np.nan)
+                    row['villar_chi'] = villar_best.get('villar_chi', np.nan)
+                    row['villar_band'] = villar_best.get('band', '')
+
             rows.append(row)
 
         return pd.DataFrame(rows)
@@ -490,7 +743,8 @@ class PeakFitter:
     def merge_peak_fits(candidates_df, fit_results, id_column='object_id_ALeRCE-LSST'):
         """Merge headline peak estimates into the candidates DataFrame.
 
-        Adds columns: peak_mjd, peak_mag, peak_band, peak_fit_status.
+        Adds columns: peak_mjd, peak_mag, peak_mag_corrected, peak_band,
+                      peak_mag_err, peak_fit_status.
         """
         peak_data = {}
         for oid, res in fit_results.items():
@@ -499,6 +753,8 @@ class PeakFitter:
                 peak_data[oid] = {
                     'peak_mjd': best['peak_mjd'],
                     'peak_mag': best['peak_mag'],
+                    'peak_mag_err': best.get('peak_mag_err', np.nan),
+                    'peak_mag_corrected': best.get('peak_mag_corrected', np.nan),
                     'peak_band': best['band'],
                     'peak_fit_status': best['status'],
                 }
@@ -506,6 +762,8 @@ class PeakFitter:
                 peak_data[oid] = {
                     'peak_mjd': np.nan,
                     'peak_mag': np.nan,
+                    'peak_mag_err': np.nan,
+                    'peak_mag_corrected': np.nan,
                     'peak_band': '',
                     'peak_fit_status': 'no_data',
                 }
@@ -515,7 +773,8 @@ class PeakFitter:
 
         out = candidates_df.copy()
         # Drop existing peak columns to avoid conflicts
-        for col in ['peak_mjd', 'peak_mag', 'peak_band', 'peak_fit_status']:
+        for col in ['peak_mjd', 'peak_mag', 'peak_mag_err', 'peak_mag_corrected',
+                     'peak_band', 'peak_fit_status']:
             if col in out.columns:
                 out = out.drop(columns=[col])
 

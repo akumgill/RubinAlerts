@@ -64,10 +64,26 @@ class AlertCache:
                     magnitude_r REAL,
                     magnitude_i REAL,
                     magnitude_z REAL,
+                    extinction_json TEXT,
+                    ned_name TEXT,
+                    ned_separation_arcsec REAL,
                     queried_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(ra, dec)
                 )
             ''')
+
+            # Add columns to existing galaxy_info tables that lack them
+            for col_def in [
+                ('extinction_json', 'TEXT'),
+                ('ned_name', 'TEXT'),
+                ('ned_separation_arcsec', 'REAL'),
+            ]:
+                try:
+                    cursor.execute(
+                        f'ALTER TABLE galaxy_info ADD COLUMN {col_def[0]} {col_def[1]}'
+                    )
+                except sqlite3.OperationalError:
+                    pass  # column already exists
 
             # Merged alerts table (for deduplicated results)
             cursor.execute('''
@@ -309,6 +325,139 @@ class AlertCache:
 
         except Exception as e:
             logger.warning(f"Error retrieving cached galaxy info: {e}")
+            return None
+
+    def cache_extinction(self, ra: float, dec: float, extinction_dict: Dict[str, float]):
+        """Cache galactic extinction values for coordinates.
+
+        Args:
+            ra: Right ascension (degrees)
+            dec: Declination (degrees)
+            extinction_dict: Mapping of band letter to A_SFD value
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            ext_json = json.dumps(extinction_dict)
+
+            # Try to update existing row first
+            cursor.execute('''
+                UPDATE galaxy_info SET extinction_json = ?, queried_at = CURRENT_TIMESTAMP
+                WHERE ABS(ra - ?) < 0.002 AND ABS(dec - ?) < 0.002
+            ''', (ext_json, ra, dec))
+
+            if cursor.rowcount == 0:
+                # No existing row — insert new one
+                cursor.execute('''
+                    INSERT OR REPLACE INTO galaxy_info
+                    (ra, dec, extinction_json, queried_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (ra, dec, ext_json))
+
+            conn.commit()
+
+        except Exception as e:
+            logger.debug("Error caching extinction: %s", e)
+
+    def get_cached_extinction(self, ra: float, dec: float,
+                              tolerance_arcmin: float = 0.1) -> Optional[Dict[str, float]]:
+        """Retrieve cached extinction values for coordinates.
+
+        Args:
+            ra: Right ascension (degrees)
+            dec: Declination (degrees)
+            tolerance_arcmin: Search tolerance in arcminutes
+
+        Returns:
+            Dict of {band: A_SFD} or None if not cached
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            tolerance_deg = tolerance_arcmin / 60.0
+
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT extinction_json FROM galaxy_info
+                WHERE ABS(ra - ?) < ? AND ABS(dec - ?) < ?
+                  AND extinction_json IS NOT NULL
+                LIMIT 1
+            ''', (ra, tolerance_deg, dec, tolerance_deg))
+
+            row = cursor.fetchone()
+            if row and row[0]:
+                return json.loads(row[0])
+            return None
+
+        except Exception as e:
+            logger.debug("Error retrieving cached extinction: %s", e)
+            return None
+
+    def cache_ned_info(self, ra: float, dec: float, redshift: float,
+                       ned_name: str = '', separation_arcsec: float = 0.0):
+        """Cache NED redshift lookup results for coordinates.
+
+        Args:
+            ra: Right ascension (degrees)
+            dec: Declination (degrees)
+            redshift: Spectroscopic redshift from NED
+            ned_name: NED source name
+            separation_arcsec: Angular separation to NED source
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # Try to update existing row
+            cursor.execute('''
+                UPDATE galaxy_info
+                SET redshift = ?, ned_name = ?, ned_separation_arcsec = ?,
+                    queried_at = CURRENT_TIMESTAMP
+                WHERE ABS(ra - ?) < 0.002 AND ABS(dec - ?) < 0.002
+            ''', (redshift, ned_name, separation_arcsec, ra, dec))
+
+            if cursor.rowcount == 0:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO galaxy_info
+                    (ra, dec, redshift, ned_name, ned_separation_arcsec, queried_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (ra, dec, redshift, ned_name, separation_arcsec))
+
+            conn.commit()
+
+        except Exception as e:
+            logger.debug("Error caching NED info: %s", e)
+
+    def get_cached_ned_info(self, ra: float, dec: float,
+                            tolerance_arcmin: float = 0.1) -> Optional[Dict[str, Any]]:
+        """Retrieve cached NED redshift info for coordinates.
+
+        Returns:
+            Dict with redshift, ned_name, ned_separation_arcsec, or None
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            tolerance_deg = tolerance_arcmin / 60.0
+
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT redshift, ned_name, ned_separation_arcsec FROM galaxy_info
+                WHERE ABS(ra - ?) < ? AND ABS(dec - ?) < ?
+                  AND redshift IS NOT NULL
+                LIMIT 1
+            ''', (ra, tolerance_deg, dec, tolerance_deg))
+
+            row = cursor.fetchone()
+            if row and row[0] is not None:
+                return {
+                    'redshift': row[0],
+                    'ned_name': row[1] or '',
+                    'ned_separation_arcsec': row[2] or 0.0,
+                }
+            return None
+
+        except Exception as e:
+            logger.debug("Error retrieving cached NED info: %s", e)
             return None
 
     def cache_merged_alerts(self, merged_df: pd.DataFrame):

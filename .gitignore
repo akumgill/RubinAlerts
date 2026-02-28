@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+Untitled*.ipynb
+
+# SQLite caches
+*.db
+*.sqlite
+
+# Generated data (CSVs from notebook runs)
+notebooks/type_ia_*.csv
+notebooks/classifications_*.csv
+
+# Cache directories
+cache/data/
+notebooks/cache/
+
+# Credentials
+.env
+*.credentials
+
+# ALeRCE usecases repo (external clone)
+usecases/
+
+# Scratch files
+foo.chat
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

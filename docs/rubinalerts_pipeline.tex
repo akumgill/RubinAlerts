@@ -1,0 +1,806 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds}
+\usepackage{listings}
+\usepackage{natbib}
+\usepackage{caption}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!70!black,
+}
+
+\lstset{
+    basicstyle=\small\ttfamily,
+    keywordstyle=\color{blue!70!black},
+    commentstyle=\color{green!50!black},
+    stringstyle=\color{red!70!black},
+    frame=single,
+    breaklines=true,
+    columns=fullflexible,
+}
+
+\title{\textbf{RubinAlerts}: A Multi-Broker Pipeline for Type~Ia Supernova\\
+Discovery and Spectroscopic Follow-Up Planning\\
+in Rubin Observatory Deep Drilling Fields}
+
+\author{C.~Stubbs}
+
+\date{February 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We describe \textsc{RubinAlerts}, a pipeline for discovering, aggregating,
+and prioritizing Type~Ia supernova (SN~Ia) candidates in the Rubin
+Observatory Legacy Survey of Space and Time (LSST) Deep Drilling Fields
+(DDFs).  The system queries three independent alert brokers---ANTARES,
+ALeRCE (ZTF), and ALeRCE-LSST---cross-matches their detections,
+deduplicates sources, screens against known variable star catalogs, and
+produces a ranked list of SN~Ia candidates.  Light curve peak fitting
+using inverted-parabola models in flux space provides estimated times of
+peak brightness and peak apparent magnitudes.  A two-dimensional merit
+function combining temporal proximity to peak and apparent brightness
+enables automated generation of prioritized spectroscopic follow-up
+target lists for the Magellan telescopes at Las Campanas Observatory.
+This document describes the pipeline architecture, algorithms, data
+structures, and current implementation status.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%% =========================================================================
+\section{Introduction}
+\label{sec:intro}
+%% =========================================================================
+
+Type~Ia supernovae (SNe~Ia) serve as standardizable candles for
+measuring cosmological distances.  The Vera C.\ Rubin Observatory's
+LSST will discover thousands of SNe~Ia in its Deep Drilling Fields,
+observed with a cadence of $\sim$3--5~days in multiple optical bands
+($ugrizy$).  However, photometric discovery alone is insufficient for
+precision cosmology: spectroscopic classification and redshift
+measurement are essential, and telescope time on facilities such as the
+Magellan 6.5\,m telescopes is limited.
+
+The challenge is therefore one of \emph{triage}: given hundreds of
+photometric SN candidates discovered each night, which ones should
+receive scarce spectroscopic follow-up resources?  The answer depends on
+(1)~the probability that the candidate is a genuine SN~Ia rather than a
+contaminant, (2)~its brightness relative to the spectroscopic
+sensitivity limit, and (3)~its temporal phase relative to maximum
+light---spectra obtained near peak are most valuable for classification
+and cosmological standardization.
+
+\textsc{RubinAlerts} addresses this by aggregating classifications from
+multiple alert brokers, fitting light curves to estimate peak
+brightness and timing, and computing a merit function that encodes the
+scientific value of observing each candidate on a given night.  The
+output is a prioritized, observatory-ready target list in the native
+Magellan catalog format.
+
+\subsection{Deep Drilling Fields}
+
+The pipeline targets the seven fields listed in
+Table~\ref{tab:ddf_fields}, comprising the six Rubin LSST DDFs plus the
+M49 (NGC~4472) field in the Virgo Cluster.  Each field is searched
+within a 1.75\degr\ radius, matching the LSST field of view
+($\sim$3.5\degr\ diameter).
+
+\begin{table}[h]
+\centering
+\caption{Target fields and their properties.  The ``ZTF'' column
+indicates whether the field falls within the Zwicky Transient Facility
+footprint (Dec~$\gtrsim -30\degr$).}
+\label{tab:ddf_fields}
+\begin{tabular}{lrrcc}
+\toprule
+Field & RA (deg) & Dec (deg) & Search radius & ZTF coverage \\
+\midrule
+COSMOS   & 150.11 & $+2.23$  & 1.75\degr & Yes \\
+XMM-LSS  &  35.57 & $-4.82$  & 1.75\degr & Yes \\
+ECDFS    &  52.98 & $-28.12$ & 1.75\degr & Marginal \\
+ELAIS-S1 &   9.45 & $-44.02$ & 1.75\degr & No \\
+EDFS\_a  &  58.90 & $-49.32$ & 1.75\degr & No \\
+EDFS\_b  &  63.60 & $-47.60$ & 1.75\degr & No \\
+M49      & 187.44 & $+8.00$  & 1.75\degr & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+%% =========================================================================
+\section{Pipeline Architecture}
+\label{sec:architecture}
+%% =========================================================================
+
+Figure~\ref{fig:pipeline} shows the end-to-end data flow.  The pipeline
+is implemented in Python and orchestrated through a Jupyter notebook
+(\texttt{supernova\_monitor.ipynb}), with reusable logic organized into
+modules under the \texttt{core/}, \texttt{broker\_clients/},
+\texttt{cache/}, \texttt{host\_galaxy/}, and \texttt{utils/}
+directories.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    node distance=0.8cm and 1.2cm,
+    block/.style={rectangle, draw, fill=blue!8, text width=3.2cm,
+                  minimum height=0.9cm, align=center, rounded corners=2pt,
+                  font=\small},
+    broker/.style={rectangle, draw, fill=orange!15, text width=2.5cm,
+                   minimum height=0.8cm, align=center, rounded corners=2pt,
+                   font=\small},
+    data/.style={rectangle, draw, fill=green!10, text width=3.2cm,
+                 minimum height=0.8cm, align=center, rounded corners=2pt,
+                 font=\small},
+    output/.style={rectangle, draw, fill=red!10, text width=3.2cm,
+                   minimum height=0.8cm, align=center, rounded corners=2pt,
+                   font=\small},
+    arrow/.style={-{Stealth[length=6pt]}, thick},
+]
+
+% Brokers
+\node[broker] (antares) {ANTARES\\(ZTF + Rubin)};
+\node[broker, right=of antares] (alerce) {ALeRCE\\(ZTF)};
+\node[broker, right=of alerce] (lsst) {ALeRCE-LSST\\(Rubin)};
+
+% Merge
+\node[block, below=1.2cm of alerce] (merge) {Cross-match \&\\Deduplicate};
+
+% Variable screening
+\node[block, below=of merge] (varscreen) {Variable Star\\Screening};
+
+% Classification filter
+\node[block, below=of varscreen] (classify) {$P(\mathrm{Ia})$ Filter\\+ Agreement};
+
+% Peak fitting
+\node[block, below=of classify] (peakfit) {Light Curve\\Peak Fitting};
+
+% Merit
+\node[block, below=of peakfit] (merit) {Merit Function\\$\mathcal{M}(\Delta t, m)$};
+
+% Cache
+\node[data, right=2.5cm of merit] (cache) {SQLite Cache\\(\texttt{peak\_fit\_targets})};
+
+% Magellan
+\node[output, below=of merit] (magellan) {Magellan Observing\\Catalog};
+
+% Arrows
+\draw[arrow] (antares.south) -- ++(0,-0.4) -| (merge.north);
+\draw[arrow] (alerce.south) -- (merge.north);
+\draw[arrow] (lsst.south) -- ++(0,-0.4) -| (merge.north);
+\draw[arrow] (merge) -- (varscreen);
+\draw[arrow] (varscreen) -- (classify);
+\draw[arrow] (classify) -- (peakfit);
+\draw[arrow] (peakfit) -- (merit);
+\draw[arrow] (merit) -- (cache);
+\draw[arrow] (cache) -- (magellan);
+\draw[arrow] (merit) -- (magellan);
+
+\end{tikzpicture}
+\caption{Pipeline data flow.  Three alert brokers feed into a
+cross-matching and deduplication stage, followed by variable star
+screening, classification filtering, light curve peak fitting, and merit
+scoring.  Results are cached in SQLite for consumption by the Magellan
+planning notebook.}
+\label{fig:pipeline}
+\end{figure}
+
+\subsection{Code Organization}
+
+The codebase is organized as follows:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Module & Purpose \\
+\midrule
+\texttt{supernova\_monitor.py} & Main orchestrator class \\
+\texttt{broker\_clients/antares\_client.py} & ANTARES broker interface \\
+\texttt{broker\_clients/alerce\_client.py} & ALeRCE interface (ZTF \& LSST modes) \\
+\texttt{broker\_clients/atlas\_client.py} & ATLAS forced photometry \\
+\texttt{core/alert\_aggregator.py} & Cross-match, deduplicate, merge \\
+\texttt{core/variable\_screen.py} & Known variable star screening \\
+\texttt{core/ddf\_fields.py} & DDF field definitions \\
+\texttt{core/peak\_fitting.py} & Light curve peak fitting \\
+\texttt{core/magellan\_planning.py} & Magellan target planning (planned) \\
+\texttt{cache/alert\_cache.py} & SQLite caching layer \\
+\texttt{host\_galaxy/morphology\_filter.py} & Galaxy morphology filtering \\
+\texttt{utils/plotting.py} & Light curve visualization \\
+\texttt{utils/coordinates.py} & Coordinate utilities \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+%% =========================================================================
+\section{Data Sources}
+\label{sec:data_sources}
+%% =========================================================================
+
+The pipeline queries three independent alert brokers, each providing
+different coverage, classifiers, and data products.
+
+\subsection{ANTARES}
+
+ANTARES\footnote{\url{https://antares.noirlab.edu/}} ingests both ZTF
+and (limited) Rubin alert streams.  The pipeline performs cone searches
+of each DDF field (1.75\degr\ radius) and filters for loci with
+supernova-related tags (\texttt{superphot\_plus\_classified},
+\texttt{SN\_candies}, \texttt{high\_amplitude\_transient\_candidate}).
+
+ANTARES does not provide a trained SN~Ia classifier.  Instead, the
+pipeline computes a heuristic proxy $P(\mathrm{Ia})$ based on the
+star/galaxy score (\texttt{ztf\_sgscore1}) and light curve duration.
+This proxy is \textbf{capped at 0.50} to prevent ANTARES-only
+detections from dominating the ranking:
+\begin{equation}
+P(\mathrm{Ia})_{\mathrm{ANTARES}} = \min\!\left(
+0.50,\; f(\texttt{sgscore}, \texttt{duration})\right).
+\end{equation}
+
+\subsection{ALeRCE (ZTF)}
+
+ALeRCE\footnote{\url{https://alerce.online/}} processes ZTF alerts
+through a random-forest stamp classifier
+(\texttt{lc\_classifier\_BHRF\_forced\_phot}, version~2.1.0) trained on
+labeled ZTF data.  It outputs per-object probabilities for SN~Ia,
+SN~II, SN~Ib/c, and SLSN classes.  Coverage is limited to the ZTF
+footprint (Dec~$\gtrsim -30\degr$), so the three southern DDFs
+(ELAIS-S1, EDFS\_a, EDFS\_b) are not covered.
+
+\subsection{ALeRCE-LSST}
+
+ALeRCE also processes Rubin/LSST alerts through a separate stamp
+classifier (\texttt{stamp\_classifier\_rubin}) that classifies objects
+into five categories: SN, AGN, variable star, asteroid, and bogus.
+Crucially, this classifier \textbf{does not sub-classify SN types}: a
+high $P(\mathrm{SN})$ indicates a likely supernova but does not
+distinguish Type~Ia from Type~II or Ib/c.
+
+\paragraph{Known limitation.} The ALeRCE LSST API does not correctly
+handle cone-search queries (returns empty results).  The pipeline works
+around this by querying globally for all SN-classified objects and
+filtering locally by DDF coordinates using \texttt{astropy}.
+
+ALeRCE-LSST provides the richest Rubin photometry: multi-epoch
+$ugrizy$ light curves with both alert-triggered detections and forced
+photometry at the object position.
+
+\begin{table}[h]
+\centering
+\caption{Summary of alert broker properties.}
+\label{tab:brokers}
+\begin{tabular}{lcccl}
+\toprule
+Broker & Survey & Dec limit & Classifier & $P(\mathrm{Ia})$ range \\
+\midrule
+ANTARES       & ZTF + Rubin & $\gtrsim -30\degr$ (ZTF) & Heuristic proxy & 0.05--0.50 \\
+ALeRCE (ZTF)  & ZTF         & $\gtrsim -30\degr$       & RF stamp classifier & 0.0--1.0 \\
+ALeRCE-LSST   & Rubin       & All-sky                  & Rubin stamp classifier & 0.0--1.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+%% =========================================================================
+\section{Alert Aggregation}
+\label{sec:aggregation}
+%% =========================================================================
+
+The \texttt{AlertAggregator} class (\texttt{core/alert\_aggregator.py})
+merges detections from all three brokers into a single, deduplicated
+candidate list.
+
+\subsection{Cross-Matching and Deduplication}
+
+Objects from different brokers are matched using two criteria:
+\begin{enumerate}
+\item \textbf{Coordinate proximity:} Two detections are considered the
+same astrophysical source if their angular separation is
+$\leq 1\arcsec$ (converted to degrees: $1/3600 \approx
+0.000278\degr$).
+\item \textbf{Shared identifiers:} Objects sharing a ZTF
+\texttt{object\_id} across brokers are merged regardless of coordinate
+offset.
+\end{enumerate}
+
+For each unique source, the pipeline creates a merged record retaining
+broker-specific identifiers (\texttt{object\_id\_ANTARES},
+\texttt{object\_id\_ALeRCE}, \texttt{object\_id\_ALeRCE-LSST}),
+classification probabilities, and quality diagnostics.
+
+\subsection{Probability Normalization}
+
+Each broker's classification probability is normalized to a common
+$P(\mathrm{Ia})$ scale:
+\begin{itemize}
+\item \textbf{ALeRCE (ZTF):} Direct ML probability used as-is.
+\item \textbf{ALeRCE-LSST:} $P(\mathrm{SN})$ used as a proxy for
+$P(\mathrm{Ia})$, acknowledging the lack of subtype discrimination.
+\item \textbf{ANTARES:} Heuristic proxy capped at 0.50 (see
+\S\ref{sec:data_sources}).
+\end{itemize}
+
+\subsection{Agreement Scoring}
+
+For objects detected by multiple brokers, the pipeline computes
+aggregate statistics across all available $P(\mathrm{Ia})$ values:
+\begin{align}
+\bar{P} &= \frac{1}{N}\sum_{i=1}^{N} P_i(\mathrm{Ia}), \\
+\sigma_P &= \mathrm{std}(P_1, \ldots, P_N).
+\end{align}
+
+An agreement score is assigned based on $\sigma_P$:
+\begin{equation}
+\mathrm{Agreement} =
+\begin{cases}
+1.0 & \text{if } \sigma_P < 0.1 \quad \text{(high)}, \\
+0.5 & \text{if } 0.1 \leq \sigma_P < 0.25 \quad \text{(moderate)}, \\
+0.0 & \text{if } \sigma_P \geq 0.25 \quad \text{(low)}.
+\end{cases}
+\end{equation}
+
+\subsection{Variable Star Screening}
+
+The \texttt{VariableScreener} class cross-matches candidates against
+catalogs of 13{,}749 known variable stars compiled from Gaia~DR3 and
+the AAVSO Variable Star Index (VSX), distributed across the six Rubin
+DDFs.  The matching radius is 2\arcsec.  Matched candidates are flagged
+with \texttt{known\_variable = True} and excluded from the SN~Ia
+candidate list.
+
+
+%% =========================================================================
+\section{Rubin Difference-Imaging Photometry}
+\label{sec:photometry}
+%% =========================================================================
+
+ALeRCE-LSST photometry is derived from Rubin \emph{difference imaging}:
+each science image is subtracted from a co-added reference template, and
+point-spread function (PSF) photometry is performed on the residual.
+
+\subsection{Flux Representation}
+
+The difference-image flux (\texttt{psfFlux}) is reported in
+\textbf{nanoJanskys} (nJy) and represents the flux difference
+$f_{\mathrm{sci}} - f_{\mathrm{tmpl}}$:
+\begin{itemize}
+\item $f > 0$: source is brighter than template (transient brightening).
+\item $f < 0$: source is fainter than template (fading below baseline).
+\item $f = 0$: source matches the template exactly.
+\end{itemize}
+
+The science-image flux (\texttt{scienceFlux}) is also available for
+alert-triggered detections (but not for forced photometry) and is always
+positive for real sources.
+
+\subsection{Magnitude Conversion}
+
+For positive flux values, the AB magnitude is:
+\begin{equation}
+\label{eq:mag_conversion}
+m = -2.5 \log_{10}(f_{\mathrm{nJy}}) + 31.4,
+\end{equation}
+with uncertainty propagated as:
+\begin{equation}
+\label{eq:mag_err}
+\sigma_m = \frac{2.5}{\ln 10} \cdot \frac{\sigma_f}{f}.
+\end{equation}
+
+\paragraph{Negative flux limitation.} Points with $f \leq 0$ cannot
+be converted to magnitudes and are dropped in magnitude-space
+representations.  This truncates the light curve tail, which is why all
+fitting in this pipeline is performed in flux space.
+
+\subsection{Forced Photometry}
+
+Forced photometry provides flux measurements at the object position even
+when the source is not detected above threshold, giving more complete
+temporal coverage than alert-triggered detections alone.  However, forced
+photometry only provides \texttt{psfFlux} (difference flux); the
+\texttt{scienceFlux} is not available.
+
+
+%% =========================================================================
+\section{Light Curve Peak Fitting}
+\label{sec:peak_fitting}
+%% =========================================================================
+
+The \texttt{core/peak\_fitting.py} module estimates the time of peak
+brightness and peak apparent magnitude for each candidate.  Two methods
+are available.
+
+\subsection{Inverted Parabola Model}
+
+Near maximum light, the flux light curve of a SN~Ia is approximately
+parabolic.  We fit an inverted parabola in flux space:
+\begin{equation}
+\label{eq:parabola}
+f(t) = f_{\mathrm{peak}} - a\,(t - t_0)^2,
+\end{equation}
+where $f_{\mathrm{peak}}$ is the peak flux (nJy), $t_0$ is the time of
+peak (MJD), and $a > 0$ is the curvature parameter.
+
+The fit is performed independently per band using
+\texttt{scipy.optimize.curve\_fit} with the flux uncertainties as
+weights (absolute sigma).  Initial guesses are derived from the data:
+$f_{\mathrm{peak}}^{(0)} = \max(f)$, $t_0^{(0)} = t(\max f)$,
+$a^{(0)} = 1.0$.
+
+\paragraph{Working in flux space.} Fitting in flux space rather than
+magnitude space has three advantages: (1)~negative difference-imaging
+flux values are handled naturally; (2)~the parabola is a more physical
+model near peak in linear flux than in logarithmic magnitudes; (3)~there
+are no singularities from the $\log_{10}$ transform.
+
+\subsection{Goodness of Fit}
+
+The reduced chi-squared is:
+\begin{equation}
+\chi^2_\nu = \frac{1}{\nu} \sum_{i=1}^{N}
+\left(\frac{f_i - f(t_i)}{\sigma_{f,i}}\right)^2,
+\end{equation}
+where $\nu = \max(N-3, 1)$ is the number of degrees of freedom (three
+free parameters: $f_{\mathrm{peak}}$, $t_0$, $a$).
+
+\subsection{Fit Status Flags}
+
+Each per-band fit is assigned a status flag:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Status & Criterion \\
+\midrule
+\texttt{ok} & $N \geq 4$ and $\chi^2_\nu \leq 10$ \\
+\texttt{underdetermined} & $N = 3$ (exactly constrained) \\
+\texttt{poor\_fit} & $N \geq 4$ and $\chi^2_\nu > 10$ \\
+\texttt{insufficient\_data} & $N < 3$ \\
+\texttt{fit\_failed} & Optimizer did not converge \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Band Priority}
+
+For the ``headline'' peak estimate reported per candidate, the best band
+is selected from the priority list:
+\begin{equation}
+r > g > i > z > y > u.
+\end{equation}
+The $r$-band is prioritized because it is closest to rest-frame $B$-band
+for SN~Ia at the typical DDF redshift range ($z \sim 0.1$--$0.4$).  The
+first band with a successful fit (status \texttt{ok} or
+\texttt{underdetermined}) is selected.
+
+\subsection{Optional: SALT2 Template Fitting}
+
+If the \texttt{sncosmo} package is installed, a multi-band SALT2
+template fit is also available.  The SALT2 model parameterizes SN~Ia
+light curves as:
+\begin{equation}
+f(t, \lambda) = x_0 \left[ M_0(t, \lambda) + x_1\, M_1(t, \lambda)
+\right] \times \exp\!\left[ c\, \mathrm{CL}(\lambda) \right],
+\end{equation}
+where $x_0$ is the amplitude, $x_1$ is the stretch parameter
+(light-curve width), $c$ is the color parameter, $M_0$ and $M_1$ are
+the template spectral surfaces, and $\mathrm{CL}(\lambda)$ is the color
+law.  The fit simultaneously uses all LSST bands ($g$, $r$, $i$, $z$,
+$y$, $u$ mapped to \texttt{sncosmo} band names \texttt{lsstg},
+\texttt{lsstr}, etc.) and requires $\geq 5$ data points across $\geq 2$
+bands.
+
+The SALT2 fit returns $t_0$ (time of $B$-band maximum), $x_1$
+(stretch), $c$ (color), the peak rest-frame $B$-band magnitude, and
+the redshift $z$ (which can float or be fixed if a spectroscopic
+redshift is known).
+
+
+%% =========================================================================
+\section{Merit Function for Spectroscopic Follow-Up}
+\label{sec:merit}
+%% =========================================================================
+
+Given the fitted peak time $t_0$ and peak magnitude $m$, we define a
+merit function that encodes the scientific value of spectroscopically
+observing a candidate on a given night:
+\begin{equation}
+\label{eq:merit}
+\boxed{\mathcal{M} = W_t(\Delta t) \times W_m(m),}
+\end{equation}
+where $\Delta t = t_{\mathrm{now}} - t_0$ is the time since peak (days,
+positive means post-peak), and $m$ is the estimated peak apparent
+magnitude.
+
+\subsection{Time Weight}
+
+The time weight is a Gaussian centered on peak:
+\begin{equation}
+\label{eq:wt}
+W_t = \exp\!\left(-\frac{\Delta t^2}{2\tau^2}\right),
+\end{equation}
+with $\tau = 10$~days by default.  This gives:
+\begin{center}
+\begin{tabular}{rc}
+\toprule
+$|\Delta t|$ (days) & $W_t$ \\
+\midrule
+0 & 1.000 \\
+5 & 0.882 \\
+10 & 0.607 \\
+15 & 0.325 \\
+20 & 0.135 \\
+30 & 0.011 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The Gaussian is symmetric: pre-peak observations (rising light curve)
+receive the same weight as post-peak.  This is appropriate because
+pre-peak spectra are highly valuable for constraining explosion physics,
+while post-peak spectra within $\sim$2~weeks are standard for
+classification.
+
+\subsection{Magnitude Weight}
+
+The magnitude weight is a Gaussian in apparent magnitude space:
+\begin{equation}
+\label{eq:wm}
+W_m = \exp\!\left(-\frac{(m - m_{\mathrm{opt}})^2}{\sigma_m^2}\right),
+\end{equation}
+with default parameters:
+\begin{itemize}
+\item $m_{\mathrm{opt}} = 20.5$ --- the optimal magnitude for Magellan
+6.5\,m spectroscopy.  At this brightness, a SN~Ia at $z \sim 0.1$--0.15
+yields a classification-quality spectrum in $\sim$20--40 minutes with
+LDSS3C or IMACS.
+\item $\sigma_m = \frac{m_{\mathrm{faint}} - m_{\mathrm{bright}}}{4} =
+\frac{23.0 - 18.0}{4} = 1.25$~mag --- chosen so that the weight spans
+the useful magnitude range ($\sim$18--23~mag) with reasonable falloff.
+\end{itemize}
+
+\subsection{Combined Merit Surface}
+
+The product $\mathcal{M} = W_t \times W_m$ defines a two-dimensional
+surface over $(\Delta t, m)$ space.  The maximum merit
+($\mathcal{M} = 1$) occurs at $\Delta t = 0$, $m = m_{\mathrm{opt}}$.
+Objects far from peak, or too bright (nearby, less cosmologically
+interesting) or too faint (requiring prohibitively long exposures) are
+deprioritized.
+
+Candidates with $\texttt{peak\_mjd} = \mathrm{NaN}$ or
+$\texttt{peak\_mag} = \mathrm{NaN}$ (due to insufficient photometry or
+fit failure) receive $\mathcal{M} = \mathrm{NaN}$ and are placed at
+the bottom of the target list.
+
+All merit function parameters ($\tau$, $m_{\mathrm{opt}}$,
+$m_{\mathrm{bright}}$, $m_{\mathrm{faint}}$) are configurable to
+accommodate different instruments and science goals.
+
+
+%% =========================================================================
+\section{Magellan Observing Plan Generation}
+\label{sec:magellan}
+%% =========================================================================
+
+The final stage of the pipeline generates a target catalog in the native
+Magellan Telescope Control System (TCS) format for spectroscopic
+follow-up.
+
+\subsection{Observability Constraints}
+
+For a specified UT observing date, the pipeline computes target
+observability from Las Campanas Observatory:
+\begin{center}
+\begin{tabular}{ll}
+Latitude:  & $-29.0146\degr$ \\
+Longitude: & $-70.6926\degr$ \\
+Altitude:  & 2516\,m \\
+\end{tabular}
+\end{center}
+
+Using \texttt{astropy.coordinates.AltAz} and
+\texttt{astropy.coordinates.get\_sun}, the pipeline:
+\begin{enumerate}
+\item Computes nautical twilight boundaries (Sun altitude $< -12\degr$).
+\item Creates a time grid at 15-minute intervals spanning the dark hours.
+\item For each target, computes altitude at each grid point.
+\item Retains targets that spend at least a configurable minimum time
+(default: 1~hour) above the airmass limit (default: airmass $< 2.0$,
+corresponding to altitude $> 30\degr$).
+\end{enumerate}
+
+\subsection{Target Prioritization}
+
+Observable targets are sorted by Right Ascension (ascending) for
+efficient telescope slewing.  Within the catalog, comment lines encode
+the merit score, peak magnitude, time from peak, DDF field, and fit
+status for each target, enabling the observer to make informed decisions
+about which targets to prioritize during the night.
+
+\subsection{Catalog Format}
+
+The Magellan TCS requires a 16-field whitespace-separated format:
+
+\begin{center}
+\small
+\begin{tabular}{rlp{7cm}}
+\toprule
+Field & Name & Description \\
+\midrule
+1  & Reference number & Sequential integer \\
+2  & Object name & Alphanumeric $+$ \texttt{+-.\textunderscore} only \\
+3  & RA & \texttt{hh:mm:ss.s} (J2000) \\
+4  & Dec & \texttt{$\pm$dd:mm:ss} (J2000) \\
+5  & Equinox & \texttt{2000.0} \\
+6  & PM$_\alpha$ & 0.000 (no proper motion) \\
+7  & PM$_\delta$ & 0.000 \\
+8  & Rotator angle & Instrument-dependent (degrees) \\
+9  & Rotator mode & \texttt{GRV}, \texttt{EQU}, \texttt{HRZ}, or \texttt{OFF} \\
+10--12 & Guide probe 1 & RA, Dec, equinox (zeros if unused) \\
+13--15 & Guide probe 2 & RA, Dec, equinox (zeros if unused) \\
+16 & Epoch & 0.000 (no proper motion) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Instrument presets (LDSS3C, IMACS, MagE, FIRE) provide default rotator
+angles and modes.  Guide probe fields are set to zero (no preselected
+guide stars).
+
+
+%% =========================================================================
+\section{Data Schema}
+\label{sec:schema}
+%% =========================================================================
+
+The pipeline uses a SQLite database (\texttt{cache/data/alerts\_cache.db})
+for caching intermediate results and bridging between the discovery
+notebook and the Magellan planning notebook.
+
+\subsection{Existing Tables}
+
+\paragraph{\texttt{alerts}} Caches raw broker query results.  Columns:
+\texttt{object\_id} (TEXT), \texttt{broker} (TEXT), \texttt{ra} (REAL),
+\texttt{dec} (REAL), \texttt{discovery\_date} (TEXT),
+\texttt{classification} (JSON), \texttt{metadata} (JSON),
+\texttt{cached\_at} (TIMESTAMP).  Unique on
+\texttt{(object\_id, broker)}.
+
+\paragraph{\texttt{galaxy\_info}} Caches galaxy morphology and
+photometry from catalog queries.  Columns: \texttt{ra}, \texttt{dec},
+\texttt{morphology}, \texttt{catalog} (JSON), \texttt{redshift},
+\texttt{magnitude\_g/r/i/z}.  Unique on \texttt{(ra, dec)}.
+
+\paragraph{\texttt{merged\_alerts}} Caches deduplicated/merged alerts.
+Columns: \texttt{unique\_id}, \texttt{ra}, \texttt{dec},
+\texttt{brokers\_detected}, per-broker classification JSON,
+\texttt{last\_updated}.
+
+\subsection{New Table: \texttt{peak\_fit\_targets}}
+
+This table serves as the intermediate data product between the main
+pipeline and the Magellan planning notebook:
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+Column & Type & Description \\
+\midrule
+\texttt{object\_id}              & TEXT  & Primary identifier \\
+\texttt{object\_id\_alerce\_lsst}& TEXT  & ALeRCE-LSST ID \\
+\texttt{object\_id\_antares}     & TEXT  & ANTARES ID \\
+\texttt{ddf\_field}              & TEXT  & DDF field name \\
+\texttt{ra}, \texttt{dec}        & REAL  & J2000 coordinates (deg) \\
+\texttt{mean\_ia\_prob}          & REAL  & Mean $P(\mathrm{Ia})$ \\
+\texttt{brokers\_detected}       & TEXT  & Broker names \\
+\texttt{peak\_mjd}               & REAL  & Fitted peak time (MJD) \\
+\texttt{peak\_mag}               & REAL  & Fitted peak magnitude (AB) \\
+\texttt{peak\_mag\_err}          & REAL  & Magnitude uncertainty \\
+\texttt{peak\_band}              & TEXT  & Best-fit band \\
+\texttt{peak\_fit\_status}       & TEXT  & Fit quality flag \\
+\texttt{mjd\_now}                & REAL  & MJD when merit computed \\
+\texttt{delta\_t}                & REAL  & $t_{\mathrm{now}} - t_0$ (days) \\
+\texttt{merit}                   & REAL  & Merit score (0--1) \\
+\texttt{cached\_at}              & TIMESTAMP & Write timestamp \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The table uses \texttt{INSERT OR REPLACE} keyed on
+\texttt{object\_id}, so re-running the main pipeline overwrites stale
+entries.
+
+
+%% =========================================================================
+\section{Current Status and Future Work}
+\label{sec:status}
+%% =========================================================================
+
+\subsection{Implemented}
+
+\begin{itemize}
+\item Multi-broker alert ingestion (ANTARES, ALeRCE-ZTF, ALeRCE-LSST)
+with DDF-targeted queries and local caching.
+\item Cross-matching and deduplication across brokers (1\arcsec\
+coordinate tolerance $+$ shared ZTF ID matching).
+\item Variable star screening against 13{,}749 known variables from
+Gaia~DR3 and VSX.
+\item Classification filtering with configurable $P(\mathrm{Ia})$
+threshold, multi-broker agreement scoring, and minimum broker count.
+\item Optional elliptical host galaxy morphology filtering via
+cross-match with SDSS and Pan-STARRS galaxy catalogs.
+\item ATLAS forced photometry enrichment (cyan and orange bands) for
+independent light curve validation.
+\item Flux-space and magnitude-space light curve visualization with
+per-band colors and survey-specific markers.
+\item LSST alert stamp display (Science/Template/Difference cutouts).
+\item Interactive human-in-the-loop visual classification tool
+(SN/variable/bogus labels saved to CSV).
+\item Inverted-parabola light curve peak fitting in flux space with
+per-band fits, band-priority selection, and batch processing.
+\item Optional SALT2 template fitting (gated by \texttt{sncosmo}
+availability).
+\item CSV export of candidate tables with timestamps.
+\end{itemize}
+
+\subsection{In Progress}
+
+\begin{itemize}
+\item SQLite caching of peak-fit targets with merit scores
+(\texttt{peak\_fit\_targets} table).
+\item Merit function implementation and integration into the main
+pipeline notebook.
+\end{itemize}
+
+\subsection{Planned}
+
+\begin{itemize}
+\item Magellan observing catalog generation with observability filtering
+from Las Campanas, RA-ordered target lists, and instrument-specific
+rotator presets.
+\item Standalone Magellan planning notebook reading from the SQLite
+cache.
+\item Airmass charts and sky-map visualizations for observing night
+planning.
+\item Exposure time estimation based on target magnitude and desired
+signal-to-noise ratio.
+\end{itemize}
+
+\subsection{Known Limitations}
+
+\begin{enumerate}
+\item ALeRCE-LSST cone search API is broken; global query with local
+filtering is used as a workaround.
+\item LSST stamp classifier does not sub-classify SN types ($P(\mathrm{SN})$
+only, not $P(\mathrm{Ia})$).
+\item ANTARES $P(\mathrm{Ia})$ is a heuristic proxy, not an ML
+classifier, capped at 0.50.
+\item Negative difference-imaging flux is lost in magnitude-space
+representations; all fitting is performed in flux space.
+\item The 1\arcsec\ cross-match tolerance may occasionally merge
+distinct sources in crowded fields.
+\item LSST \texttt{scienceFlux} is only available for alert detections,
+not forced photometry.
+\item The inverted-parabola model is only valid near peak; light curves
+with significant pre-peak rise or post-peak plateau structure
+(e.g., $i$-band secondary maximum) may yield \texttt{poor\_fit} status.
+\end{enumerate}
+
+
+\end{document}

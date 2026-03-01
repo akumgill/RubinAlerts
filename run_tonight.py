@@ -162,58 +162,6 @@ def fetch_ztf_photometry(ra, dec, radius_arcsec=2.0):
         return None
 
 
-def fetch_atlas_photometry(ra, dec, mjd_min=None):
-    """Fetch ATLAS forced photometry, return in nJy flux space.
-
-    ATLAS provides flux in microJansky (uJy). Convert: nJy = uJy * 1000.
-    """
-    if not HAS_ATLAS:
-        return None
-
-    try:
-        atlas = AtlasClient()
-        if not atlas.available:
-            return None
-
-        phot = atlas.fetch_photometry(ra, dec, mjd_min=mjd_min)
-    except Exception as e:
-        logger.debug("ATLAS photometry fetch failed: %s", e)
-        return None
-
-    frames = []
-    atlas_band_names = {'c': 'ATLAS-c', 'o': 'ATLAS-o'}
-    for filt, fdf in phot.items():
-        if fdf is None or len(fdf) == 0:
-            continue
-
-        uJy = fdf['uJy'].values.astype(float)
-        duJy = fdf['duJy'].values.astype(float)
-        mjd_vals = fdf['MJD'].values.astype(float)
-
-        # Convert µJy to nJy
-        flux_nJy = uJy * 1000.0
-        flux_err_nJy = duJy * 1000.0
-
-        # Magnitudes (only for positive flux)
-        valid = uJy > 0
-        mag = np.full(len(fdf), np.nan)
-        mag_err = np.full(len(fdf), np.nan)
-        mag[valid] = -2.5 * np.log10(uJy[valid]) + 23.9  # AB ZP for µJy
-        mag_err[valid] = 1.0857 * duJy[valid] / uJy[valid]
-
-        frames.append(pd.DataFrame({
-            'mjd': mjd_vals, 'flux': flux_nJy, 'flux_err': flux_err_nJy,
-            'magnitude': mag, 'mag_err': mag_err,
-            'band': atlas_band_names.get(filt, filt),
-            'survey': 'ATLAS', 'source': 'forced_phot',
-        }))
-
-    if frames:
-        df = pd.concat(frames, ignore_index=True).sort_values('mjd').reset_index(drop=True)
-        logger.info("  ATLAS: %d points", len(df))
-        return df
-    return None
-
 
 def combine_photometry(fink_lc, ztf_lc=None, atlas_lc=None):
     """Combine light curves from multiple surveys into a single DataFrame.
@@ -432,17 +380,61 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
     return screened
 
 
+ATLAS_BRIGHT_MAG_CUT = 20.0  # Only fetch ATLAS for candidates brighter than this
+
+
+def _atlas_filter_to_nJy(by_filter):
+    """Convert ATLAS per-filter photometry dict to unified nJy DataFrame.
+
+    Parameters
+    ----------
+    by_filter : dict with keys 'c' and/or 'o', values are ATLAS DataFrames
+                with columns MJD, uJy, duJy, etc.
+
+    Returns
+    -------
+    DataFrame in standard photometry format (mjd, flux, flux_err, band, ...)
+    or None if no data.
+    """
+    atlas_band_names = {'c': 'ATLAS-c', 'o': 'ATLAS-o'}
+    frames = []
+    for filt, fdf in by_filter.items():
+        if fdf is None or len(fdf) == 0:
+            continue
+        uJy = fdf['uJy'].values.astype(float)
+        duJy = fdf['duJy'].values.astype(float)
+        mjd_vals = fdf['MJD'].values.astype(float)
+
+        flux_nJy = uJy * 1000.0
+        flux_err_nJy = duJy * 1000.0
+
+        valid = uJy > 0
+        mag = np.full(len(fdf), np.nan)
+        mag_err = np.full(len(fdf), np.nan)
+        mag[valid] = -2.5 * np.log10(uJy[valid]) + 23.9
+        mag_err[valid] = 1.0857 * duJy[valid] / uJy[valid]
+
+        frames.append(pd.DataFrame({
+            'mjd': mjd_vals, 'flux': flux_nJy, 'flux_err': flux_err_nJy,
+            'magnitude': mag, 'mag_err': mag_err,
+            'band': atlas_band_names.get(filt, filt),
+            'survey': 'ATLAS', 'source': 'forced_phot',
+        }))
+
+    if frames:
+        return pd.concat(frames, ignore_index=True).sort_values('mjd').reset_index(drop=True)
+    return None
+
+
 def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True):
     """Fetch light curves from all surveys and run peak fitting for each candidate.
 
-    For each candidate:
-    1. Get Fink/Rubin photometry (primary)
-    2. Optionally fetch ZTF photometry via ALeRCE (by position)
-    3. Optionally fetch ATLAS forced photometry (by position)
-    4. Combine all photometry into one light curve
-    5. Run parabola + multiband Villar fits on the combined data
+    Two-pass approach:
+      Pass 1: Fetch Fink/Rubin photometry for all candidates, identify bright ones.
+      Batch:  Submit bright candidates (any Rubin detection < 20 mag) to ATLAS
+              as a single batch, and fetch ZTF per-candidate.
+      Pass 2: Combine all photometry and run fits.
     """
-    results = {}
     dia_ids = candidates_df['diaObjectId'].unique()
     logger.info("Fitting %d candidates...", len(dia_ids))
 
@@ -454,31 +446,66 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
     # MJD lower bound for ATLAS queries (avoid fetching years of old data)
     atlas_mjd_min = mjd_now - 180  # 6 months back
 
+    # ---- Pass 1: Fetch Fink photometry and identify bright candidates ----
+    fink_data = {}  # did -> DataFrame
+    bright_for_atlas = []  # (did, ra, dec) for candidates brighter than cut
     for i, did in enumerate(dia_ids):
-        logger.info("[%d/%d] %s", i + 1, len(dia_ids), did)
-        ra, dec = coord_lookup.get(did, (np.nan, np.nan))
-
-        # --- Fink/Rubin photometry (primary) ---
+        logger.info("[%d/%d] Fink: %s", i + 1, len(dia_ids), did)
         fink_lc = fink.get_light_curve(str(did), include_forced=True)
         if fink_lc is None or len(fink_lc) == 0:
             logger.warning("  No Fink light curve")
             continue
+        fink_data[did] = fink_lc
 
-        # --- Supplementary surveys ---
+        # Check if any Rubin detection is brighter than the ATLAS cut
+        if fetch_atlas and 'magnitude' in fink_lc.columns:
+            mags = pd.to_numeric(fink_lc['magnitude'], errors='coerce')
+            brightest = mags.dropna().min()
+            if np.isfinite(brightest) and brightest < ATLAS_BRIGHT_MAG_CUT:
+                ra, dec = coord_lookup.get(did, (np.nan, np.nan))
+                if np.isfinite(ra) and np.isfinite(dec):
+                    bright_for_atlas.append((str(did), ra, dec))
+
+    logger.info("Fink photometry: %d/%d candidates have data", len(fink_data), len(dia_ids))
+
+    # ---- Batch ATLAS for bright candidates ----
+    atlas_data = {}  # did -> DataFrame (nJy format)
+    if fetch_atlas and bright_for_atlas and HAS_ATLAS:
+        logger.info("ATLAS: %d candidates brighter than %.1f mag — submitting batch",
+                     len(bright_for_atlas), ATLAS_BRIGHT_MAG_CUT)
+        try:
+            atlas_client = AtlasClient()
+            batch_phot = atlas_client.fetch_batch_photometry(
+                bright_for_atlas, mjd_min=atlas_mjd_min)
+            for oid, by_filter in batch_phot.items():
+                atlas_df = _atlas_filter_to_nJy(by_filter)
+                if atlas_df is not None and len(atlas_df) > 0:
+                    atlas_data[oid] = atlas_df
+            logger.info("ATLAS: %d/%d candidates returned photometry",
+                         len(atlas_data), len(bright_for_atlas))
+        except Exception as e:
+            logger.warning("ATLAS batch fetch failed: %s", e)
+    elif fetch_atlas and not bright_for_atlas:
+        logger.info("ATLAS: no candidates brighter than %.1f mag — skipping",
+                     ATLAS_BRIGHT_MAG_CUT)
+
+    # ---- Pass 2: Fetch ZTF, combine, and fit ----
+    results = {}
+    for i, did in enumerate(fink_data):
+        logger.info("[%d/%d] Fitting %s", i + 1, len(fink_data), did)
+        ra, dec = coord_lookup.get(did, (np.nan, np.nan))
+        fink_lc = fink_data[did]
+
+        # ZTF photometry (per-candidate, fast API query)
         ztf_lc = None
-        atlas_lc = None
-
         if fetch_ztf and np.isfinite(ra) and np.isfinite(dec):
             try:
                 ztf_lc = fetch_ztf_photometry(ra, dec)
             except Exception as e:
                 logger.debug("  ZTF fetch error: %s", e)
 
-        if fetch_atlas and np.isfinite(ra) and np.isfinite(dec):
-            try:
-                atlas_lc = fetch_atlas_photometry(ra, dec, mjd_min=atlas_mjd_min)
-            except Exception as e:
-                logger.debug("  ATLAS fetch error: %s", e)
+        # ATLAS photometry (from batch results)
+        atlas_lc = atlas_data.get(str(did))
 
         # --- Combine all photometry ---
         combined = combine_photometry(fink_lc, ztf_lc, atlas_lc)
@@ -719,6 +746,37 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
+        # --- Page 3: Delta-t vs Peak Magnitude, color-coded by merit ---
+        if len(summary_df) > 0:
+            valid = summary_df.dropna(subset=['peak_mag', 'delta_t'])
+            if len(valid) > 0:
+                fig, ax = plt.subplots(figsize=(8, 6))
+                merit_vals = valid['merit'].fillna(0).values
+                sc = ax.scatter(valid['delta_t'], valid['peak_mag'],
+                                c=merit_vals, cmap='YlOrRd', s=40, alpha=0.8,
+                                edgecolors='gray', linewidths=0.3,
+                                vmin=0, vmax=max(merit_vals.max(), 0.01))
+                cbar = plt.colorbar(sc, ax=ax, label='Merit Score')
+
+                # Annotate high-merit targets
+                high_merit = valid[valid['merit'] > 0.3]
+                for _, row in high_merit.iterrows():
+                    label = str(row['diaObjectId'])[-6:]  # last 6 digits
+                    ax.annotate(label, (row['delta_t'], row['peak_mag']),
+                                fontsize=6, alpha=0.7,
+                                xytext=(4, 4), textcoords='offset points')
+
+                ax.set_xlabel('Days Since Peak (negative = pre-peak)')
+                ax.set_ylabel('Peak Magnitude (AB)')
+                ax.invert_yaxis()  # brighter at top
+                ax.set_title(f'Discovery Space — {len(valid)} candidates with fits')
+                ax.axvline(0, color='gray', linestyle='--', alpha=0.4, label='Peak')
+                ax.legend(fontsize=8)
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
+
         # --- Remaining pages: light curve plots, 4 per page ---
         # Sort by merit (best first)
         ordered = summary_df.sort_values('merit', ascending=False, na_position='last')
@@ -871,13 +929,15 @@ def main():
         sys.exit(1)
 
     # --- Step 3: Fetch light curves and fit peaks ---
-    # (includes ZTF via ALeRCE and ATLAS forced photometry if available)
+    # ZTF: per-candidate ALeRCE queries; ATLAS: batch for bright candidates only
     do_ztf = not args.no_ztf
     do_atlas = not args.no_atlas
     if do_ztf:
         logger.info("ZTF photometry: %s", "enabled (via ALeRCE)" if HAS_ALERCE else "SKIPPED (alerce not installed)")
     if do_atlas:
-        logger.info("ATLAS photometry: %s", "enabled" if HAS_ATLAS else "SKIPPED (atlas_client not available)")
+        logger.info("ATLAS photometry: %s (batch, bright < %.1f mag only)",
+                     "enabled" if HAS_ATLAS else "SKIPPED (atlas_client not available)",
+                     ATLAS_BRIGHT_MAG_CUT)
     fit_results = fetch_and_fit(fink, candidates, mjd_now,
                                 fetch_ztf=do_ztf and HAS_ALERCE,
                                 fetch_atlas=do_atlas and HAS_ATLAS)

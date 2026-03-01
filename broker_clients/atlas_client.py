@@ -375,6 +375,96 @@ class AtlasClient:
         return df
 
     # ------------------------------------------------------------------
+    # Batch photometry retrieval (returns actual data per target)
+    # ------------------------------------------------------------------
+
+    def fetch_batch_photometry(self, targets: List[Tuple[str, float, float]],
+                               mjd_min: Optional[float] = None
+                               ) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """Batch fetch ATLAS photometry for multiple targets.
+
+        Submits coordinates in batches of 100 via the radeclist API,
+        polls all tasks in parallel, then downloads and returns the
+        actual per-filter photometry DataFrames for each target.
+
+        Parameters
+        ----------
+        targets : list of (object_id, ra, dec) tuples
+        mjd_min : optional MJD lower bound
+
+        Returns
+        -------
+        dict of object_id -> {'c': DataFrame, 'o': DataFrame}
+        """
+        if not self.available:
+            logger.warning("ATLAS credentials not configured; skipping batch fetch")
+            return {}
+
+        self._ensure_token()
+
+        # Map object_id -> (index, ra, dec) for batch submission
+        id_to_idx = {}
+        coords = []
+        for i, (oid, ra, dec) in enumerate(targets):
+            coords.append((i, float(ra), float(dec)))
+            id_to_idx[i] = oid
+
+        total = len(coords)
+        if total == 0:
+            return {}
+
+        n_batches = (total + ATLAS_BATCH_SIZE - 1) // ATLAS_BATCH_SIZE
+        logger.info("ATLAS batch photometry: %d targets in %d batch(es)",
+                     total, n_batches)
+
+        # Phase 1: Submit all batches
+        all_tasks = {}  # idx -> task_url
+        for batch_start in range(0, total, ATLAS_BATCH_SIZE):
+            batch = coords[batch_start:batch_start + ATLAS_BATCH_SIZE]
+            batch_num = batch_start // ATLAS_BATCH_SIZE + 1
+            logger.info("ATLAS: submitting batch %d/%d (%d targets)",
+                        batch_num, n_batches, len(batch))
+            try:
+                task_pairs = self._submit_batch(batch, mjd_min=mjd_min)
+                for idx, task_url in task_pairs:
+                    all_tasks[idx] = task_url
+            except Exception as e:
+                logger.warning("ATLAS batch %d submit failed: %s", batch_num, e)
+
+        if not all_tasks:
+            logger.warning("ATLAS: no tasks submitted successfully")
+            return {}
+
+        # Phase 2: Poll all tasks
+        logger.info("ATLAS: %d tasks queued, polling for results...", len(all_tasks))
+        result_urls = self._poll_all_tasks(all_tasks)
+        logger.info("ATLAS: %d/%d tasks returned results",
+                     len(result_urls), len(all_tasks))
+
+        # Phase 3: Download and parse results
+        photometry = {}  # object_id -> {filter: DataFrame}
+        for idx, result_url in result_urls.items():
+            oid = id_to_idx.get(idx)
+            if oid is None:
+                continue
+            try:
+                text_data = self._download_results(result_url)
+                phot_df = self._parse_data(text_data)
+                by_filter = self._split_by_filter(phot_df)
+                if by_filter:
+                    photometry[oid] = by_filter
+            except Exception as e:
+                logger.debug("ATLAS result download failed for %s: %s", oid, e)
+
+        # Phase 4: Cleanup
+        for task_url in all_tasks.values():
+            self._cleanup(task_url)
+
+        n_with = len(photometry)
+        logger.info("ATLAS batch complete: %d/%d targets have photometry", n_with, total)
+        return photometry
+
+    # ------------------------------------------------------------------
     # Parsing helpers
     # ------------------------------------------------------------------
 

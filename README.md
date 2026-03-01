@@ -1,276 +1,163 @@
-# Type Ia Supernova Monitor for Elliptical Galaxies
+# RubinAlerts — SN Ia Discovery and Magellan Follow-Up Pipeline
 
-A comprehensive Jupyter Lab notebook system for monitoring Type Ia supernovae in elliptical galaxies using multiple alert brokers.
+Automated pipeline for discovering Type Ia supernovae in the Rubin Observatory LSST Deep Drilling Fields and generating prioritized spectroscopic follow-up plans for Magellan.
 
-## Overview
+## How to Run
 
-This project monitors **ANTARES** and **ALeRCE** brokers to identify Type Ia supernova candidates in elliptical host galaxies. It provides:
-
-- **Broker Aggregation**: Queries and merges alerts from multiple sources
-- **Deduplication**: Cross-matches coordinates to identify the same objects across brokers
-- **Classification Comparison**: Compare supernova classifications from different brokers
-- **Galaxy Filtering**: Cross-matches with galaxy catalogs to identify elliptical hosts
-- **Interactive Visualization**: Examine light curves, postage stamps, and classifications
-- **Local Caching**: Minimizes API calls through persistent local storage
-
-## Quick Start
-
-### Installation
+### Nightly pipeline (command line)
 
 ```bash
-# Clone/navigate to project directory
-cd RubinAlerts
+# Generate tonight's observing plan for MJD 61100
+python run_tonight.py 61100
 
-# Install dependencies
+# With options
+python run_tonight.py 61100 --min-prob 0.3 --max-candidates 200
+
+# Skip ZTF or ATLAS supplementary photometry
+python run_tonight.py 61100 --no-ztf --no-atlas
+
+# Skip observability filtering (useful for testing)
+python run_tonight.py 61100 --no-observability
+```
+
+This creates a night directory `nights/ut20260301/` containing:
+
+| File | Contents |
+|------|----------|
+| `candidates.csv` | Summary table of all candidates with peak fits and merit scores |
+| `magellan_plan.cat` | Magellan TCS catalog (RA-ordered, 16-field format) |
+| `observing_schedule.txt` | Human-readable schedule with coordinates, magnitudes, merit |
+| `report.pdf` | Multi-page PDF: summary table, diagnostic plots, light curves |
+| `lightcurves/*.png` | Per-candidate magnitude-space light curve plots |
+
+### Interactive supervision (notebook)
+
+```bash
+jupyter lab notebooks/nightly_supervision.ipynb
+```
+
+Review candidates, inspect light curves, edit the observing plan interactively.
+
+### Full multi-broker pipeline (notebook)
+
+```bash
+jupyter lab notebooks/supernova_monitor.ipynb
+```
+
+Runs the complete ANTARES + ALeRCE + Fink pipeline with classification comparison, variable star screening, and human-in-the-loop classification.
+
+## What the Pipeline Does
+
+1. **Queries Fink** for SN candidates in the Rubin LSST alert stream (`sn_near_galaxy_candidate` and `extragalactic_new_candidate` tags)
+2. **Fetches supplementary photometry** from ZTF (via ALeRCE) and ATLAS forced photometry by position match
+3. **Combines all photometry** into unified multi-survey light curves (Rubin + ZTF + ATLAS) in nanoJansky flux space
+4. **Fits light curves** using both inverted parabola (per-band) and multi-band Villar SPM model with shared explosion epoch
+5. **Computes merit scores** based on time since peak and peak brightness
+6. **Filters for observability** from Las Campanas (airmass, twilight, hours up)
+7. **Generates Magellan plan** sorted by RA (assuming 30 min per observation)
+
+## Installation
+
+```bash
 pip install -r requirements.txt
 ```
 
-### Using the Notebook
+### ATLAS credentials
 
-```bash
-# Start Jupyter Lab
-jupyter lab
+Register at https://fallingstar-data.com/forcedphot/ and create `~/.atlas_credentials`:
 
-# Open notebooks/supernova_monitor.ipynb
+```ini
+[atlas]
+username = your_username
+password = your_password
 ```
 
-### Command-Line Usage
+### Dependencies
 
-```python
-from supernova_monitor import SupernovaMonitor
-
-monitor = SupernovaMonitor()
-
-# Run full pipeline
-results = monitor.run_full_pipeline(
-    min_ia_probability=0.7,
-    days_back=30
-)
-
-# Query light curve
-lc = monitor.get_light_curve(object_id, broker='ANTARES')
-
-# Get postage stamps
-stamps = monitor.get_stamps(object_id, ra, dec, broker='ANTARES')
-```
+- `astropy`, `scipy`, `numpy`, `pandas`, `matplotlib` — core scientific stack
+- `alerce` — ALeRCE broker client (ZTF + LSST classifications)
+- `astroquery` — IRSA dust maps, NED redshifts
+- `requests` — Fink API, ATLAS API
+- `psycopg2-binary` — ALeRCE direct database access (optional, faster bulk queries)
+- `pyvo` — ALeRCE TAP queries (optional)
+- `sncosmo` — SALT2/SALT3 template fitting (optional)
 
 ## Project Structure
 
 ```
 RubinAlerts/
-├── broker_clients/           # Broker query clients
-│   ├── base_client.py       # Abstract interface
-│   ├── antares_client.py    # ANTARES broker client
-│   └── alerce_client.py     # ALeRCE broker client
+├── run_tonight.py                 # CLI: nightly pipeline → Magellan plan
+├── supernova_monitor.py           # Full multi-broker orchestrator
 │
-├── core/                     # Core pipeline
-│   └── alert_aggregator.py  # Alert merging and deduplication
+├── broker_clients/
+│   ├── fink_client.py             # Fink LSST API (Rubin photometry)
+│   ├── alerce_client.py           # ALeRCE (ZTF + LSST classifications)
+│   ├── alerce_db_client.py        # ALeRCE direct PostgreSQL (bulk queries)
+│   ├── atlas_client.py            # ATLAS forced photometry (batch API)
+│   └── antares_client.py          # ANTARES broker
 │
-├── host_galaxy/             # Galaxy classification
-│   └── morphology_filter.py # Galaxy morphology filtering
+├── core/
+│   ├── peak_fitting.py            # Parabola + Villar SPM fitting, plots
+│   ├── magellan_planning.py       # Merit scores, observability, TCS catalog
+│   ├── alert_aggregator.py        # Cross-match, dedup, merge brokers
+│   └── ddf_fields.py              # 7 DDF field definitions
 │
-├── cache/                   # Caching system
-│   ├── alert_cache.py      # SQLite-based cache
-│   └── data/               # Cached data files
+├── utils/
+│   ├── extinction.py              # Galactic dust (IRSA SFD maps)
+│   ├── ned_query.py               # NED spectroscopic redshifts
+│   ├── coordinates.py             # Coordinate utilities
+│   ├── catalog_query.py           # SDSS/PS1 host galaxy queries
+│   └── plotting.py                # Light curve visualization
 │
-├── utils/                   # Utilities
-│   ├── coordinates.py      # Coordinate operations
-│   ├── catalog_query.py    # Galaxy catalog queries
-│   └── plotting.py         # Visualization utilities
+├── cache/
+│   └── alert_cache.py             # SQLite cache (alerts, extinction, NED)
 │
-├── notebooks/              # Jupyter notebooks
-│   └── supernova_monitor.ipynb  # Main interactive notebook
+├── notebooks/
+│   ├── nightly_supervision.ipynb  # Review run_tonight.py outputs
+│   ├── supernova_monitor.ipynb    # Full interactive pipeline
+│   └── magellan_planning.ipynb    # Observability and scheduling
 │
-├── supernova_monitor.py    # Main monitoring class
-├── requirements.txt        # Dependencies
-└── README.md              # This file
+├── docs/
+│   └── rubinalerts_pipeline.tex   # Technical paper (LaTeX)
+│
+├── requirements.txt
+└── nights/                        # Output directories (one per night)
+    └── ut20260301/
+        ├── candidates.csv
+        ├── magellan_plan.cat
+        ├── observing_schedule.txt
+        ├── report.pdf
+        └── lightcurves/
 ```
 
-## Features
+## Target Fields
 
-### 1. Multi-Broker Monitoring
+The pipeline searches 7 fields (6 Rubin DDFs + M49):
 
-Connects to:
-- **ANTARES** (Arizona-NOIRLab Temporal Analysis & Response to Events System)
-  - Real-time broker with excellent postage stamp support
-  - Python client: `antares-client`
+| Field | RA | Dec | ZTF? | Notes |
+|-------|-----|------|------|-------|
+| COSMOS | 150.1 | +2.2 | Yes | Northern, full ZTF coverage |
+| XMM-LSS | 35.6 | -4.8 | Yes | Northern |
+| ECDFS | 53.0 | -28.1 | Marginal | Near ZTF limit |
+| ELAIS-S1 | 9.5 | -44.0 | No | Southern, Rubin-only |
+| EDFS_a | 58.9 | -49.3 | No | Southern, Rubin-only |
+| EDFS_b | 63.6 | -47.6 | No | Southern, Rubin-only |
+| M49 | 187.4 | +8.0 | Yes | Virgo Cluster |
 
-- **ALeRCE** (Automatic Learning for the Rapid Classification of Events)
-  - Fast ML-based classifications
-  - Python client: `alerce`
+## Light Curve Fitting
 
-### 2. Alert Aggregation
+Two methods run on every candidate:
 
-- Queries both brokers for Type Ia supernova candidates
-- Configurable probability thresholds
-- Merges detections from multiple brokers
-- Deduplicates using 2 arcsecond coordinate tolerance
-- Tracks which brokers detected each object
+**Inverted parabola** (per-band): `flux(t) = peak_flux - a*(t-t0)^2`. Fast, always available. Works in nJy flux space.
 
-### 3. Classification Comparison
+**Multi-band Villar SPM** (shared explosion epoch): 6-parameter supernova model fit simultaneously across all bands with shared t0 and per-band amplitude/timescale. Uses `scipy.optimize.least_squares` with `soft_l1` robust loss. Better for well-sampled light curves.
 
-- Side-by-side comparison of classifications:
-  - Type Ia probability
-  - Type II probability
-  - Type Ib/c probability
-  - AGN probability
-- Agreement scoring across brokers
-- Confidence statistics (mean, std dev, min, max)
-
-### 4. Galaxy Morphology Classification
-
-Cross-matches with galaxy catalogs:
-- **SDSS** (Sloan Digital Sky Survey)
-- **Pan-STARRS**
-
-Classification based on:
-- Color indices (g-r, r-i)
-- Concentration index
-- Red sequence identification
-
-Filters for elliptical galaxies as Type Ia hosts.
-
-### 5. Interactive Visualization
-
-**Alert Summary Table**
-- Object coordinates, discovery date
-- Host galaxy type
-- Broker agreement metrics
-- Sortable/filterable interface
-
-**Classification Comparison**
-- Bar charts of probabilities by broker
-- Detailed classification tables
-- Agreement metrics
-
-**Light Curve Viewer**
-- Multi-filter light curves (g, r, i, z)
-- Interactive Plotly plots
-- Error bars and uncertainty bands
-- Phase-folded option
-
-**Postage Stamps**
-- Science, reference, difference images
-- Multiple epochs
-- FITS header information
-- ANTARES specialization
-
-**Export**
-- CSV export of results
-- Summary statistics
-
-## Configuration
-
-Edit parameters in the notebook's "Query and Filter Alerts" cell:
-
-```python
-MIN_IA_PROBABILITY = 0.7   # Minimum Type Ia confidence
-DAYS_BACK = 30              # Query window (days)
-USE_CACHE = True            # Use local caching
-```
-
-Filter for high-confidence candidates in "Alert Aggregation":
-- Type Ia probability threshold
-- Broker agreement requirement
-- Minimum number of broker detections
-
-## Caching
-
-Local SQLite database stores:
-
-1. **Raw broker alerts** (24-hour expiry)
-   - Alert IDs, coordinates, classifications
-   - Photometry metadata
-
-2. **Galaxy information** (7-day expiry)
-   - Morphology classifications
-   - Cross-match results
-   - Redshifts and magnitudes
-
-3. **Merged alert results** (24-hour expiry)
-   - Deduplicated alerts
-   - Classification comparisons
-
-Clear old cache:
-```python
-monitor.cache.clear_old_cache(days_old=7)
-```
-
-## API Limitations
-
-Be aware of broker API rate limits:
-- ANTARES: Check documentation for current limits
-- ALeRCE: Typically generous for research use
-
-The caching system minimizes API calls. Most queries use cached data.
-
-## Data Privacy & Attribution
-
-- ANTARES: https://antares.noirlab.edu/
-- ALeRCE: https://alerce.science/
-- SDSS: https://www.sdss.org/
-- Pan-STARRS: https://panstarrs.stsci.edu/
-
-Cite brokers appropriately in publications.
-
-## Troubleshooting
-
-### No candidates found
-
-- Check internet connection (broker queries)
-- Verify API credentials if required
-- Lower probability thresholds
-- Increase `DAYS_BACK` parameter
-- Check broker status pages
-
-### Missing light curve/stamps
-
-- Object may not be available in selected broker
-- Try alternate broker
-- Check alert is recent enough for data availability
-
-### Galaxy classification fails
-
-- Internet needed for catalog queries
-- Some objects near survey edges may lack morphology data
-- Catalog query limits may cause timeouts
-
-### Cache issues
-
-Clear cache and restart:
-```bash
-rm -rf cache/data/*.db
-```
-
-## Future Enhancements
-
-- Additional brokers (Fink, Lasair, Pitt-Google)
-- Real-time alert streaming
-- Spectroscopic follow-up suggestions
-- Machine learning classification refinement
-- Automated email notifications
-- Web interface
-
-## Contributing
-
-Improvements and bug reports welcome!
+The better fit (Villar preferred when converged) provides the headline peak magnitude and time.
 
 ## License
 
 Copyright (c) 2025 President and Fellows of Harvard College. All rights reserved.
 
-This software is provided for academic and research purposes only. No commercial
-use, redistribution for commercial purposes, or incorporation into commercial
-products is permitted without prior written authorization from the copyright holder.
-
 ## Contact
 
-Christopher Stubbs
-Harvard University
-stubbs@g.harvard.edu
-
-## References
-
-- Brokers: https://antares.noirlab.edu/, https://alerce.science/
-- Vera C. Rubin Observatory: https://www.lsst.org/
-- LSST Alert System: https://dmtn-102.lsst.io/
+Christopher Stubbs — Harvard University — stubbs@g.harvard.edu

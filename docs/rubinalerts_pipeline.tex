@@ -48,14 +48,18 @@ Observatory Legacy Survey of Space and Time (LSST) Deep Drilling Fields
 (DDFs).  The system queries three independent alert brokers---ANTARES,
 ALeRCE (ZTF), and ALeRCE-LSST---cross-matches their detections,
 deduplicates sources, screens against known variable star catalogs, and
-produces a ranked list of SN~Ia candidates.  Light curve peak fitting
-using inverted-parabola models in flux space provides estimated times of
-peak brightness and peak apparent magnitudes.  A two-dimensional merit
-function combining temporal proximity to peak and apparent brightness
-enables automated generation of prioritized spectroscopic follow-up
-target lists for the Magellan telescopes at Las Campanas Observatory.
-This document describes the pipeline architecture, algorithms, data
-structures, and current implementation status.
+produces a ranked list of SN~Ia candidates.  Galactic extinction
+corrections are applied using IRSA SFD dust maps, and spectroscopic
+redshifts are obtained from NED for host galaxy distance estimation.
+Light curve peak fitting is performed using both inverted-parabola
+models in flux space and the Villar supernova parametric model (SPM),
+with peak times determined by numerical flux maximization.  A
+two-dimensional merit function combining temporal proximity to peak and
+extinction-corrected apparent brightness enables automated generation of
+prioritized spectroscopic follow-up target lists for the Magellan
+telescopes at Las Campanas Observatory.  This document describes the
+pipeline architecture, algorithms, data structures, and current
+implementation status.
 \end{abstract}
 
 \tableofcontents
@@ -160,20 +164,30 @@ directories.
 % Merge
 \node[block, below=1.2cm of alerce] (merge) {Cross-match \&\\Deduplicate};
 
+% Extinction
+\node[block, below=of merge] (extinct) {Galactic Extinction\\(IRSA SFD)};
+
 % Variable screening
-\node[block, below=of merge] (varscreen) {Variable Star\\Screening};
+\node[block, below=of extinct] (varscreen) {Variable Star\\Screening};
 
 % Classification filter
 \node[block, below=of varscreen] (classify) {$P(\mathrm{Ia})$ Filter\\+ Agreement};
 
+% NED redshifts
+\node[block, below=of classify] (ned) {NED Redshift\\Lookup};
+
 % Peak fitting
-\node[block, below=of classify] (peakfit) {Light Curve\\Peak Fitting};
+\node[block, below=of ned] (peakfit) {Peak Fitting\\(Parabola + Villar)};
 
 % Merit
-\node[block, below=of peakfit] (merit) {Merit Function\\$\mathcal{M}(\Delta t, m)$};
+\node[block, below=of peakfit] (merit) {Merit Function\\$\mathcal{M}(\Delta t, m_{\mathrm{corr}})$};
 
 % Cache
-\node[data, right=2.5cm of merit] (cache) {SQLite Cache\\(\texttt{peak\_fit\_targets})};
+\node[data, right=2.5cm of peakfit] (cache) {SQLite Cache\\(\texttt{peak\_fit\_targets})};
+
+% External data
+\node[data, left=2.0cm of extinct] (irsa) {IRSA Dust\\Service};
+\node[data, left=2.0cm of ned] (neddb) {NED\\Database};
 
 % Magellan
 \node[output, below=of merit] (magellan) {Magellan Observing\\Catalog};
@@ -182,20 +196,26 @@ directories.
 \draw[arrow] (antares.south) -- ++(0,-0.4) -| (merge.north);
 \draw[arrow] (alerce.south) -- (merge.north);
 \draw[arrow] (lsst.south) -- ++(0,-0.4) -| (merge.north);
-\draw[arrow] (merge) -- (varscreen);
+\draw[arrow] (merge) -- (extinct);
+\draw[arrow] (extinct) -- (varscreen);
 \draw[arrow] (varscreen) -- (classify);
-\draw[arrow] (classify) -- (peakfit);
+\draw[arrow] (classify) -- (ned);
+\draw[arrow] (ned) -- (peakfit);
 \draw[arrow] (peakfit) -- (merit);
-\draw[arrow] (merit) -- (cache);
-\draw[arrow] (cache) -- (magellan);
+\draw[arrow] (peakfit) -- (cache);
+\draw[arrow] (cache.south) -- ++(0,-0.4) -| (magellan.east);
 \draw[arrow] (merit) -- (magellan);
+\draw[arrow] (irsa) -- (extinct);
+\draw[arrow] (neddb) -- (ned);
 
 \end{tikzpicture}
 \caption{Pipeline data flow.  Three alert brokers feed into a
-cross-matching and deduplication stage, followed by variable star
-screening, classification filtering, light curve peak fitting, and merit
-scoring.  Results are cached in SQLite for consumption by the Magellan
-planning notebook.}
+cross-matching and deduplication stage.  Galactic extinction corrections
+are applied using IRSA SFD dust maps, followed by variable star screening,
+classification filtering, NED spectroscopic redshift lookups, light curve
+peak fitting (inverted parabola and Villar SPM), and merit scoring using
+extinction-corrected magnitudes.  Results are cached in SQLite for
+consumption by the Magellan planning notebook.}
 \label{fig:pipeline}
 \end{figure}
 
@@ -204,23 +224,28 @@ planning notebook.}
 The codebase is organized as follows:
 
 \begin{center}
+\small
 \begin{tabular}{ll}
 \toprule
 Module & Purpose \\
 \midrule
 \texttt{supernova\_monitor.py} & Main orchestrator class \\
 \texttt{broker\_clients/antares\_client.py} & ANTARES broker interface \\
-\texttt{broker\_clients/alerce\_client.py} & ALeRCE interface (ZTF \& LSST modes) \\
+\texttt{broker\_clients/alerce\_client.py} & ALeRCE REST API interface (ZTF \& LSST) \\
+\texttt{broker\_clients/alerce\_db\_client.py} & ALeRCE direct PostgreSQL access \\
 \texttt{broker\_clients/atlas\_client.py} & ATLAS forced photometry \\
 \texttt{core/alert\_aggregator.py} & Cross-match, deduplicate, merge \\
 \texttt{core/variable\_screen.py} & Known variable star screening \\
 \texttt{core/ddf\_fields.py} & DDF field definitions \\
-\texttt{core/peak\_fitting.py} & Light curve peak fitting \\
-\texttt{core/magellan\_planning.py} & Magellan target planning (planned) \\
+\texttt{core/peak\_fitting.py} & Peak fitting (parabola + Villar SPM) \\
+\texttt{core/magellan\_planning.py} & Magellan target planning \& catalog generation \\
 \texttt{cache/alert\_cache.py} & SQLite caching layer \\
 \texttt{host\_galaxy/morphology\_filter.py} & Galaxy morphology filtering \\
+\texttt{utils/extinction.py} & Galactic extinction corrections (IRSA SFD) \\
+\texttt{utils/ned\_query.py} & NED spectroscopic redshift lookups \\
 \texttt{utils/plotting.py} & Light curve visualization \\
 \texttt{utils/coordinates.py} & Coordinate utilities \\
+\texttt{utils/catalog\_query.py} & Catalog cross-matching utilities \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -279,6 +304,32 @@ filtering locally by DDF coordinates using \texttt{astropy}.
 ALeRCE-LSST provides the richest Rubin photometry: multi-epoch
 $ugrizy$ light curves with both alert-triggered detections and forced
 photometry at the object position.
+
+\subsection{ALeRCE Direct Database Access}
+\label{sec:alerce_db}
+
+In addition to the REST API, the pipeline can query ALeRCE's ZTF
+database directly via PostgreSQL for bulk data retrieval.  Read-only
+credentials are fetched at runtime from the ALeRCE
+\texttt{usecases} repository on
+GitHub.\footnote{\url{https://github.com/alercebroker/usecases}}
+
+The \texttt{AlerceDBClient} class
+(\texttt{broker\_clients/alerce\_db\_client.py}) provides methods for:
+\begin{itemize}
+\item Bulk SN candidate queries with classifier probability thresholds,
+\item SPM (Villar supernova parametric model) feature retrieval,
+\item Per-object classification probabilities (pivoted by class),
+\item Pan-STARRS host galaxy photometry (\texttt{sgscore1}, \texttt{sgmag1}, colors),
+\item Light curve detections (\texttt{mjd}, \texttt{magpsf}, \texttt{sigmapsf}).
+\end{itemize}
+
+All queries operate on ALeRCE's \texttt{object}, \texttt{probability},
+\texttt{feature}, \texttt{detection}, and \texttt{ps1\_ztf} tables.  The
+direct database path is significantly faster than the REST API for batch
+queries returning hundreds to thousands of objects.  If the database is
+unreachable (e.g., no \texttt{psycopg2} installation or network
+restrictions), the pipeline falls back to the REST API transparently.
 
 \begin{table}[h]
 \centering
@@ -362,6 +413,138 @@ the AAVSO Variable Star Index (VSX), distributed across the six Rubin
 DDFs.  The matching radius is 2\arcsec.  Matched candidates are flagged
 with \texttt{known\_variable = True} and excluded from the SN~Ia
 candidate list.
+
+
+%% =========================================================================
+\section{Galactic Extinction Corrections}
+\label{sec:extinction}
+%% =========================================================================
+
+Galactic dust along the line of sight reddens and dims extragalactic
+sources.  Correcting for this extinction is essential for accurate peak
+magnitude estimates and, consequently, for meaningful merit scores and
+absolute magnitude calculations.
+
+\subsection{Dust Map Queries}
+
+The pipeline queries the IRSA Galactic Dust Reddening and Extinction
+service\footnote{\url{https://irsa.ipac.caltech.edu/applications/DUST/}}
+using the \texttt{astroquery.ipac.irsa.irsa\_dust.IrsaDust} interface.
+For each candidate, the \citet{Schlafly2011} recalibration of the
+\citet{Schlegel1998} (SFD) dust map provides the total Galactic
+extinction $A_\lambda$ in each photometric band:
+\begin{equation}
+A_\lambda(\ell, b) = R_\lambda \times E(B-V)_{\mathrm{SFD}},
+\end{equation}
+where $R_\lambda$ is the ratio of total-to-selective extinction for
+band~$\lambda$ and $E(B-V)_{\mathrm{SFD}}$ is the reddening from the
+SFD map.
+
+The service returns extinction values $A_{\mathrm{SFD}}$ for SDSS
+$ugriz$ filters.  The pipeline extracts $A_g$, $A_r$, $A_i$, $A_z$ for
+each candidate based on its individual sky coordinates (not a per-field
+average).
+
+\subsection{Caching}
+
+Extinction values are cached in the SQLite database
+(\texttt{galaxy\_info} table, \texttt{extinction\_json} column) keyed by
+coordinates with a tolerance of $0.1\arcmin$.  Subsequent pipeline runs
+retrieve cached values without re-querying IRSA, significantly reducing
+runtime for repeated analyses of the same fields.
+
+\subsection{Extinction-Corrected Magnitudes}
+
+The corrected apparent magnitude for band~$\lambda$ is:
+\begin{equation}
+m_{\lambda,\mathrm{corr}} = m_\lambda - A_\lambda,
+\end{equation}
+where $m_\lambda$ is the observed magnitude and $A_\lambda$ is the
+Galactic extinction in that band.  The extinction-corrected peak
+magnitudes ($\texttt{peak\_mag\_corrected}$) propagate through the merit
+function and Magellan catalog generation.
+
+\subsection{Typical Extinction Values}
+
+The DDF fields span a range of Galactic latitudes:
+
+\begin{center}
+\begin{tabular}{lcl}
+\toprule
+Field & Galactic $|b|$ & Typical $A_g$ \\
+\midrule
+COSMOS & $42\degr$ & $\sim 0.07$~mag \\
+M49 & $70\degr$ & $\sim 0.08$~mag \\
+XMM-LSS & $-59\degr$ & $\sim 0.10$~mag \\
+ECDFS & $-55\degr$ & $\sim 0.03$~mag \\
+ELAIS-S1 & $-73\degr$ & $\sim 0.04$~mag \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+While individual corrections are modest for most DDFs, they vary
+across each field and are important for precision photometry at the
+$\lesssim 0.1$~mag level relevant to SN~Ia standardization.
+
+
+%% =========================================================================
+\section{NED Spectroscopic Redshifts}
+\label{sec:ned}
+%% =========================================================================
+
+For each SN candidate, the pipeline queries the NASA/IPAC
+Extragalactic Database
+(NED)\footnote{\url{https://ned.ipac.caltech.edu/}} for spectroscopic
+redshifts of potential host galaxies.  Spectroscopic redshifts, when
+available, provide accurate distance estimates and enable absolute
+magnitude calculations.
+
+\subsection{Query Strategy}
+
+The \texttt{utils/ned\_query.py} module uses
+\texttt{astroquery.ipac.ned.Ned.query\_region()} to search for
+cataloged objects within a radius of 18\arcsec\ of each SN candidate
+position.  This search radius is chosen to encompass typical SN--host
+offsets while limiting contamination from unrelated sources.
+
+From the returned objects, the pipeline selects the nearest source with
+a valid spectroscopic redshift.  The result includes:
+\begin{itemize}
+\item \texttt{ned\_redshift}: spectroscopic redshift $z$,
+\item \texttt{ned\_name}: NED designation of the host galaxy,
+\item \texttt{ned\_sep\_arcsec}: angular separation from the SN position,
+\item \texttt{ned\_distmod}: distance modulus $\mu$.
+\end{itemize}
+
+\subsection{Distance Modulus}
+
+The distance modulus is computed using:
+\begin{equation}
+\mu = 5 \log_{10}\!\left(\frac{d_L}{10\,\mathrm{pc}}\right),
+\end{equation}
+where $d_L$ is the luminosity distance derived from the redshift using
+WMAP7 cosmology ($H_0 = 70.4$~km\,s$^{-1}$\,Mpc$^{-1}$,
+$\Omega_m = 0.272$).
+
+\subsection{Absolute Magnitude Estimation}
+
+When both extinction-corrected peak magnitude and NED distance modulus
+are available, the pipeline estimates the absolute magnitude:
+\begin{equation}
+M = m_{\mathrm{corr}} - \mu.
+\end{equation}
+For Type~Ia supernovae, the expected range is $M \approx -19.3 \pm
+0.5$~mag.  Candidates with anomalous absolute magnitudes (e.g.,
+$M < -21$ or $M > -16$) may warrant additional scrutiny or may indicate
+misclassification.
+
+\subsection{Caching and Rate Limiting}
+
+NED query results are cached in the \texttt{galaxy\_info} table (columns
+\texttt{redshift}, \texttt{ned\_name}, \texttt{ned\_separation\_arcsec}).
+Batch queries iterate over unique coordinates with error handling for
+timeouts and empty results.  NED's query service can be slow for large
+batches, so caching is important for interactive use.
 
 
 %% =========================================================================
@@ -487,6 +670,77 @@ for SN~Ia at the typical DDF redshift range ($z \sim 0.1$--$0.4$).  The
 first band with a successful fit (status \texttt{ok} or
 \texttt{underdetermined}) is selected.
 
+\subsection{Villar Supernova Parametric Model (SPM)}
+\label{sec:villar}
+
+The pipeline also supports the Villar supernova parametric model
+\citep{Villar2019}, a six-parameter analytical model for supernova
+light curves.  When ALeRCE's database is accessible, pre-computed SPM
+features are retrieved directly (ALeRCE fits the Villar model to all
+classified transients), avoiding the need for local fitting.
+
+\subsubsection{Model Definition}
+
+The Villar model describes the flux as a function of time with a smooth
+rise and exponential decline:
+\begin{equation}
+\label{eq:villar}
+F(t) =
+\begin{cases}
+\displaystyle
+\frac{A\!\left[1 - \beta\,\frac{t - t_{\mathrm{ref}}}{t_1 - t_{\mathrm{ref}}}\right]}
+{1 + \exp\!\left(-\frac{t - t_{\mathrm{ref}}}{\tau_{\mathrm{rise}}}\right)},
+& t < t_1, \\[12pt]
+\displaystyle
+\frac{A(1-\beta)\,\exp\!\left(-\frac{t - t_1}{\tau_{\mathrm{fall}}}\right)}
+{1 + \exp\!\left(-\frac{t - t_{\mathrm{ref}}}{\tau_{\mathrm{rise}}}\right)},
+& t \geq t_1,
+\end{cases}
+\end{equation}
+where $t_{\mathrm{ref}} = \mathrm{firstMJD} + t_0$ is the reference
+time, $t_1 = t_{\mathrm{ref}} + \gamma$ is the transition time, $A$ is
+the amplitude (in units of $10^{26}$~erg\,s$^{-1}$\,cm$^{-2}$\,Hz$^{-1}$),
+$\beta$ controls the pre-maximum slope, $\tau_{\mathrm{rise}}$ and
+$\tau_{\mathrm{fall}}$ are the rise and fall timescales, and $\gamma$
+sets the plateau duration.
+
+The six free parameters per band are: $A$, $t_0$, $\beta$, $\gamma$,
+$\tau_{\mathrm{rise}}$, $\tau_{\mathrm{fall}}$.  In ALeRCE's database
+these are stored with a filter suffix (e.g., \texttt{SPM\_A\_1} for
+$g$-band, \texttt{SPM\_A\_2} for $r$-band).
+
+\subsubsection{Numerical Peak Finding}
+
+The time of peak brightness is determined by numerical maximization of
+the flux function rather than the analytic approximation $t_{\mathrm{peak}}
+\approx t_{\mathrm{ref}} + \gamma$.  The analytic formula can be
+inaccurate by 7--21~days because the sigmoid rise term shifts the true
+flux maximum away from the transition time.
+
+The pipeline evaluates $F(t)$ on a fine grid of 2000 points spanning
+$[t_{\mathrm{ref}} - 2\tau_{\mathrm{rise}},\; t_1 + 3\tau_{\mathrm{fall}}]$
+and identifies the grid point with maximum flux:
+\begin{equation}
+t_{\mathrm{peak}} = \arg\max_t F(t).
+\end{equation}
+The corresponding peak magnitude is:
+\begin{equation}
+m_{\mathrm{peak}} = -2.5\,\log_{10}(F_{\mathrm{peak}}) + 16.4\,\mathrm{mag},
+\end{equation}
+where the zero-point of 16.4 accounts for the $10^{26}$ amplitude
+normalization ($-2.5\log_{10}(10^{26}) + 48.6 = 16.4$; here 48.6 is
+the AB magnitude zero-point).
+
+\subsubsection{Integration with Parabola Fits}
+
+When Villar SPM features are available from the ALeRCE database, the
+pipeline reports both parabola-based and Villar-based peak estimates.
+The Villar model provides superior peak time estimates because it uses
+an astrophysically motivated light curve shape rather than a local
+quadratic approximation.  The summary table includes columns
+\texttt{villar\_peak\_mjd} and \texttt{villar\_peak\_mag} alongside the
+parabola results.
+
 \subsection{Optional: SALT2 Template Fitting}
 
 If the \texttt{sncosmo} package is installed, a multi-band SALT2
@@ -515,16 +769,18 @@ redshift is known).
 \label{sec:merit}
 %% =========================================================================
 
-Given the fitted peak time $t_0$ and peak magnitude $m$, we define a
-merit function that encodes the scientific value of spectroscopically
-observing a candidate on a given night:
+Given the fitted peak time $t_0$ and extinction-corrected peak magnitude
+$m_{\mathrm{corr}}$, we define a merit function that encodes the
+scientific value of spectroscopically observing a candidate on a given
+night:
 \begin{equation}
 \label{eq:merit}
 \boxed{\mathcal{M} = W_t(\Delta t) \times W_m(m),}
 \end{equation}
 where $\Delta t = t_{\mathrm{now}} - t_0$ is the time since peak (days,
-positive means post-peak), and $m$ is the estimated peak apparent
-magnitude.
+positive means post-peak), and $m$ is the extinction-corrected peak
+apparent magnitude $m_{\mathrm{corr}}$ (falling back to the uncorrected
+$m$ if extinction data are unavailable).
 
 \subsection{Time Weight}
 
@@ -681,10 +937,14 @@ notebook and the Magellan planning notebook.
 \texttt{cached\_at} (TIMESTAMP).  Unique on
 \texttt{(object\_id, broker)}.
 
-\paragraph{\texttt{galaxy\_info}} Caches galaxy morphology and
-photometry from catalog queries.  Columns: \texttt{ra}, \texttt{dec},
-\texttt{morphology}, \texttt{catalog} (JSON), \texttt{redshift},
-\texttt{magnitude\_g/r/i/z}.  Unique on \texttt{(ra, dec)}.
+\paragraph{\texttt{galaxy\_info}} Caches galaxy morphology, photometry,
+extinction, and redshift data from catalog queries.  Columns:
+\texttt{ra}, \texttt{dec}, \texttt{morphology}, \texttt{catalog} (JSON),
+\texttt{redshift}, \texttt{magnitude\_g/r/i/z},
+\texttt{extinction\_json} (JSON dict of $\{$band: $A_\lambda\}$ from
+IRSA SFD), \texttt{ned\_name} (NED host designation),
+\texttt{ned\_separation\_arcsec} (angular offset from SN position).
+Unique on \texttt{(ra, dec)}.
 
 \paragraph{\texttt{merged\_alerts}} Caches deduplicated/merged alerts.
 Columns: \texttt{unique\_id}, \texttt{ra}, \texttt{dec},
@@ -709,14 +969,21 @@ Column & Type & Description \\
 \texttt{ra}, \texttt{dec}        & REAL  & J2000 coordinates (deg) \\
 \texttt{mean\_ia\_prob}          & REAL  & Mean $P(\mathrm{Ia})$ \\
 \texttt{brokers\_detected}       & TEXT  & Broker names \\
+\texttt{A\_g}, \texttt{A\_r}, \texttt{A\_i} & REAL & Galactic extinction (mag) \\
+\texttt{ned\_redshift}           & REAL  & NED spectroscopic redshift \\
+\texttt{ned\_distmod}            & REAL  & Distance modulus from NED $z$ \\
 \texttt{peak\_mjd}               & REAL  & Fitted peak time (MJD) \\
 \texttt{peak\_mag}               & REAL  & Fitted peak magnitude (AB) \\
+\texttt{peak\_mag\_corrected}    & REAL  & Extinction-corrected peak mag \\
 \texttt{peak\_mag\_err}          & REAL  & Magnitude uncertainty \\
 \texttt{peak\_band}              & TEXT  & Best-fit band \\
 \texttt{peak\_fit\_status}       & TEXT  & Fit quality flag \\
+\texttt{villar\_peak\_mjd}       & REAL  & Villar SPM peak time (MJD) \\
+\texttt{villar\_peak\_mag}       & REAL  & Villar SPM peak magnitude \\
 \texttt{mjd\_now}                & REAL  & MJD when merit computed \\
 \texttt{delta\_t}                & REAL  & $t_{\mathrm{now}} - t_0$ (days) \\
 \texttt{merit}                   & REAL  & Merit score (0--1) \\
+\texttt{abs\_mag}                & REAL  & $m_{\mathrm{corr}} - \mu$ \\
 \texttt{cached\_at}              & TIMESTAMP & Write timestamp \\
 \bottomrule
 \end{tabular}
@@ -737,14 +1004,23 @@ entries.
 \begin{itemize}
 \item Multi-broker alert ingestion (ANTARES, ALeRCE-ZTF, ALeRCE-LSST)
 with DDF-targeted queries and local caching.
+\item ALeRCE direct PostgreSQL database access for bulk candidate
+queries, SPM features, classification probabilities, and Pan-STARRS
+host photometry, with transparent fallback to the REST API.
 \item Cross-matching and deduplication across brokers (1\arcsec\
 coordinate tolerance $+$ shared ZTF ID matching).
+\item Galactic extinction corrections using IRSA SFD dust maps, with
+per-object lookups and SQLite caching (see \S\ref{sec:extinction}).
+\item NED spectroscopic redshift lookups for host galaxies, with
+distance modulus computation and absolute magnitude estimation (see
+\S\ref{sec:ned}).
 \item Variable star screening against 13{,}749 known variables from
 Gaia~DR3 and VSX.
 \item Classification filtering with configurable $P(\mathrm{Ia})$
 threshold, multi-broker agreement scoring, and minimum broker count.
 \item Optional elliptical host galaxy morphology filtering via
-cross-match with SDSS and Pan-STARRS galaxy catalogs.
+cross-match with SDSS and Pan-STARRS galaxy catalogs (color cuts:
+$g-r > 0.55$ and $r-i > 0.15$).
 \item ATLAS forced photometry enrichment (cyan and orange bands) for
 independent light curve validation.
 \item Flux-space and magnitude-space light curve visualization with
@@ -754,32 +1030,34 @@ per-band colors and survey-specific markers.
 (SN/variable/bogus labels saved to CSV).
 \item Inverted-parabola light curve peak fitting in flux space with
 per-band fits, band-priority selection, and batch processing.
+\item Villar SPM peak fitting using pre-computed ALeRCE features with
+numerical flux maximization for accurate peak time determination
+(see \S\ref{sec:villar}).
 \item Optional SALT2 template fitting (gated by \texttt{sncosmo}
 availability).
-\item CSV export of candidate tables with timestamps.
-\end{itemize}
-
-\subsection{In Progress}
-
-\begin{itemize}
+\item Two-dimensional merit function $\mathcal{M}(\Delta t, m_{\mathrm{corr}})$
+using extinction-corrected peak magnitudes.
 \item SQLite caching of peak-fit targets with merit scores
 (\texttt{peak\_fit\_targets} table).
-\item Merit function implementation and integration into the main
-pipeline notebook.
+\item Magellan observing catalog generation with observability filtering
+from Las Campanas, RA-ordered target lists, and instrument-specific
+rotator presets (LDSS3C, IMACS, MagE, FIRE).
+\item CSV export of candidate tables with timestamps.
+\item Diagnostic plots: light curves with Villar SPM overlays and peak
+markers, peak magnitude vs.\ MJD scatter plots, extinction histograms,
+redshift distributions, and Hubble diagrams.
 \end{itemize}
 
 \subsection{Planned}
 
 \begin{itemize}
-\item Magellan observing catalog generation with observability filtering
-from Las Campanas, RA-ordered target lists, and instrument-specific
-rotator presets.
 \item Standalone Magellan planning notebook reading from the SQLite
-cache.
-\item Airmass charts and sky-map visualizations for observing night
-planning.
+cache, with airmass charts and sky-map visualizations.
 \item Exposure time estimation based on target magnitude and desired
 signal-to-noise ratio.
+\item Photometric redshift estimation from multi-band light curve
+fitting (e.g., via SALT2 with floating $z$).
+\item Integration with Rubin alert stream when LSST operations begin.
 \end{itemize}
 
 \subsection{Known Limitations}
@@ -797,10 +1075,49 @@ representations; all fitting is performed in flux space.
 distinct sources in crowded fields.
 \item LSST \texttt{scienceFlux} is only available for alert detections,
 not forced photometry.
-\item The inverted-parabola model is only valid near peak; light curves
-with significant pre-peak rise or post-peak plateau structure
-(e.g., $i$-band secondary maximum) may yield \texttt{poor\_fit} status.
+\item The inverted-parabola model is only valid near peak; the Villar
+SPM model provides a better full light curve fit but requires ALeRCE
+database access for pre-computed parameters.
+\item Pan-STARRS and SDSS host galaxy data are only available for DDFs
+at Dec~$\gtrsim -30\degr$ (COSMOS, XMM-LSS, M49, and marginally
+ECDFS).  The three southern DDFs (ELAIS-S1, EDFS\_a, EDFS\_b) lack
+coverage for elliptical host classification using optical colors.
+\item NED spectroscopic redshift coverage is incomplete; only
+$\sim$10--30\% of SN candidates have NED-cataloged host galaxies with
+measured redshifts, depending on the field depth.
+\item At the default ALeRCE classifier threshold of $P > 0.5$,
+superluminous supernovae (SLSN) dominate the high-probability tail
+because they are more distinctive to the classifier.  A lower threshold
+(e.g., $P > 0.3$) recovers more Type~Ia candidates at the cost of
+increased contamination.
 \end{enumerate}
+
+
+%% =========================================================================
+\section*{References}
+%% =========================================================================
+
+\begin{thebibliography}{9}
+
+\bibitem[Schlegel et al.(1998)]{Schlegel1998}
+Schlegel, D.~J., Finkbeiner, D.~P., \& Davis, M.\ 1998,
+\textit{ApJ}, 500, 525.
+\textit{Maps of Dust Infrared Emission for Use in Estimation of
+Reddening and Cosmic Microwave Background Radiation Foregrounds.}
+
+\bibitem[Schlafly \& Finkbeiner(2011)]{Schlafly2011}
+Schlafly, E.~F., \& Finkbeiner, D.~P.\ 2011,
+\textit{ApJ}, 737, 103.
+\textit{Measuring Reddening with Sloan Digital Sky Survey Stellar
+Spectra and Recalibrating SFD.}
+
+\bibitem[Villar et al.(2019)]{Villar2019}
+Villar, V.~A., et al.\ 2019,
+\textit{ApJ}, 884, 83.
+\textit{SuperRAENN: A Semi-supervised Supernova Photometric Classification
+Pipeline Trained on Pan-STARRS1 Medium-Deep Survey Supernovae.}
+
+\end{thebibliography}
 
 
 \end{document}

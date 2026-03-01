@@ -10,6 +10,7 @@ sqlalchemy>=2.0.0
 astroquery>=0.4.6
 alerce>=2.0.0
 psycopg2-binary>=2.9.0
+pyvo>=1.5.0
 jupyter>=1.0.0
 jupyterlab>=4.0.0
 # Optional: sncosmo for SALT2/SALT3 template light curve fitting

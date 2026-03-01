@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 from broker_clients.antares_client import AntaresClient
 from broker_clients.alerce_client import AlerceClient
 from broker_clients.atlas_client import AtlasClient
+from broker_clients.rubin_tap_client import RubinTAPClient
+from broker_clients.fink_client import FinkLSSTClient
 from core.alert_aggregator import AlertAggregator
 from core.variable_screen import VariableScreener
 from core.ddf_fields import DDF_FIELDS
@@ -30,12 +32,14 @@ class SupernovaMonitor:
     def __init__(self, cache_dir: str = './cache/data',
                  use_alerce_db: bool = True,
                  apply_extinction: bool = True,
-                 query_ned: bool = True):
+                 query_ned: bool = True,
+                 use_rsp: bool = True):
         self.cache_dir = cache_dir
         self.cache = AlertCache(cache_dir)
         self.apply_extinction = apply_extinction
         self.query_ned = query_ned
         self.use_alerce_db = use_alerce_db
+        self.use_rsp = use_rsp
         self.aggregator = AlertAggregator(
             cache_dir,
             apply_extinction=apply_extinction,
@@ -44,6 +48,34 @@ class SupernovaMonitor:
         self.variable_screener = VariableScreener()
         self.atlas_client = AtlasClient()
         self._lc_cache = {}  # in-memory light curve cache: (broker, oid) -> DataFrame
+        self._rsp_lc_cache = {}  # RSP light curves: object_id -> DataFrame
+
+        # RSP TAP client for host galaxy properties (DP1/DR1 static catalogs)
+        self.rsp_client = None
+        if use_rsp:
+            try:
+                self.rsp_client = RubinTAPClient()
+                if self.rsp_client.available:
+                    logger.info("RSP TAP client initialized (token configured)")
+                else:
+                    logger.warning("RSP TAP client: token or pyvo not available")
+                    self.rsp_client = None
+            except Exception as e:
+                logger.warning("Failed to initialize RSP TAP client: %s", e)
+                self.rsp_client = None
+
+        # Fink LSST client for current prompt photometry
+        self.fink_client = None
+        try:
+            self.fink_client = FinkLSSTClient()
+            if self.fink_client.available:
+                logger.info("Fink LSST client initialized (API reachable)")
+            else:
+                logger.warning("Fink LSST API not reachable")
+                self.fink_client = None
+        except Exception as e:
+            logger.warning("Failed to initialize Fink LSST client: %s", e)
+            self.fink_client = None
 
         self.brokers = {}
         self._initialize_brokers()
@@ -157,7 +189,8 @@ class SupernovaMonitor:
                      f"atlas_enrichment={atlas_enrichment}")
         logger.info(f"Features: extinction={self.apply_extinction}, "
                      f"alerce_db={self.use_alerce_db}, "
-                     f"ned_redshifts={self.query_ned}")
+                     f"ned_redshifts={self.query_ned}, "
+                     f"rsp_photometry={self.rsp_client is not None}")
         logger.info("=" * 60)
 
         # Step 1: Query brokers (restricted to DDFs)
@@ -247,6 +280,36 @@ class SupernovaMonitor:
         elif atlas_enrichment:
             logger.warning("ATLAS credentials not configured; skipping enrichment")
 
+        # Step 8: Cross-match to Fink for current prompt photometry
+        if self.fink_client is not None and len(ia_candidates) > 0:
+            logger.info("Cross-matching candidates to Fink LSST...")
+            try:
+                ia_candidates = self.fink_client.crossmatch_candidates(
+                    ia_candidates
+                )
+                n_fink = ia_candidates['fink_diaObjectId'].notna().sum()
+                logger.info(f"Step 8: {n_fink}/{len(ia_candidates)} candidates "
+                            "matched in Fink (current prompt photometry)")
+            except Exception as e:
+                logger.warning("Fink cross-match failed: %s", e)
+
+        # Step 8b: Cross-match to RSP for host galaxy properties (static catalogs)
+        if self.rsp_client is not None and len(ia_candidates) > 0:
+            logger.info("Cross-matching candidates to RSP DiaObjects...")
+            try:
+                cov = self.rsp_client.check_data_coverage()
+                logger.info(f"  RSP {cov['schema']}: {cov['min_date']} to "
+                            f"{cov['max_date']} ({cov['staleness_days']}d ago), "
+                            f"{cov['n_dia_objects']:,} DiaObjects")
+                ia_candidates = self.rsp_client.crossmatch_to_dia_objects(
+                    ia_candidates
+                )
+                n_rsp = ia_candidates['diaObjectId'].notna().sum()
+                logger.info(f"Step 8b: {n_rsp}/{len(ia_candidates)} candidates "
+                            "matched to RSP DiaObjects (host properties)")
+            except Exception as e:
+                logger.warning("RSP cross-match failed: %s", e)
+
         logger.info("=" * 60)
         logger.info(f"FINAL: {len(ia_candidates)} Type Ia candidates")
         logger.info("=" * 60)
@@ -266,6 +329,76 @@ class SupernovaMonitor:
         lc = self.brokers[broker].get_light_curve(object_id)
         self._lc_cache[key] = lc
         return lc
+
+    def get_fink_light_curve(self, object_id: str = None,
+                             fink_dia_object_id: str = None,
+                             ra: float = None, dec: float = None,
+                             include_forced: bool = True) -> Optional[pd.DataFrame]:
+        """Retrieve current Rubin photometry from Fink.
+
+        This is the primary method for up-to-date light curves.
+        Provide fink_dia_object_id directly, or (ra, dec) for
+        positional matching.
+        """
+        if self.fink_client is None:
+            logger.warning("Fink LSST client not available")
+            return None
+
+        # Resolve Fink diaObjectId
+        if fink_dia_object_id is None and ra is not None and dec is not None:
+            result = self.fink_client.cone_search(ra, dec, radius_arcsec=2.0)
+            if result is not None and len(result) > 0:
+                fink_dia_object_id = str(result.iloc[0].get("r:diaObjectId", ""))
+
+        if not fink_dia_object_id:
+            logger.warning("Could not resolve Fink diaObjectId")
+            return None
+
+        return self.fink_client.get_light_curve(
+            fink_dia_object_id, include_forced=include_forced
+        )
+
+    def get_rsp_light_curve(self, object_id: str = None,
+                            dia_object_id: int = None,
+                            ra: float = None, dec: float = None,
+                            include_forced: bool = True) -> Optional[pd.DataFrame]:
+        """Retrieve light curve from RSP for a candidate.
+
+        Provide either dia_object_id directly, or object_id (to look up
+        the cached diaObjectId from cross-matching), or (ra, dec) for an
+        on-the-fly positional match.
+        """
+        if self.rsp_client is None:
+            logger.warning("RSP TAP client not available")
+            return None
+
+        # Resolve diaObjectId
+        if dia_object_id is None and object_id is not None:
+            # Check RSP light curve cache
+            if object_id in self._rsp_lc_cache:
+                return self._rsp_lc_cache[object_id]
+
+        if dia_object_id is None and ra is not None and dec is not None:
+            # On-the-fly cross-match
+            tmp = pd.DataFrame({'ra': [ra], 'dec': [dec]})
+            matched = self.rsp_client.crossmatch_to_dia_objects(tmp)
+            if matched['diaObjectId'].notna().any():
+                dia_object_id = int(matched.iloc[0]['diaObjectId'])
+
+        if dia_object_id is None:
+            logger.warning("Could not resolve diaObjectId for RSP query")
+            return None
+
+        try:
+            lc = self.rsp_client.get_light_curve(
+                dia_object_id, include_forced=include_forced
+            )
+            if object_id is not None:
+                self._rsp_lc_cache[object_id] = lc
+            return lc
+        except Exception as e:
+            logger.warning("Failed to get RSP light curve: %s", e)
+            return None
 
     def get_atlas_light_curve(self, ra: float, dec: float,
                               mjd_min: Optional[float] = None) -> Optional[pd.DataFrame]:

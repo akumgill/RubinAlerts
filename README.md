@@ -48,13 +48,14 @@ Runs the complete ANTARES + ALeRCE + Fink pipeline with classification compariso
 
 ## What the Pipeline Does
 
-1. **Queries Fink** for SN candidates in the Rubin LSST alert stream (`sn_near_galaxy_candidate` and `extragalactic_new_candidate` tags)
-2. **Fetches supplementary photometry** from ZTF (via ALeRCE) and ATLAS forced photometry by position match
-3. **Combines all photometry** into unified multi-survey light curves (Rubin + ZTF + ATLAS) in nanoJansky flux space
-4. **Fits light curves** using both inverted parabola (per-band) and multi-band Villar SPM model with shared explosion epoch
-5. **Computes merit scores** based on time since peak and peak brightness
-6. **Filters for observability** from Las Campanas (airmass, twilight, hours up)
-7. **Generates Magellan plan** sorted by RA (assuming 30 min per observation)
+1. **Discovers candidates via Fink** — queries the Fink LSST API for SN candidates in the Rubin alert stream (`sn_near_galaxy_candidate` and `extragalactic_new_candidate` tags), filtered by Fink's ML classification scores
+2. **Fetches Rubin photometry from Fink** — for each candidate, retrieves the full multi-band (g/r/i/z) light curve from Fink, including both DiaSource detections and forced photometry at every visit (flux in nanoJanskys from Rubin difference imaging)
+3. **Fetches supplementary photometry** from ZTF (via ALeRCE, by position match) and ATLAS forced photometry (cyan/orange bands, by position match) when available
+4. **Combines all photometry** into unified multi-survey light curves (Rubin + ZTF + ATLAS) in nanoJansky flux space
+5. **Fits light curves** using both inverted parabola (per-band) and multi-band Villar SPM model with shared explosion epoch
+6. **Computes merit scores** based on time since peak and peak brightness
+7. **Filters for observability** from Las Campanas (airmass, twilight, hours up)
+8. **Generates Magellan plan** sorted by RA (assuming 30 min per observation)
 
 ## Installation
 

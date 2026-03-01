@@ -652,22 +652,40 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
     from matplotlib.backends.backend_pdf import PdfPages
 
     with PdfPages(pdf_path) as pdf:
-        # --- Page 1: Title + Summary Table ---
+        # --- Title page ---
         fig, ax = plt.subplots(figsize=(11, 8.5))
         ax.axis('off')
 
-        title_lines = [
-            f'SN Ia Monitoring Report',
-            f'MJD {mjd_now:.1f}  |  {obs_date}  |  {mjd_to_utdate(mjd_now)}',
-            f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")} UT',
-            f'{len(summary_df)} candidates with peak fits',
-        ]
-        ax.text(0.5, 0.95, '\n'.join(title_lines),
-                ha='center', va='top', fontsize=14,
-                fontfamily='monospace', transform=ax.transAxes)
+        ax.text(0.5, 0.55, 'SN Ia Monitoring Report',
+                ha='center', va='center', fontsize=28, fontweight='bold')
+        ax.text(0.5, 0.42, f'MJD {mjd_now:.1f}  |  {obs_date}  |  {mjd_to_utdate(mjd_now)}',
+                ha='center', va='center', fontsize=16, fontfamily='monospace')
+        ax.text(0.5, 0.34, f'{len(summary_df)} candidates with peak fits',
+                ha='center', va='center', fontsize=14, color='gray')
+        ax.text(0.5, 0.28, f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")} UT',
+                ha='center', va='center', fontsize=11, color='gray')
 
-        # Summary table
+        # Summary stats
+        n_atlas = (summary_df['n_atlas'] > 0).sum() if 'n_atlas' in summary_df.columns else 0
+        n_ztf = (summary_df['n_ztf'] > 0).sum() if 'n_ztf' in summary_df.columns else 0
+        n_brokers = summary_df['num_brokers'].max() if 'num_brokers' in summary_df.columns else 1
+        fields = summary_df['ddf_field'].nunique() if 'ddf_field' in summary_df.columns else 0
+        high_merit = (summary_df['merit'] > 0.1).sum() if 'merit' in summary_df.columns else 0
+
+        stats = (f'{fields} DDFs  |  {n_atlas} with ATLAS  |  {n_ztf} with ZTF  |  '
+                 f'{high_merit} high-merit (>0.1)')
+        ax.text(0.5, 0.20, stats,
+                ha='center', va='center', fontsize=10, color='dimgray')
+
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+        # --- Summary table page ---
         if len(summary_df) > 0:
+            fig, ax = plt.subplots(figsize=(11, 8.5))
+            ax.axis('off')
+            ax.set_title('Top 30 Candidates by Merit', fontsize=14, pad=20)
+
             table_df = summary_df.head(30).copy()
             table_df['RA_s'] = table_df.apply(
                 lambda r: radec_to_sexagesimal(r['ra'], r['dec'])[0], axis=1)
@@ -692,7 +710,7 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
                     lambda x: f'{x:+.1f}d' if pd.notna(x) and np.isfinite(x) else '--')
 
             # Shorten diaObjectId for display
-            display_df['diaObjectId'] = display_df['diaObjectId'].str[-10:]
+            display_df['diaObjectId'] = display_df['diaObjectId'].astype(str).str[-10:]
 
             tbl = ax.table(
                 cellText=display_df.values,
@@ -705,8 +723,8 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
             tbl.auto_set_column_width(range(len(display_df.columns)))
             tbl.scale(1.0, 1.3)
 
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
 
         # --- Page 2: Merit vs peak_mag scatter ---
         if len(summary_df) > 0:
@@ -780,7 +798,8 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
         # --- Remaining pages: light curve plots, 4 per page ---
         # Sort by merit (best first)
         ordered = summary_df.sort_values('merit', ascending=False, na_position='last')
-        plot_dids = [did for did in ordered['diaObjectId'] if did in plot_paths]
+        plot_dids = [did for did in ordered['diaObjectId']
+                     if did in plot_paths or str(did) in plot_paths]
 
         for page_start in range(0, len(plot_dids), 4):
             page_dids = plot_dids[page_start:page_start + 4]
@@ -790,7 +809,8 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
                 axes = [axes]
 
             for ax, did in zip(axes, page_dids):
-                img = plt.imread(plot_paths[did])
+                path = plot_paths.get(did) or plot_paths.get(str(did))
+                img = plt.imread(path)
                 ax.imshow(img)
                 ax.axis('off')
 
@@ -807,8 +827,10 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
+    n_plot_pages = (len(plot_dids) + 3) // 4
+    n_diag_pages = 2  # scatter triptych + discovery space
     logger.info("PDF report: %s (%d pages)", pdf_path,
-                2 + (len(plot_dids) + 3) // 4)
+                2 + n_diag_pages + n_plot_pages)  # title + table + diagnostics + lightcurves
 
 
 def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path):

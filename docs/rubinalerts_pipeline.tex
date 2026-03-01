@@ -670,76 +670,127 @@ for SN~Ia at the typical DDF redshift range ($z \sim 0.1$--$0.4$).  The
 first band with a successful fit (status \texttt{ok} or
 \texttt{underdetermined}) is selected.
 
-\subsection{Villar Supernova Parametric Model (SPM)}
+\subsection{Multi-Band Villar Supernova Parametric Model}
 \label{sec:villar}
 
-The pipeline also supports the Villar supernova parametric model
-\citep{Villar2019}, a six-parameter analytical model for supernova
-light curves.  When ALeRCE's database is accessible, pre-computed SPM
-features are retrieved directly (ALeRCE fits the Villar model to all
-classified transients), avoiding the need for local fitting.
+The primary peak-fitting method is a simultaneous multi-band fit of
+the Villar supernova parametric model \citep{Villar2019} directly to
+the combined Rubin\,+\,ZTF\,+\,ATLAS light curve data.  This fit
+uses a shared explosion epoch $t_0$ across all bands while allowing
+per-band amplitude and timescale parameters, providing much more
+robust peak estimates than independent per-band fits.
 
 \subsubsection{Model Definition}
 
 The Villar model describes the flux as a function of time with a smooth
-rise and exponential decline:
+sigmoid rise and exponential decline:
 \begin{equation}
 \label{eq:villar}
 F(t) =
 \begin{cases}
 \displaystyle
-\frac{A\!\left[1 - \beta\,\frac{t - t_{\mathrm{ref}}}{t_1 - t_{\mathrm{ref}}}\right]}
-{1 + \exp\!\left(-\frac{t - t_{\mathrm{ref}}}{\tau_{\mathrm{rise}}}\right)},
-& t < t_1, \\[12pt]
+\frac{A\!\left[1 - \beta\,\frac{t - t_0}{t_0 + \gamma - t_0}\right]}
+{1 + \exp\!\left(-\frac{t - t_0}{\tau_{\mathrm{rise}}}\right)},
+& t < t_0 + \gamma, \\[12pt]
 \displaystyle
-\frac{A(1-\beta)\,\exp\!\left(-\frac{t - t_1}{\tau_{\mathrm{fall}}}\right)}
-{1 + \exp\!\left(-\frac{t - t_{\mathrm{ref}}}{\tau_{\mathrm{rise}}}\right)},
-& t \geq t_1,
+\frac{A(1-\beta)\,\exp\!\left(-\frac{t - t_0 - \gamma}{\tau_{\mathrm{fall}}}\right)}
+{1 + \exp\!\left(-\frac{t - t_0}{\tau_{\mathrm{rise}}}\right)},
+& t \geq t_0 + \gamma,
 \end{cases}
 \end{equation}
-where $t_{\mathrm{ref}} = \mathrm{firstMJD} + t_0$ is the reference
-time, $t_1 = t_{\mathrm{ref}} + \gamma$ is the transition time, $A$ is
-the amplitude (in units of $10^{26}$~erg\,s$^{-1}$\,cm$^{-2}$\,Hz$^{-1}$),
-$\beta$ controls the pre-maximum slope, $\tau_{\mathrm{rise}}$ and
-$\tau_{\mathrm{fall}}$ are the rise and fall timescales, and $\gamma$
-sets the plateau duration.
+where $t_0$ is the explosion epoch (MJD), $A$ is the peak amplitude
+in nanoJanskys, $\beta$ controls the pre-maximum slope,
+$\gamma$ sets the rise-to-decline transition time,
+$\tau_{\mathrm{rise}}$ and $\tau_{\mathrm{fall}}$ are the rise and
+fall timescales in days.
 
-The six free parameters per band are: $A$, $t_0$, $\beta$, $\gamma$,
-$\tau_{\mathrm{rise}}$, $\tau_{\mathrm{fall}}$.  In ALeRCE's database
-these are stored with a filter suffix (e.g., \texttt{SPM\_A\_1} for
-$g$-band, \texttt{SPM\_A\_2} for $r$-band).
+\subsubsection{Multi-Band Fitting Strategy}
+
+The key innovation is sharing $t_0$ across all photometric bands.
+For $N_b$ bands, the parameter vector is:
+\begin{equation}
+\vec{p} = \bigl[t_0,\; A_1, \beta_1, \gamma_1, \tau_{\mathrm{rise},1},
+\tau_{\mathrm{fall},1},\; A_2, \beta_2, \ldots\bigr],
+\end{equation}
+with $1 + 5N_b$ total free parameters.  The fit minimizes
+\begin{equation}
+\chi^2 = \sum_{b=1}^{N_b} \sum_{i=1}^{n_b}
+\left(\frac{F_{b,i}^{\mathrm{obs}} - F_b(t_i;\,\vec{p})}
+{\sigma_{b,i}}\right)^2
+\end{equation}
+using \texttt{scipy.optimize.least\_squares} with the Trust Region
+Reflective algorithm and Huber-like \texttt{soft\_l1} robust loss
+function, which down-weights outliers.  Bounds constrain all
+parameters to physically reasonable ranges (e.g., $A > 0$,
+$0 < \beta < 1$, $\gamma > 1$~day).
+
+This multi-band approach constrains the explosion epoch using data
+from every available band simultaneously, which is particularly
+valuable for the Rubin DDFs where $g$, $r$, $i$, $z$ photometry
+is available plus supplementary ZTF $g$/$r$ and ATLAS cyan/orange
+data when the target is in the northern sky.
+
+\subsubsection{Light Curve Cleaning}
+
+Before fitting, the \texttt{clean\_light\_curve()} function processes
+the combined photometry:
+\begin{enumerate}
+\item \textbf{Deduplication:} When a DiaSource detection and a
+forced-photometry measurement exist at the same (MJD, band), the
+detection is kept (it has better-characterized uncertainties).
+\item \textbf{Sigma clipping:} Per (night, band) group, points
+deviating more than $4\sigma$ from the inverse-variance weighted
+mean flux are rejected.  This removes catastrophic outliers from
+difference-imaging artifacts.
+\end{enumerate}
 
 \subsubsection{Numerical Peak Finding}
 
 The time of peak brightness is determined by numerical maximization of
 the flux function rather than the analytic approximation $t_{\mathrm{peak}}
-\approx t_{\mathrm{ref}} + \gamma$.  The analytic formula can be
+\approx t_0 + \gamma$.  The analytic formula can be
 inaccurate by 7--21~days because the sigmoid rise term shifts the true
 flux maximum away from the transition time.
 
 The pipeline evaluates $F(t)$ on a fine grid of 2000 points spanning
-$[t_{\mathrm{ref}} - 2\tau_{\mathrm{rise}},\; t_1 + 3\tau_{\mathrm{fall}}]$
+$[t_0,\; t_0 + \gamma + 3\tau_{\mathrm{fall}}]$
 and identifies the grid point with maximum flux:
 \begin{equation}
 t_{\mathrm{peak}} = \arg\max_t F(t).
 \end{equation}
 The corresponding peak magnitude is:
 \begin{equation}
-m_{\mathrm{peak}} = -2.5\,\log_{10}(F_{\mathrm{peak}}) + 16.4\,\mathrm{mag},
+m_{\mathrm{peak}} = -2.5\,\log_{10}(F_{\mathrm{peak}}/\mathrm{nJy}) + 31.4\,\mathrm{mag},
 \end{equation}
-where the zero-point of 16.4 accounts for the $10^{26}$ amplitude
-normalization ($-2.5\log_{10}(10^{26}) + 48.6 = 16.4$; here 48.6 is
-the AB magnitude zero-point).
+where $31.4 = -2.5\log_{10}(3.631\times10^{-6}) \approx 8.9 + 22.5$ is
+the AB zero-point for nanoJansky flux units.
+
+\subsubsection{Multi-Survey Photometry Combination}
+
+The nightly pipeline (\texttt{run\_tonight.py}) combines photometry
+from up to three surveys before fitting:
+\begin{itemize}
+\item \textbf{Rubin/LSST} (via Fink): difference-imaging photometry
+  in $g$, $r$, $i$, $z$ bands, including both DiaSource detections
+  and forced photometry.  Flux in nanoJanskys (nJy).
+\item \textbf{ZTF} (via ALeRCE): detections in $g$, $r$ bands.
+  Magnitudes converted to nJy via
+  $F_{\mathrm{nJy}} = 10^{(31.4 - m)/2.5}$.
+\item \textbf{ATLAS}: forced photometry in cyan ($c$) and orange ($o$)
+  bands.  Flux in microJanskys converted via
+  $F_{\mathrm{nJy}} = F_{\mu\mathrm{Jy}} \times 1000$.
+\end{itemize}
+All photometry is standardized to a common DataFrame with columns
+\texttt{mjd}, \texttt{flux}, \texttt{flux\_err}, \texttt{band},
+\texttt{survey} before the combined fit.
 
 \subsubsection{Integration with Parabola Fits}
 
-When Villar SPM features are available from the ALeRCE database, the
-pipeline reports both parabola-based and Villar-based peak estimates.
-The Villar model provides superior peak time estimates because it uses
-an astrophysically motivated light curve shape rather than a local
-quadratic approximation.  The summary table includes columns
-\texttt{villar\_peak\_mjd} and \texttt{villar\_peak\_mag} alongside the
-parabola results.
+Both the multi-band Villar fit and per-band parabola fits are run on
+every candidate.  The Villar result is preferred when it converges
+(fit status = \texttt{ok}), with the parabola as fallback.  The
+summary table includes peak magnitude, peak MJD, delta-$t$ (days
+since peak), and the fit method used for each candidate.
 
 \subsection{Optional: SALT2 Template Fitting}
 
@@ -1075,9 +1126,9 @@ representations; all fitting is performed in flux space.
 distinct sources in crowded fields.
 \item LSST \texttt{scienceFlux} is only available for alert detections,
 not forced photometry.
-\item The inverted-parabola model is only valid near peak; the Villar
-SPM model provides a better full light curve fit but requires ALeRCE
-database access for pre-computed parameters.
+\item The inverted-parabola model is only valid near peak; the
+multi-band Villar SPM fit provides a better full light curve model
+but requires well-sampled multi-band data ($\geq 5$ points per band).
 \item Pan-STARRS and SDSS host galaxy data are only available for DDFs
 at Dec~$\gtrsim -30\degr$ (COSMOS, XMM-LSS, M49, and marginally
 ECDFS).  The three southern DDFs (ELAIS-S1, EDFS\_a, EDFS\_b) lack

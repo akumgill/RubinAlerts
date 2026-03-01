@@ -16,6 +16,9 @@ python run_tonight.py 61100 --min-prob 0.3 --max-candidates 200
 # Skip ZTF or ATLAS supplementary photometry
 python run_tonight.py 61100 --no-ztf --no-atlas
 
+# Query Fink only (faster, skips ANTARES/ALeRCE broker queries)
+python run_tonight.py 61100 --fink-only
+
 # Skip observability filtering (useful for testing)
 python run_tonight.py 61100 --no-observability
 ```
@@ -48,14 +51,16 @@ Runs the complete ANTARES + ALeRCE + Fink pipeline with classification compariso
 
 ## What the Pipeline Does
 
-1. **Discovers candidates via Fink** — queries the Fink LSST API for SN candidates in the Rubin alert stream (`sn_near_galaxy_candidate` and `extragalactic_new_candidate` tags), filtered by Fink's ML classification scores
-2. **Fetches Rubin photometry from Fink** — for each candidate, retrieves the full multi-band (g/r/i/z) light curve from Fink, including both DiaSource detections and forced photometry at every visit (flux in nanoJanskys from Rubin difference imaging)
-3. **Fetches supplementary photometry** from ZTF (via ALeRCE, by position match) and ATLAS forced photometry (cyan/orange bands, by position match) when available
-4. **Combines all photometry** into unified multi-survey light curves (Rubin + ZTF + ATLAS) in nanoJansky flux space
-5. **Fits light curves** using both inverted parabola (per-band) and multi-band Villar SPM model with shared explosion epoch
-6. **Computes merit scores** based on time since peak and peak brightness
-7. **Filters for observability** from Las Campanas (airmass, twilight, hours up)
-8. **Generates Magellan plan** sorted by RA (assuming 30 min per observation)
+1. **Queries 4 broker sources for SN candidates** — Fink (Rubin LSST alert stream), ALeRCE-ZTF (ZTF ML classifiers), ALeRCE-LSST (LSST ML classifiers), and ANTARES (ZTF + Rubin heuristics). Each broker contributes candidates from its own classification pipeline.
+2. **Merges and deduplicates** across brokers by coordinate matching (1 arcsec tolerance) and shared ZTF object IDs. Computes broker agreement scores.
+3. **Screens against known variable star catalogs** (~13,750 variables compiled for the 7 DDFs) to reject contamination.
+4. **Fetches Rubin photometry from Fink** — for each candidate, retrieves the full multi-band (g/r/i/z) light curve including DiaSource detections and forced photometry (flux in nanoJanskys from Rubin difference imaging).
+5. **Fetches supplementary photometry** from ZTF (via ALeRCE, by position match) and ATLAS forced photometry (cyan/orange bands, from fallingstar.com) when available.
+6. **Combines all photometry** into unified multi-survey light curves (Rubin + ZTF + ATLAS) in nanoJansky flux space.
+7. **Fits light curves** using both inverted parabola (per-band) and multi-band Villar SPM model with shared explosion epoch.
+8. **Computes merit scores** based on time since peak and peak brightness.
+9. **Filters for observability** from Las Campanas (airmass, twilight, hours up).
+10. **Generates Magellan plan** sorted by RA (assuming 30 min per observation).
 
 ## Installation
 

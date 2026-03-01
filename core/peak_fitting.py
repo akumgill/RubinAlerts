@@ -749,9 +749,9 @@ def fit_villar_multiband(lc_df, bands=None, extinction=None, min_points_per_band
         return {'per_band': {}, 'best': None, 'method': 'villar_multiband',
                 'shared_t0': np.nan, 'n_bands_fit': 0}
 
-    df = df[df['band'].isin(bands)].copy()
+    df = df[df['band'].isin(bands)].copy().reset_index(drop=True)
 
-    # Index mapping: which rows belong to which band
+    # Index mapping: which rows belong to which band (positional, 0-based)
     band_indices = {}
     for b in bands:
         band_indices[b] = df.index[df['band'] == b].tolist()

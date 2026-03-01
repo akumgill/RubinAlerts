@@ -229,7 +229,9 @@ The codebase is organized as follows:
 \toprule
 Module & Purpose \\
 \midrule
-\texttt{supernova\_monitor.py} & Main orchestrator class \\
+\texttt{run\_tonight.py} & Nightly CLI: all brokers $\to$ Magellan plan \\
+\texttt{supernova\_monitor.py} & Multi-broker orchestrator class \\
+\texttt{broker\_clients/fink\_client.py} & Fink LSST API (Rubin photometry) \\
 \texttt{broker\_clients/antares\_client.py} & ANTARES broker interface \\
 \texttt{broker\_clients/alerce\_client.py} & ALeRCE REST API interface (ZTF \& LSST) \\
 \texttt{broker\_clients/alerce\_db\_client.py} & ALeRCE direct PostgreSQL access \\
@@ -256,8 +258,11 @@ Module & Purpose \\
 \label{sec:data_sources}
 %% =========================================================================
 
-The pipeline queries three independent alert brokers, each providing
-different coverage, classifiers, and data products.
+The pipeline queries four independent alert broker sources, each providing
+different coverage, classifiers, and data products.  Candidates from all
+brokers are merged, deduplicated by coordinate matching (1~arcsec tolerance),
+and screened against known variable star catalogs before photometry retrieval
+and light curve fitting.
 
 \subsection{ANTARES}
 
@@ -304,6 +309,23 @@ filtering locally by DDF coordinates using \texttt{astropy}.
 ALeRCE-LSST provides the richest Rubin photometry: multi-epoch
 $ugrizy$ light curves with both alert-triggered detections and forced
 photometry at the object position.
+
+\subsection{Fink}
+
+Fink\footnote{\url{https://fink-portal.org/}} processes Rubin/LSST
+alerts through multiple machine-learning classifiers including
+\texttt{snnSnVsOthers} (SN vs.\ non-SN) and \texttt{earlySNIa} (early
+Type~Ia identification).  The pipeline queries the Fink LSST
+API\footnote{\url{https://api.lsst.fink-portal.org/}} for candidates
+tagged as \texttt{sn\_near\_galaxy\_candidate} and
+\texttt{extragalactic\_new\_candidate}, filtering by Fink's SN
+classification score.
+
+Fink serves as the primary source of Rubin prompt photometry: for each
+candidate, the pipeline retrieves the full multi-band ($grizy$) light
+curve including DiaSource detections and forced photometry at every
+visit.  Flux is provided directly in nanoJanskys from Rubin difference
+imaging.  No authentication is required.
 
 \subsection{ALeRCE Direct Database Access}
 \label{sec:alerce_db}

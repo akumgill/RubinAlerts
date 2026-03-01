@@ -6,7 +6,7 @@ RubinAlerts is a multi-broker pipeline for Type Ia supernova discovery in the Ru
 
 ### Two entry points
 
-1. **`run_tonight.py`** (CLI) — Nightly pipeline: Fink candidates → ZTF/ATLAS photometry → peak fitting → merit scoring → Magellan observing plan. Outputs to `nights/ut{YYYYMMDD}/`.
+1. **`run_tonight.py`** (CLI) — Nightly pipeline: query all 4 broker sources (Fink + ALeRCE-ZTF + ALeRCE-LSST + ANTARES) → merge/dedup → variable screening → fetch Rubin/ZTF/ATLAS photometry → peak fitting → merit scoring → Magellan observing plan. Outputs to `nights/ut{YYYYMMDD}/`. Key CLI flags: `--fink-only` (skip other brokers), `--no-ztf`, `--no-atlas`, `--no-observability`, `--min-prob`, `--max-candidates`.
 
 2. **`supernova_monitor.py`** (library) — Full multi-broker orchestrator used by the interactive notebooks. Queries ANTARES + ALeRCE (ZTF & LSST) + Fink, cross-matches, deduplicates, screens variables, applies extinction corrections and NED redshifts.
 
@@ -15,20 +15,20 @@ RubinAlerts is a multi-broker pipeline for Type Ia supernova discovery in the Ru
 ### run_tonight.py (nightly CLI)
 
 ```
-Fink LSST API
-  ├─ query sn_near_galaxy_candidate tag
-  └─ query extragalactic_new_candidate tag
-       │
-       ▼
-  Filter by SN score ≥ threshold
-  Deduplicate by diaObjectId
-  Assign DDF fields
-       │
-       ▼
-  For each candidate:
-  ├─ Fink: get_light_curve(diaObjectId)     → Rubin grizy detections + forced phot (nJy)
-  ├─ ALeRCE: cone search → ZTF detections   → mag → nJy conversion
-  └─ ATLAS: forced photometry by (RA,Dec)    → µJy → nJy conversion
+Candidate Discovery (all brokers):
+  Fink LSST API ──────┐
+  ALeRCE-ZTF ─────────┤
+  ALeRCE-LSST ────────┤── merge & deduplicate (1 arcsec)
+  ANTARES ─────────────┘         │
+                                 ▼
+                    Variable star screening (DDF catalogs)
+                    P(Ia) filtering
+                                 │
+                                 ▼
+Photometry (per candidate):
+  ├─ Fink: get_light_curve(diaObjectId)     → Rubin grizy (nJy)
+  ├─ ALeRCE: cone search → ZTF detections   → mag → nJy
+  └─ ATLAS: forced photometry (RA,Dec)       → µJy → nJy
        │
        ▼
   combine_photometry() → unified DataFrame (mjd, flux, flux_err, band, survey)

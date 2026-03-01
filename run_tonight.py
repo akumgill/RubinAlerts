@@ -42,7 +42,14 @@ from core.magellan_planning import (
 )
 from core.ddf_fields import DDF_FIELDS, is_in_ddf
 
-# Optional survey clients
+# Multi-broker support
+try:
+    from supernova_monitor import SupernovaMonitor
+    HAS_MONITOR = True
+except ImportError:
+    HAS_MONITOR = False
+
+# Optional survey clients (for supplementary photometry)
 try:
     from broker_clients.atlas_client import AtlasClient
     HAS_ATLAS = True
@@ -255,11 +262,10 @@ def mjd_to_isodate(mjd):
     return t.datetime.strftime('%Y-%m-%d')
 
 
-def fetch_candidates(fink, min_sn_score=0.3, n_fetch=500):
-    """Fetch SN candidates from Fink and filter by SN score."""
-    logger.info("Fetching SN candidates from Fink LSST API...")
+def fetch_fink_candidates(fink, min_sn_score=0.3, n_fetch=500):
+    """Fetch SN candidates from Fink and format for the multi-broker merger."""
+    logger.info("Querying Fink LSST API...")
 
-    # Get candidates from multiple tags
     frames = []
     for tag in ['sn_near_galaxy_candidate', 'extragalactic_new_candidate']:
         result = fink.query_sn_candidates(tag=tag, n=n_fetch)
@@ -268,13 +274,12 @@ def fetch_candidates(fink, min_sn_score=0.3, n_fetch=500):
             frames.append(result)
 
     if not frames:
-        logger.error("No candidates returned from Fink")
+        logger.warning("No candidates from Fink")
         return pd.DataFrame()
 
     raw = pd.concat(frames, ignore_index=True)
-    logger.info("Raw candidates: %d", len(raw))
 
-    # Parse SN score
+    # Parse scores
     raw['sn_score'] = pd.to_numeric(
         raw.get('f:clf_snnSnVsOthers_score', pd.Series(dtype=float)),
         errors='coerce',
@@ -286,27 +291,145 @@ def fetch_candidates(fink, min_sn_score=0.3, n_fetch=500):
 
     # Filter by SN score
     good = raw[raw['sn_score'] >= min_sn_score].copy()
-    logger.info("After SN score >= %.2f: %d", min_sn_score, len(good))
 
-    # Deduplicate by diaObjectId — keep highest SN score
+    # Deduplicate by diaObjectId
     good['diaObjectId'] = good['r:diaObjectId'].astype(str)
     good = good.sort_values('sn_score', ascending=False)
     good = good.drop_duplicates(subset='diaObjectId', keep='first')
-    logger.info("Unique diaObjectIds: %d", len(good))
 
-    # Extract coordinates
+    # Normalize columns for the aggregator
+    good['object_id'] = good['diaObjectId']
     good['ra'] = pd.to_numeric(good.get('r:ra', pd.Series(dtype=float)), errors='coerce')
     good['dec'] = pd.to_numeric(good.get('r:dec', pd.Series(dtype=float)), errors='coerce')
+    good['sn_ia_prob'] = good['sn_score']  # aggregator expects this column
+    good['broker'] = 'Fink'
 
-    # Assign DDF field
+    # Assign DDF fields
     good['ddf_field'] = good.apply(
         lambda r: is_in_ddf(r['ra'], r['dec']) if pd.notna(r['ra']) else None,
         axis=1,
     )
-    n_ddf = good['ddf_field'].notna().sum()
-    logger.info("In DDF fields: %d / %d", n_ddf, len(good))
 
+    logger.info("Fink: %d candidates (score >= %.2f)", len(good), min_sn_score)
     return good
+
+
+def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
+                                fink_only=False):
+    """Query all brokers for SN candidates, merge, deduplicate, screen variables.
+
+    Brokers queried:
+      - Fink LSST (always)
+      - ALeRCE-ZTF (if available)
+      - ALeRCE-LSST (if available)
+      - ANTARES (if available)
+
+    Returns a merged, deduplicated DataFrame with columns:
+      diaObjectId, ra, dec, ddf_field, sn_score, brokers_detected,
+      num_brokers, mean_ia_prob, known_variable, ...
+    """
+    # --- Always query Fink ---
+    fink_df = fetch_fink_candidates(fink, min_sn_score=min_prob, n_fetch=n_fetch)
+
+    if fink_only or not HAS_MONITOR:
+        if not HAS_MONITOR and not fink_only:
+            logger.warning("SupernovaMonitor not available; using Fink only")
+        # Fink-only path: just assign fields and return
+        if len(fink_df) == 0:
+            return pd.DataFrame()
+        fink_df['brokers_detected'] = 'Fink'
+        fink_df['num_brokers'] = 1
+        fink_df['mean_ia_prob'] = fink_df['sn_score']
+        fink_df['known_variable'] = False
+        return fink_df
+
+    # --- Query other brokers via SupernovaMonitor ---
+    logger.info("Querying ANTARES + ALeRCE brokers...")
+    try:
+        monitor = SupernovaMonitor(cache_dir='./cache/data')
+        other_brokers = monitor.query_all_brokers(
+            class_name='SNIa',
+            min_probability=min_prob,
+            days_back=days_back,
+            limit=n_fetch,
+            ddf_fields=DDF_FIELDS,
+        )
+    except Exception as e:
+        logger.warning("Multi-broker query failed: %s. Using Fink only.", e)
+        if len(fink_df) == 0:
+            return pd.DataFrame()
+        fink_df['brokers_detected'] = 'Fink'
+        fink_df['num_brokers'] = 1
+        fink_df['mean_ia_prob'] = fink_df['sn_score']
+        fink_df['known_variable'] = False
+        return fink_df
+
+    # Log per-broker counts
+    for broker_name, bdf in other_brokers.items():
+        n = len(bdf) if bdf is not None else 0
+        logger.info("  %s: %d candidates", broker_name, n)
+
+    # --- Add Fink to the broker dict ---
+    if len(fink_df) > 0:
+        other_brokers['Fink'] = fink_df
+
+    # --- Merge and deduplicate across all brokers ---
+    aggregator = monitor.aggregator
+    merged = aggregator.merge_alerts(other_brokers)
+
+    if len(merged) == 0:
+        logger.warning("No candidates after merge")
+        return pd.DataFrame()
+
+    logger.info("Merged across brokers: %d unique candidates", len(merged))
+
+    # --- Screen against known variable catalogs ---
+    try:
+        screened = monitor.variable_screener.screen_candidates(merged)
+        n_var = screened['known_variable'].sum() if 'known_variable' in screened.columns else 0
+        if n_var > 0:
+            logger.info("Flagged %d known variables — removing", n_var)
+            screened = screened[~screened['known_variable']].copy()
+    except Exception as e:
+        logger.warning("Variable screening failed: %s", e)
+        screened = merged
+
+    # --- Filter by P(Ia) ---
+    if 'mean_ia_prob' in screened.columns:
+        before = len(screened)
+        screened = screened[screened['mean_ia_prob'] >= min_prob].copy()
+        logger.info("After P(Ia) >= %.2f: %d (dropped %d)",
+                    min_prob, len(screened), before - len(screened))
+
+    # --- Normalize output columns for downstream compatibility ---
+    # Need: diaObjectId, ra, dec, ddf_field, sn_score
+    if 'diaObjectId' not in screened.columns:
+        # Use rubin_dia_object_id if available, else unique_id or object_id
+        if 'rubin_dia_object_id' in screened.columns:
+            screened['diaObjectId'] = screened['rubin_dia_object_id'].fillna(
+                screened.get('unique_id', screened.get('object_id', ''))
+            )
+        elif 'unique_id' in screened.columns:
+            screened['diaObjectId'] = screened['unique_id']
+        elif 'object_id' in screened.columns:
+            screened['diaObjectId'] = screened['object_id']
+        else:
+            screened['diaObjectId'] = [f"obj_{i}" for i in range(len(screened))]
+
+    if 'sn_score' not in screened.columns:
+        screened['sn_score'] = screened.get('mean_ia_prob', np.nan)
+
+    if 'ddf_field' not in screened.columns:
+        screened['ddf_field'] = screened.apply(
+            lambda r: is_in_ddf(r['ra'], r['dec']) if pd.notna(r.get('ra')) else None,
+            axis=1,
+        )
+
+    logger.info("Final candidates: %d from %s",
+                len(screened),
+                ', '.join(sorted(set(screened.get('brokers_detected', pd.Series(['Fink'])).dropna()))))
+
+    return screened
 
 
 def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True):
@@ -449,6 +572,9 @@ def build_summary_table(candidates_df, fit_results, mjd_now):
             'ddf_field': cand.get('ddf_field', ''),
             'sn_score': cand.get('sn_score', np.nan),
             'early_ia_score': cand.get('early_ia_score', np.nan),
+            'brokers_detected': cand.get('brokers_detected', 'Fink'),
+            'num_brokers': cand.get('num_brokers', 1),
+            'mean_ia_prob': cand.get('mean_ia_prob', np.nan),
             'peak_mag': peak_mag,
             'peak_mjd': fit['peak_mjd'],
             'peak_band': fit['peak_band'],
@@ -523,7 +649,8 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
 
             display_cols = ['diaObjectId', 'ddf_field', 'RA_s', 'Dec_s',
                            'peak_mag', 'peak_band', 'delta_t', 'merit',
-                           'sn_score', 'fit_method', 'surveys']
+                           'brokers_detected', 'num_brokers', 'fit_method',
+                           'surveys']
             display_df = table_df[
                 [c for c in display_cols if c in table_df.columns]
             ].copy()
@@ -644,10 +771,10 @@ def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path):
     lines.append('#')
     lines.append(f'# {"#":>3s}  {"Object":20s}  {"RA":>11s}  {"Dec":>10s}  '
                  f'{"Band":>4s}  {"PkMag":>6s}  {"dt":>6s}  {"Merit":>6s}  '
-                 f'{"DDF":>8s}  {"Method":>10s}  {"Surveys":>16s}')
+                 f'{"DDF":>8s}  {"Brokers":>20s}  {"Phot":>16s}')
     lines.append(f'# {"---":>3s}  {"----":20s}  {"--":>11s}  {"---":>10s}  '
                  f'{"----":>4s}  {"-----":>6s}  {"--":>6s}  {"-----":>6s}  '
-                 f'{"---":>8s}  {"------":>10s}  {"-------":>16s}')
+                 f'{"---":>8s}  {"-------":>20s}  {"----":>16s}')
 
     for i, (_, row) in enumerate(df.iterrows()):
         ra_s, dec_s = radec_to_sexagesimal(row['ra'], row['dec'])
@@ -657,13 +784,13 @@ def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path):
         merit = f"{row['merit']:.3f}" if np.isfinite(row.get('merit', np.nan)) else '--'
         ddf = row.get('ddf_field', '') or ''
         band = row.get('peak_band', '') or ''
-        method = row.get('fit_method', '') or ''
+        brokers = row.get('brokers_detected', 'Fink') or 'Fink'
         surveys = row.get('surveys', 'Rubin') or 'Rubin'
         did = str(row['diaObjectId'])[-12:]
 
         lines.append(f'  {i+1:3d}  {did:20s}  {ra_s:>11s}  {dec_s:>10s}  '
                      f'{band:>4s}  {pmag:>6s}  {dt:>6s}  {merit:>6s}  '
-                     f'{ddf:>8s}  {method:>10s}  {surveys:>16s}')
+                     f'{ddf:>8s}  {brokers:>20s}  {surveys:>16s}')
 
     lines.append('#')
     lines.append(f'# Total observing time: ~{len(df) * 0.5:.1f} hours '
@@ -699,6 +826,8 @@ def main():
                         help='Skip ZTF photometry from ALeRCE')
     parser.add_argument('--no-atlas', action='store_true',
                         help='Skip ATLAS forced photometry')
+    parser.add_argument('--fink-only', action='store_true',
+                        help='Only query Fink (skip ANTARES/ALeRCE brokers)')
 
     args = parser.parse_args()
     mjd_now = args.mjd
@@ -725,9 +854,18 @@ def main():
         sys.exit(1)
     logger.info("Fink LSST API: connected")
 
-    # --- Step 2: Fetch candidates ---
-    candidates = fetch_candidates(fink, min_sn_score=args.min_prob,
-                                  n_fetch=args.max_candidates)
+    # --- Step 2: Query all brokers, merge, deduplicate, screen variables ---
+    if args.fink_only:
+        logger.info("Mode: Fink only (--fink-only)")
+    else:
+        logger.info("Mode: All brokers (Fink + ANTARES + ALeRCE-ZTF + ALeRCE-LSST)")
+    candidates = fetch_all_broker_candidates(
+        fink,
+        min_prob=args.min_prob,
+        days_back=args.days_back,
+        n_fetch=args.max_candidates,
+        fink_only=args.fink_only,
+    )
     if len(candidates) == 0:
         logger.error("No candidates found")
         sys.exit(1)

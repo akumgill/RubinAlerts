@@ -416,8 +416,13 @@ def villar_flux(mjd, firstmjd, A, t0, beta, gamma, tau_rise, tau_fall):
     return F
 
 
-def villar_peak_from_params(firstmjd, A, t0, gamma, beta, tau_rise, chi=None):
+def villar_peak_from_params(firstmjd, A, t0, gamma, beta, tau_rise, tau_fall=None, chi=None):
     """Extract peak time and magnitude from Villar SPM parameters.
+
+    Finds the true flux maximum numerically by evaluating the model on a
+    fine grid and locating where the flux peaks.  This is more accurate
+    than the analytic formula ``peak_mjd = firstmjd + t0 + gamma`` because
+    the sigmoid rise term shifts the actual maximum.
 
     Parameters
     ----------
@@ -425,6 +430,8 @@ def villar_peak_from_params(firstmjd, A, t0, gamma, beta, tau_rise, chi=None):
         First detection MJD.
     A, t0, gamma, beta, tau_rise : float
         SPM parameters from ALeRCE feature table.
+    tau_fall : float, optional
+        Decline timescale. If None, defaults to tau_rise.
     chi : float, optional
         SPM goodness of fit (chi-squared).
 
@@ -447,16 +454,24 @@ def villar_peak_from_params(firstmjd, A, t0, gamma, beta, tau_rise, chi=None):
         result['status'] = 'invalid_params'
         return result
 
-    # Peak time
-    peak_mjd = firstmjd + t0 + gamma
-    result['peak_mjd'] = peak_mjd
+    if tau_fall is None:
+        tau_fall = tau_rise
 
-    # Evaluate flux at peak — at the peak, the rising formula gives F ≈ A*(1-beta) / denominator
-    # More precisely, evaluate the model at the peak time
-    peak_flux = villar_flux(
-        np.array([peak_mjd]), firstmjd,
-        A, t0, beta, gamma, tau_rise, tau_rise,  # tau_fall unused at peak
-    )[0]
+    # Numerically find the flux maximum on a fine grid around the
+    # analytic transition point (firstmjd + t0 + gamma).
+    mjd_approx = firstmjd + t0 + gamma
+    search_lo = firstmjd + t0 - 2 * tau_rise
+    search_hi = mjd_approx + 3 * tau_fall
+    mjd_grid = np.linspace(search_lo, search_hi, 2000)
+
+    flux_grid = villar_flux(mjd_grid, firstmjd,
+                            A, t0, beta, gamma, tau_rise, tau_fall)
+
+    idx_max = np.argmax(flux_grid)
+    peak_flux = flux_grid[idx_max]
+    peak_mjd = mjd_grid[idx_max]
+
+    result['peak_mjd'] = peak_mjd
 
     if peak_flux > 0:
         result['peak_mag'] = -2.5 * np.log10(peak_flux) + VILLAR_FLUX_ZP
@@ -501,11 +516,13 @@ def extract_villar_peaks(features_df, firstmjd_lookup):
             beta = row.get(f'SPM_beta{sfx}', np.nan)
             gamma = row.get(f'SPM_gamma{sfx}', np.nan)
             tau_rise = row.get(f'SPM_tau_rise{sfx}', np.nan)
+            tau_fall = row.get(f'SPM_tau_fall{sfx}', np.nan)
             chi = row.get(f'SPM_chi{sfx}', np.nan)
 
             if not np.isnan(A):
                 peak = villar_peak_from_params(
-                    firstmjd, A, t0, gamma, beta, tau_rise, chi=chi,
+                    firstmjd, A, t0, gamma, beta, tau_rise,
+                    tau_fall=tau_fall, chi=chi,
                 )
                 peak['band'] = band
                 oid_results[band] = peak

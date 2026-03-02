@@ -448,7 +448,7 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
         coord_lookup[row['diaObjectId']] = (row['ra'], row['dec'])
 
     # MJD lower bound for ATLAS queries (avoid fetching years of old data)
-    atlas_mjd_min = mjd_now - 180  # 6 months back
+    atlas_mjd_min = mjd_now - 30  # 30 days back
 
     # ---- Pass 1: Fetch Fink photometry and identify bright candidates ----
     FINK_MAX_CONSECUTIVE_FAILURES = 5
@@ -682,7 +682,15 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
             logger.warning("  Fit converged but peak is NaN — skipping")
             continue
 
-        delta_t = mjd_now - peak_mjd if np.isfinite(peak_mjd) else np.nan
+        delta_t = mjd_now - peak_mjd
+
+        # Sanity cuts on fitted peak
+        if peak_mag > 26.0:
+            logger.warning("  Unphysical peak mag %.1f (>26) — skipping", peak_mag)
+            continue
+        if abs(delta_t) > 60:
+            logger.warning("  Peak too far from now (dt=%.0fd, limit 60d) — skipping", delta_t)
+            continue
 
         # Track survey coverage
         surveys_present = combined['survey'].unique().tolist() if 'survey' in combined.columns else ['Rubin']
@@ -799,9 +807,10 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
         fig, ax = plt.subplots(figsize=(11, 8.5))
         ax.axis('off')
 
-        ax.text(0.5, 0.55, 'SN Ia Monitoring Report',
+        ut_stamp = mjd_to_utdate(mjd_now)
+        ax.text(0.5, 0.55, f'SN Ia Monitoring Report — {ut_stamp}',
                 ha='center', va='center', fontsize=28, fontweight='bold')
-        ax.text(0.5, 0.42, f'MJD {mjd_now:.1f}  |  {obs_date}  |  {mjd_to_utdate(mjd_now)}',
+        ax.text(0.5, 0.42, f'MJD {mjd_now:.1f}  |  {obs_date}',
                 ha='center', va='center', fontsize=16, fontfamily='monospace')
         ax.text(0.5, 0.34, f'{len(summary_df)} candidates with peak fits',
                 ha='center', va='center', fontsize=14, color='gray')
@@ -939,29 +948,35 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
                 plt.close(fig)
 
         # --- Remaining pages: light curve plots, 4 per page ---
-        # Sort by merit (best first)
+        # Sort by merit (best first) to match follow-up priority
         ordered = summary_df.sort_values('merit', ascending=False, na_position='last')
-        plot_dids = [did for did in ordered['diaObjectId']
-                     if did in plot_paths or str(did) in plot_paths]
+        # Build ranked list: (rank, diaObjectId) for candidates with plots
+        ranked_dids = []
+        for rank, (_, row) in enumerate(ordered.iterrows(), 1):
+            did = row['diaObjectId']
+            if did in plot_paths or str(did) in plot_paths:
+                ranked_dids.append((rank, did))
 
-        for page_start in range(0, len(plot_dids), 4):
-            page_dids = plot_dids[page_start:page_start + 4]
-            n = len(page_dids)
+        for page_start in range(0, len(ranked_dids), 4):
+            page_items = ranked_dids[page_start:page_start + 4]
+            n = len(page_items)
             fig, axes = plt.subplots(n, 1, figsize=(11, 4 * n))
             if n == 1:
                 axes = [axes]
 
-            for ax, did in zip(axes, page_dids):
+            for ax, (rank, did) in zip(axes, page_items):
                 path = plot_paths.get(did) or plot_paths.get(str(did))
                 img = plt.imread(path)
                 ax.imshow(img)
                 ax.axis('off')
 
-                # Add merit annotation
+                # Add rank and merit annotation
                 row = summary_df[summary_df['diaObjectId'] == did]
                 if len(row) > 0:
                     r = row.iloc[0]
-                    info = f"Merit={r['merit']:.3f}" if pd.notna(r['merit']) else ""
+                    info = f"#{rank}"
+                    if pd.notna(r['merit']):
+                        info += f"  Merit={r['merit']:.3f}"
                     if pd.notna(r.get('ddf_field')):
                         info += f"  DDF={r['ddf_field']}"
                     ax.set_title(info, fontsize=9, loc='right')
@@ -970,7 +985,7 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
-    n_plot_pages = (len(plot_dids) + 3) // 4
+    n_plot_pages = (len(ranked_dids) + 3) // 4
     n_diag_pages = 2  # scatter triptych + discovery space
     logger.info("PDF report: %s (%d pages)", pdf_path,
                 2 + n_diag_pages + n_plot_pages)  # title + table + diagnostics + lightcurves

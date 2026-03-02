@@ -202,10 +202,15 @@ def fit_parabola_single_band(mjd, flux, flux_err, band_name='?', A_band=None):
     p0 = [flux[idx_max], mjd[idx_max], 1.0]
 
     try:
+        # Bounds: peak_flux unconstrained, t0 within data range, a > 0 (concave down)
+        bounds = (
+            [-np.inf, mjd.min() - 50, 0.0],      # lower bounds
+            [np.inf,  mjd.max() + 50, np.inf],    # upper bounds
+        )
         popt, pcov = curve_fit(
             _inverted_parabola, mjd, flux,
             p0=p0, sigma=flux_err, absolute_sigma=True,
-            maxfev=5000,
+            bounds=bounds, maxfev=5000,
         )
     except (RuntimeError, ValueError) as e:
         logger.debug("Parabola fit failed for band %s: %s", band_name, e)
@@ -889,17 +894,46 @@ def fit_villar_multiband(lc_df, bands=None, extinction=None, min_points_per_band
             'status': status,
         }
 
-    # Pick best band
+    # Compute chi2-weighted average peak time across all good bands.
+    # Weight = n_points / chi2_dof (more data + better fit = more weight).
+    # Peak magnitude is band-dependent, so we still pick the best single band
+    # for the headline mag, but peak_mjd benefits from multiband averaging.
+    good_bands = {b: info for b, info in per_band.items()
+                  if info['status'] == 'ok' and np.isfinite(info['peak_mjd'])}
+
+    weighted_peak_mjd = np.nan
+    if good_bands:
+        weights = []
+        peak_mjds = []
+        for b, info in good_bands.items():
+            w = info['n_points'] / max(info['chi2_dof'], 0.01)
+            weights.append(w)
+            peak_mjds.append(info['peak_mjd'])
+        weights = np.array(weights)
+        peak_mjds = np.array(peak_mjds)
+        weighted_peak_mjd = float(np.average(peak_mjds, weights=weights))
+        logger.info("  Peak MJD: weighted avg %.2f from %d bands "
+                    "(spread %.2f d, weights: %s)",
+                    weighted_peak_mjd, len(good_bands),
+                    peak_mjds.max() - peak_mjds.min(),
+                    ', '.join(f"{b}={w:.1f}" for (b, _), w
+                              in zip(good_bands.items(), weights)))
+
+    # Pick best band for headline magnitude (by priority, best chi2 as tiebreak)
     best = None
     for b in BAND_PRIORITY:
-        if b in per_band and per_band[b]['status'] == 'ok':
-            best = per_band[b]
+        if b in good_bands:
+            best = good_bands[b].copy()
             break
     if best is None:
-        for b in per_band:
-            if per_band[b]['status'] == 'ok':
-                best = per_band[b]
-                break
+        # Fallback: band with lowest chi2_dof
+        if good_bands:
+            best_b = min(good_bands, key=lambda b: good_bands[b]['chi2_dof'])
+            best = good_bands[best_b].copy()
+
+    # Override peak_mjd with the multiband weighted average
+    if best is not None and np.isfinite(weighted_peak_mjd):
+        best['peak_mjd'] = weighted_peak_mjd
 
     logger.info("Multi-band Villar: %d bands, shared t0=%.1f, chi2/dof=%.2f",
                 n_bands, shared_t0, chi2_dof)
@@ -909,6 +943,8 @@ def fit_villar_multiband(lc_df, bands=None, extinction=None, min_points_per_band
         'method': 'villar_multiband',
         'shared_t0': shared_t0,
         'n_bands_fit': n_bands,
+        'n_bands_good': len(good_bands),
+        'weighted_peak_mjd': weighted_peak_mjd,
         'chi2_dof_global': chi2_dof,
     }
 

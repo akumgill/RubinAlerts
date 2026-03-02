@@ -30,7 +30,7 @@ This creates a night directory `nights/ut20260301/` containing:
 | `candidates.csv` | Summary table of all candidates with peak fits and merit scores |
 | `magellan_plan.cat` | Magellan TCS catalog (RA-ordered, 16-field format) |
 | `observing_schedule.txt` | Human-readable schedule with coordinates, magnitudes, merit |
-| `report.pdf` | Multi-page PDF: title page, summary table, discovery space plot, light curves |
+| `report_{ut_stamp}.pdf` | Multi-page PDF: title page, summary table, discovery space plot, light curves |
 | `lightcurves/*.png` | Per-candidate magnitude-space light curve plots |
 | `pipeline.log` | Full DEBUG-level log of the pipeline run (warnings, errors, timing) |
 

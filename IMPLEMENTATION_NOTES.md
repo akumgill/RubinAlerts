@@ -46,7 +46,7 @@ Photometry (two-pass):
   filter_observable_targets(Las Campanas)
        │
        ▼
-  Output: candidates.csv, magellan_plan.cat, report.pdf, lightcurves/, pipeline.log
+  Output: candidates.csv, magellan_plan.cat, report_{ut_stamp}.pdf, lightcurves/, pipeline.log
 ```
 
 ### supernova_monitor.py (full pipeline)

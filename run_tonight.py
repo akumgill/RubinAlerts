@@ -9,7 +9,7 @@ Usage:
 Creates a night directory (e.g., nights/ut20260301/) containing:
     - candidates.csv          Summary table of all candidates
     - magellan_plan.cat       Magellan TCS catalog (RA-ordered)
-    - report.pdf              Multi-page PDF with light curves and summary
+    - report_{ut_stamp}.pdf   Multi-page PDF with light curves and summary
     - lightcurves/            Per-candidate magnitude plots (PNG)
 """
 
@@ -808,9 +808,12 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
         ax.axis('off')
 
         ut_stamp = mjd_to_utdate(mjd_now)
-        ax.text(0.5, 0.55, f'SN Ia Monitoring Report — {ut_stamp}',
+        ax.text(0.5, 0.60, 'SN Ia Monitoring Report',
                 ha='center', va='center', fontsize=28, fontweight='bold')
-        ax.text(0.5, 0.42, f'MJD {mjd_now:.1f}  |  {obs_date}',
+        ax.text(0.5, 0.48, ut_stamp,
+                ha='center', va='center', fontsize=32, fontweight='bold',
+                fontfamily='monospace')
+        ax.text(0.5, 0.38, f'MJD {mjd_now:.1f}  |  {obs_date}',
                 ha='center', va='center', fontsize=16, fontfamily='monospace')
         ax.text(0.5, 0.34, f'{len(summary_df)} candidates with peak fits',
                 ha='center', va='center', fontsize=14, color='gray')
@@ -1193,7 +1196,7 @@ def main():
     generate_observing_schedule(plan, mjd_now, obs_date, sched_path)
 
     # PDF report
-    pdf_path = os.path.join(night_dir, 'report.pdf')
+    pdf_path = os.path.join(night_dir, f'report_{ut_stamp}.pdf')
     generate_pdf_report(summary, fit_results, plot_paths,
                         pdf_path, mjd_now, obs_date)
 
@@ -1205,7 +1208,7 @@ def main():
     logger.info("  candidates.csv         %d candidates", len(summary))
     logger.info("  magellan_plan.cat      %d targets (RA-ordered)", len(plan))
     logger.info("  observing_schedule.txt readable schedule")
-    logger.info("  report.pdf             summary + light curves")
+    logger.info("  report_%s.pdf       summary + light curves", ut_stamp)
     logger.info("  lightcurves/           %d plots", len(plot_paths))
 
     # Survey coverage summary

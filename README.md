@@ -30,8 +30,9 @@ This creates a night directory `nights/ut20260301/` containing:
 | `candidates.csv` | Summary table of all candidates with peak fits and merit scores |
 | `magellan_plan.cat` | Magellan TCS catalog (RA-ordered, 16-field format) |
 | `observing_schedule.txt` | Human-readable schedule with coordinates, magnitudes, merit |
-| `report.pdf` | Multi-page PDF: summary table, diagnostic plots, light curves |
+| `report.pdf` | Multi-page PDF: title page, summary table, discovery space plot, light curves |
 | `lightcurves/*.png` | Per-candidate magnitude-space light curve plots |
+| `pipeline.log` | Full DEBUG-level log of the pipeline run (warnings, errors, timing) |
 
 ### Interactive supervision (notebook)
 
@@ -55,7 +56,7 @@ Runs the complete ANTARES + ALeRCE + Fink pipeline with classification compariso
 2. **Merges and deduplicates** across brokers by coordinate matching (1 arcsec tolerance) and shared ZTF object IDs. Computes broker agreement scores.
 3. **Screens against known variable star catalogs** (~13,750 variables compiled for the 7 DDFs) to reject contamination.
 4. **Fetches Rubin photometry from Fink** — for each candidate, retrieves the full multi-band (g/r/i/z) light curve including DiaSource detections and forced photometry (flux in nanoJanskys from Rubin difference imaging).
-5. **Fetches supplementary photometry** from ZTF (via ALeRCE, by position match) and ATLAS forced photometry (cyan/orange bands, from fallingstar.com) when available.
+5. **Fetches supplementary photometry** from ZTF (via ALeRCE, by position match) and ATLAS forced photometry (cyan/orange bands, batch API via fallingstar.com) for candidates brighter than 20th magnitude.
 6. **Combines all photometry** into unified multi-survey light curves (Rubin + ZTF + ATLAS) in nanoJansky flux space.
 7. **Fits light curves** using both inverted parabola (per-band) and multi-band Villar SPM model with shared explosion epoch.
 8. **Computes merit scores** based on time since peak and peak brightness.

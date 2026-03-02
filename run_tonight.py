@@ -447,14 +447,33 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
     atlas_mjd_min = mjd_now - 180  # 6 months back
 
     # ---- Pass 1: Fetch Fink photometry and identify bright candidates ----
+    FINK_MAX_CONSECUTIVE_FAILURES = 5
     fink_data = {}  # did -> DataFrame
     bright_for_atlas = []  # (did, ra, dec) for candidates brighter than cut
+    consecutive_fink_failures = 0
+    fink_skipped = 0
     for i, did in enumerate(dia_ids):
+        # Circuit breaker: if Fink API is consistently failing, skip remaining
+        if consecutive_fink_failures >= FINK_MAX_CONSECUTIVE_FAILURES:
+            fink_skipped += 1
+            continue
+
         logger.info("[%d/%d] Fink: %s", i + 1, len(dia_ids), did)
         fink_lc = fink.get_light_curve(str(did), include_forced=True)
         if fink_lc is None or len(fink_lc) == 0:
-            logger.warning("  No Fink light curve")
+            consecutive_fink_failures += 1
+            logger.warning("  No Fink light curve (consecutive failures: %d/%d)",
+                           consecutive_fink_failures, FINK_MAX_CONSECUTIVE_FAILURES)
+            if consecutive_fink_failures >= FINK_MAX_CONSECUTIVE_FAILURES:
+                logger.error("Fink API: %d consecutive failures — "
+                             "skipping remaining %d candidates. "
+                             "Server may be down.",
+                             FINK_MAX_CONSECUTIVE_FAILURES,
+                             len(dia_ids) - i - 1)
             continue
+
+        # Success — reset counter
+        consecutive_fink_failures = 0
         fink_data[did] = fink_lc
 
         # Check if any Rubin detection is brighter than the ATLAS cut
@@ -466,7 +485,9 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
                 if np.isfinite(ra) and np.isfinite(dec):
                     bright_for_atlas.append((str(did), ra, dec))
 
-    logger.info("Fink photometry: %d/%d candidates have data", len(fink_data), len(dia_ids))
+    logger.info("Fink photometry: %d/%d candidates have data%s",
+                len(fink_data), len(dia_ids),
+                f" ({fink_skipped} skipped — Fink API down)" if fink_skipped else "")
 
     # ---- Batch ATLAS for bright candidates ----
     atlas_data = {}  # did -> DataFrame (nJy format)
@@ -926,6 +947,15 @@ def main():
     lc_dir = os.path.join(night_dir, 'lightcurves')
     os.makedirs(lc_dir, exist_ok=True)
     logger.info("Output directory: %s", night_dir)
+
+    # Add file handler so all log messages (including warnings) go to a log file
+    log_path = os.path.join(night_dir, 'pipeline.log')
+    file_handler = logging.FileHandler(log_path, mode='w')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(name)s %(levelname)s %(message)s'))
+    logging.getLogger().addHandler(file_handler)
+    logger.info("Log file: %s", log_path)
 
     # --- Step 1: Connect to Fink ---
     fink = FinkLSSTClient()

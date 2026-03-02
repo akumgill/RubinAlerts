@@ -25,10 +25,15 @@ Candidate Discovery (all brokers):
                     P(Ia) filtering
                                  │
                                  ▼
-Photometry (per candidate):
-  ├─ Fink: get_light_curve(diaObjectId)     → Rubin grizy (nJy)
-  ├─ ALeRCE: cone search → ZTF detections   → mag → nJy
-  └─ ATLAS: forced photometry (RA,Dec)       → µJy → nJy
+Photometry (two-pass):
+  Pass 1 — Fink (all candidates):
+  ├─ get_light_curve(diaObjectId)            → Rubin grizy (nJy)
+  ├─ Circuit breaker: 5 consecutive failures → skip remaining
+  └─ Identify bright candidates (< 20th mag)
+       │
+  Pass 2 — Supplementary (bright only):
+  ├─ ATLAS: batch forced photometry          → µJy → nJy (mag < 20 cut)
+  └─ ALeRCE: cone search → ZTF detections   → mag → nJy
        │
        ▼
   combine_photometry() → unified DataFrame (mjd, flux, flux_err, band, survey)
@@ -41,7 +46,7 @@ Photometry (per candidate):
   filter_observable_targets(Las Campanas)
        │
        ▼
-  Output: candidates.csv, magellan_plan.cat, report.pdf, lightcurves/
+  Output: candidates.csv, magellan_plan.cat, report.pdf, lightcurves/, pipeline.log
 ```
 
 ### supernova_monitor.py (full pipeline)
@@ -143,6 +148,27 @@ SQLite database stores:
 - Extinction values (keyed by RA/Dec with 0.1 arcmin tolerance)
 - NED redshift lookups
 - Peak fit results for Magellan planning
+
+## ATLAS Batch Photometry
+
+ATLAS forced photometry is only queried for candidates brighter than 20th magnitude (`ATLAS_BRIGHT_MAG_CUT = 20.0`), since ATLAS's detection limit is ~19.5–20 mag. The pipeline uses a batch approach:
+
+1. After Fink photometry is fetched, identify candidates with any Rubin detection brighter than 20th mag
+2. Submit all qualifying targets as a single batch to the ATLAS `radeclist` endpoint (up to 100 per batch)
+3. Poll all tasks in parallel until complete
+4. Download and parse results into standard nJy format
+
+This is much faster than per-candidate queries — a batch of ~20 targets typically completes in under 10 minutes.
+
+## Resilience and Logging
+
+### Pipeline log file
+
+Every run writes a DEBUG-level log to `nights/ut{date}/pipeline.log`. This captures all warnings, errors, and timing information for post-run diagnostics. Console output remains at INFO level.
+
+### Fink API circuit breaker
+
+The Fink photometry loop tracks consecutive failures. After `FINK_MAX_CONSECUTIVE_FAILURES` (default 5) consecutive timeouts or empty responses, the pipeline skips remaining Fink photometry requests and logs an error. This prevents the pipeline from hanging for hours when the Fink API is down (each failed request takes ~60s to timeout, so 5 failures = ~5 minutes before the circuit breaker trips). Candidates that were already fetched successfully are still fit and scored.
 
 ## Known Limitations
 

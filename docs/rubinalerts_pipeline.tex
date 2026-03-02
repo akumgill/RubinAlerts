@@ -799,7 +799,10 @@ from up to three surveys before fitting:
   Magnitudes converted to nJy via
   $F_{\mathrm{nJy}} = 10^{(31.4 - m)/2.5}$.
 \item \textbf{ATLAS}: forced photometry in cyan ($c$) and orange ($o$)
-  bands.  Flux in microJanskys converted via
+  bands, queried only for candidates brighter than 20th magnitude
+  (the approximate ATLAS detection limit).  Targets are submitted
+  in batch via the \texttt{radeclist} API endpoint for efficiency.
+  Flux in microJanskys converted via
   $F_{\mathrm{nJy}} = F_{\mu\mathrm{Jy}} \times 1000$.
 \end{itemize}
 All photometry is standardized to a common DataFrame with columns
@@ -1117,8 +1120,16 @@ from Las Campanas, RA-ordered target lists, and instrument-specific
 rotator presets (LDSS3C, IMACS, MagE, FIRE).
 \item CSV export of candidate tables with timestamps.
 \item Diagnostic plots: light curves with Villar SPM overlays and peak
-markers, peak magnitude vs.\ MJD scatter plots, extinction histograms,
-redshift distributions, and Hubble diagrams.
+markers, discovery space ($\Delta t$ vs.\ peak magnitude with merit
+color-coding), extinction histograms, redshift distributions, and
+Hubble diagrams.
+\item Pipeline logging: every run writes a \texttt{DEBUG}-level log
+file (\texttt{pipeline.log}) to the night output directory, capturing
+all warnings, errors, and timing for post-run diagnostics.
+\item Fink API circuit breaker: after five consecutive photometry
+request failures (each timing out at 60\,s), the pipeline skips
+remaining Fink queries to avoid hanging when the server is
+unresponsive.
 \end{itemize}
 
 \subsection{Planned}

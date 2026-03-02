@@ -766,6 +766,22 @@ mean flux are rejected.  This removes catastrophic outliers from
 difference-imaging artifacts.
 \end{enumerate}
 
+\subsubsection{Photometric Quality Cuts}
+
+Before fitting, each candidate must satisfy three criteria designed to
+reject single-epoch events, single-band artifacts, and poorly-sampled
+objects that cannot be reliably typed:
+\begin{enumerate}
+\item At least 5 photometric data points with $\mathrm{SNR} > 5$.
+\item Detections (among high-SNR points) in at least 2 photometric
+  bands.
+\item A time baseline of at least 2~days between first and last
+  observation.
+\end{enumerate}
+After fitting, the multi-band Villar SPM model must converge with
+data from $\geq 2$ bands.  If the Villar fit fails, the inverted
+parabola is accepted only when it too succeeds in $\geq 2$ bands.
+
 \subsubsection{Numerical Peak Finding}
 
 The time of peak brightness is determined by numerical maximization of

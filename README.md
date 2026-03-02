@@ -58,10 +58,11 @@ Runs the complete ANTARES + ALeRCE + Fink pipeline with classification compariso
 4. **Fetches Rubin photometry from Fink** — for each candidate, retrieves the full multi-band (g/r/i/z) light curve including DiaSource detections and forced photometry (flux in nanoJanskys from Rubin difference imaging).
 5. **Fetches supplementary photometry** from ZTF (via ALeRCE, by position match) and ATLAS forced photometry (cyan/orange bands, batch API via fallingstar.com) for candidates brighter than 20th magnitude.
 6. **Combines all photometry** into unified multi-survey light curves (Rubin + ZTF + ATLAS) in nanoJansky flux space.
-7. **Fits light curves** using both inverted parabola (per-band) and multi-band Villar SPM model with shared explosion epoch.
-8. **Computes merit scores** based on time since peak and peak brightness.
-9. **Filters for observability** from Las Campanas (airmass, twilight, hours up).
-10. **Generates Magellan plan** sorted by RA (assuming 30 min per observation).
+7. **Applies photometric quality cuts** — requires ≥ 5 points with SNR > 5, detections in ≥ 2 bands, and a time baseline ≥ 2 days. This rejects single-epoch events and single-band artifacts.
+8. **Fits light curves** using multi-band Villar SPM model (shared explosion epoch, preferred) with inverted parabola fallback. Both must converge in ≥ 2 bands.
+9. **Computes merit scores** based on time since peak and peak brightness.
+10. **Filters for observability** from Las Campanas (airmass, twilight, hours up).
+11. **Generates Magellan plan** sorted by RA (assuming 30 min per observation).
 
 ## Installation
 

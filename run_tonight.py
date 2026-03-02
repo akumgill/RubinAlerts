@@ -276,8 +276,12 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
       diaObjectId, ra, dec, ddf_field, sn_score, brokers_detected,
       num_brokers, mean_ia_prob, known_variable, ...
     """
-    # --- Always query Fink ---
-    fink_df = fetch_fink_candidates(fink, min_sn_score=min_prob, n_fetch=n_fetch)
+    # --- Query Fink (if available) ---
+    if fink is not None:
+        fink_df = fetch_fink_candidates(fink, min_sn_score=min_prob, n_fetch=n_fetch)
+    else:
+        logger.info("Fink API unavailable — skipping Fink candidate discovery")
+        fink_df = pd.DataFrame()
 
     if fink_only or not HAS_MONITOR:
         if not HAS_MONITOR and not fink_only:
@@ -450,44 +454,117 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
     FINK_MAX_CONSECUTIVE_FAILURES = 5
     fink_data = {}  # did -> DataFrame
     bright_for_atlas = []  # (did, ra, dec) for candidates brighter than cut
-    consecutive_fink_failures = 0
-    fink_skipped = 0
-    for i, did in enumerate(dia_ids):
-        # Circuit breaker: if Fink API is consistently failing, skip remaining
-        if consecutive_fink_failures >= FINK_MAX_CONSECUTIVE_FAILURES:
-            fink_skipped += 1
-            continue
 
-        logger.info("[%d/%d] Fink: %s", i + 1, len(dia_ids), did)
-        fink_lc = fink.get_light_curve(str(did), include_forced=True)
-        if fink_lc is None or len(fink_lc) == 0:
-            consecutive_fink_failures += 1
-            logger.warning("  No Fink light curve (consecutive failures: %d/%d)",
-                           consecutive_fink_failures, FINK_MAX_CONSECUTIVE_FAILURES)
-            if consecutive_fink_failures >= FINK_MAX_CONSECUTIVE_FAILURES:
-                logger.error("Fink API: %d consecutive failures — "
-                             "skipping remaining %d candidates. "
-                             "Server may be down.",
-                             FINK_MAX_CONSECUTIVE_FAILURES,
-                             len(dia_ids) - i - 1)
-            continue
+    if fink is None:
+        logger.warning("Fink API unavailable — trying ALeRCE-LSST for Rubin photometry")
+        # Fall back to ALeRCE-LSST for Rubin photometry
+        alerce_lsst = None
+        if HAS_ALERCE:
+            try:
+                alerce_lsst = AlerceClient(survey='lsst', use_db=False)
+                logger.info("ALeRCE-LSST client initialized for Rubin photometry fallback")
+            except Exception as e:
+                logger.warning("Could not initialize ALeRCE-LSST client: %s", e)
 
-        # Success — reset counter
+        # Build lookup of ALeRCE-LSST OIDs for each candidate
+        alerce_oid_lookup = {}
+        for _, row in candidates_df.iterrows():
+            did = row['diaObjectId']
+            # Try ALeRCE-LSST object ID first, then the general object_id
+            alerce_oid = None
+            for col in ['object_id_ALeRCE-LSST', 'rubin_dia_object_id', 'object_id']:
+                if col in row.index and pd.notna(row.get(col)) and str(row[col]).strip():
+                    alerce_oid = str(row[col]).strip()
+                    break
+            if alerce_oid:
+                alerce_oid_lookup[did] = alerce_oid
+
+        if alerce_lsst is not None and alerce_oid_lookup:
+            consecutive_failures = 0
+            for i, did in enumerate(dia_ids):
+                if consecutive_failures >= FINK_MAX_CONSECUTIVE_FAILURES:
+                    break
+                alerce_oid = alerce_oid_lookup.get(did)
+                if not alerce_oid:
+                    continue
+                logger.info("[%d/%d] ALeRCE-LSST (Rubin): %s", i + 1, len(dia_ids), alerce_oid)
+                try:
+                    lc = alerce_lsst.get_light_curve(alerce_oid)
+                    if lc is not None and len(lc) > 0:
+                        fink_data[did] = lc
+                        consecutive_failures = 0
+                        # Check brightness for ATLAS
+                        if fetch_atlas and 'magnitude' in lc.columns:
+                            mags = pd.to_numeric(lc['magnitude'], errors='coerce')
+                            brightest = mags.dropna().min()
+                            if np.isfinite(brightest) and brightest < ATLAS_BRIGHT_MAG_CUT:
+                                ra, dec = coord_lookup.get(did, (np.nan, np.nan))
+                                if np.isfinite(ra) and np.isfinite(dec):
+                                    bright_for_atlas.append((str(did), ra, dec))
+                    else:
+                        consecutive_failures += 1
+                except Exception as e:
+                    logger.debug("  ALeRCE-LSST error for %s: %s", alerce_oid, e)
+                    consecutive_failures += 1
+            logger.info("ALeRCE-LSST fallback: %d/%d candidates have Rubin photometry",
+                        len(fink_data), len(dia_ids))
+        else:
+            logger.warning("No ALeRCE-LSST fallback available — no Rubin photometry this run")
+            # Fall back to broker-reported magnitudes for ATLAS brightness cut
+            if fetch_atlas:
+                for _, row in candidates_df.iterrows():
+                    did = row['diaObjectId']
+                    mag_val = None
+                    for col in ['peak_mag', 'magnitude', 'last_mag', 'meanmag']:
+                        if col in row.index and pd.notna(row.get(col)):
+                            mag_val = float(row[col])
+                            break
+                    if mag_val is not None and mag_val < ATLAS_BRIGHT_MAG_CUT:
+                        ra, dec = coord_lookup.get(did, (np.nan, np.nan))
+                        if np.isfinite(ra) and np.isfinite(dec):
+                            bright_for_atlas.append((str(did), ra, dec))
+                if bright_for_atlas:
+                    logger.info("ATLAS pre-filter (from broker mags): %d candidates < %.1f mag",
+                                len(bright_for_atlas), ATLAS_BRIGHT_MAG_CUT)
+    else:
         consecutive_fink_failures = 0
-        fink_data[did] = fink_lc
+        fink_skipped = 0
+        for i, did in enumerate(dia_ids):
+            # Circuit breaker: if Fink API is consistently failing, skip remaining
+            if consecutive_fink_failures >= FINK_MAX_CONSECUTIVE_FAILURES:
+                fink_skipped += 1
+                continue
 
-        # Check if any Rubin detection is brighter than the ATLAS cut
-        if fetch_atlas and 'magnitude' in fink_lc.columns:
-            mags = pd.to_numeric(fink_lc['magnitude'], errors='coerce')
-            brightest = mags.dropna().min()
-            if np.isfinite(brightest) and brightest < ATLAS_BRIGHT_MAG_CUT:
-                ra, dec = coord_lookup.get(did, (np.nan, np.nan))
-                if np.isfinite(ra) and np.isfinite(dec):
-                    bright_for_atlas.append((str(did), ra, dec))
+            logger.info("[%d/%d] Fink: %s", i + 1, len(dia_ids), did)
+            fink_lc = fink.get_light_curve(str(did), include_forced=True)
+            if fink_lc is None or len(fink_lc) == 0:
+                consecutive_fink_failures += 1
+                logger.warning("  No Fink light curve (consecutive failures: %d/%d)",
+                               consecutive_fink_failures, FINK_MAX_CONSECUTIVE_FAILURES)
+                if consecutive_fink_failures >= FINK_MAX_CONSECUTIVE_FAILURES:
+                    logger.error("Fink API: %d consecutive failures — "
+                                 "skipping remaining %d candidates. "
+                                 "Server may be down.",
+                                 FINK_MAX_CONSECUTIVE_FAILURES,
+                                 len(dia_ids) - i - 1)
+                continue
 
-    logger.info("Fink photometry: %d/%d candidates have data%s",
-                len(fink_data), len(dia_ids),
-                f" ({fink_skipped} skipped — Fink API down)" if fink_skipped else "")
+            # Success — reset counter
+            consecutive_fink_failures = 0
+            fink_data[did] = fink_lc
+
+            # Check if any Rubin detection is brighter than the ATLAS cut
+            if fetch_atlas and 'magnitude' in fink_lc.columns:
+                mags = pd.to_numeric(fink_lc['magnitude'], errors='coerce')
+                brightest = mags.dropna().min()
+                if np.isfinite(brightest) and brightest < ATLAS_BRIGHT_MAG_CUT:
+                    ra, dec = coord_lookup.get(did, (np.nan, np.nan))
+                    if np.isfinite(ra) and np.isfinite(dec):
+                        bright_for_atlas.append((str(did), ra, dec))
+
+        logger.info("Fink photometry: %d/%d candidates have data%s",
+                    len(fink_data), len(dia_ids),
+                    f" ({fink_skipped} skipped — Fink API down)" if fink_skipped else "")
 
     # ---- Batch ATLAS for bright candidates ----
     atlas_data = {}  # did -> DataFrame (nJy format)
@@ -512,10 +589,10 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
 
     # ---- Pass 2: Fetch ZTF, combine, and fit ----
     results = {}
-    for i, did in enumerate(fink_data):
-        logger.info("[%d/%d] Fitting %s", i + 1, len(fink_data), did)
+    for i, did in enumerate(dia_ids):
+        logger.info("[%d/%d] Fitting %s", i + 1, len(dia_ids), did)
         ra, dec = coord_lookup.get(did, (np.nan, np.nan))
-        fink_lc = fink_data[did]
+        fink_lc = fink_data.get(did)
 
         # ZTF photometry (per-candidate, fast API query)
         ztf_lc = None
@@ -532,33 +609,78 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
         combined = combine_photometry(fink_lc, ztf_lc, atlas_lc)
         if combined is None:
             combined = fink_lc  # fallback to Fink-only
-
-        lc_clean = clean_light_curve(combined)
-        if len(lc_clean) < 5:
-            logger.warning("  Too few points after cleaning (%d)", len(lc_clean))
+        if combined is None or len(combined) == 0:
+            logger.warning("  No photometry available — skipping")
             continue
 
+        lc_clean = clean_light_curve(combined)
+
+        # Quality cut: >= 5 points with SNR > 5, detections in >= 2 bands
+        if 'flux' in lc_clean.columns and 'flux_err' in lc_clean.columns:
+            snr = (lc_clean['flux'] / lc_clean['flux_err']).abs()
+            high_snr = lc_clean[snr > 5]
+        else:
+            high_snr = lc_clean
+
+        n_high_snr = len(high_snr)
+        n_bands_detected = high_snr['band'].nunique() if len(high_snr) > 0 else 0
         band_counts = lc_clean.groupby('band').size()
-        logger.info("  %d clean pts: %s", len(lc_clean),
+
+        if n_high_snr < 5:
+            logger.warning("  Too few high-SNR points (%d, need >=5): %s",
+                          n_high_snr, ', '.join(f"{b}={n}" for b, n in band_counts.items()))
+            continue
+
+        if n_bands_detected < 2:
+            logger.warning("  Single-band detections only (%s) — need >=2 bands",
+                          ', '.join(f"{b}={n}" for b, n in band_counts.items()))
+            continue
+
+        # Quality cut: require data spanning multiple nights (>= 2 day baseline)
+        mjd_span = lc_clean['mjd'].max() - lc_clean['mjd'].min()
+        if mjd_span < 2.0:
+            logger.warning("  Single-epoch event (%.1f day span) — skipping", mjd_span)
+            continue
+
+        logger.info("  %d pts (%d SNR>5) in %d bands (%.0fd span): %s",
+                    len(lc_clean), n_high_snr, n_bands_detected, mjd_span,
                     ', '.join(f"{b}={n}" for b, n in band_counts.items()))
 
-        # --- Run both fits on combined data ---
-        par = fit_parabola(combined)
+        # --- Run multiband Villar fit (primary) and parabola (fallback) ---
         vil = fit_villar_multiband(combined)
+        par = fit_parabola(combined)
 
         # Extract peak info
-        par_best = par.get('best')
         vil_best = vil.get('best')
+        par_best = par.get('best')
+        n_bands_fit = vil.get('n_bands_fit', 0)
 
-        # Pick the better fit for the headline peak
-        best = vil_best if vil_best and vil_best.get('status') == 'ok' else par_best
-        if best is None or best.get('status') != 'ok':
-            best = par_best  # fallback
+        # Require multiband Villar fit to converge — this is the SN Ia quality gate
+        if vil_best and vil_best.get('status') == 'ok' and n_bands_fit >= 2:
+            best = vil_best
+            fit_method = 'villar_mb'
+        elif par_best and par_best.get('status') == 'ok':
+            # Accept parabola only if it fit in at least 2 bands
+            par_bands_ok = sum(1 for b, info in par.get('per_band', {}).items()
+                               if info.get('status') == 'ok')
+            if par_bands_ok >= 2:
+                best = par_best
+                fit_method = 'parabola'
+            else:
+                logger.warning("  Fits failed: Villar %s (%d bands), parabola %d bands ok",
+                              vil_best.get('status', 'none') if vil_best else 'none',
+                              n_bands_fit, par_bands_ok)
+                continue
+        else:
+            logger.warning("  No acceptable multiband fit — skipping")
+            continue
 
-        peak_mag = best.get('peak_mag', np.nan) if best else np.nan
-        peak_mjd = best.get('peak_mjd', np.nan) if best else np.nan
-        peak_band = best.get('band', '') if best else ''
-        fit_method = 'villar_mb' if (vil_best and vil_best.get('status') == 'ok') else 'parabola'
+        peak_mag = best.get('peak_mag', np.nan)
+        peak_mjd = best.get('peak_mjd', np.nan)
+        peak_band = best.get('band', '')
+        if not np.isfinite(peak_mag) or not np.isfinite(peak_mjd):
+            logger.warning("  Fit converged but peak is NaN — skipping")
+            continue
 
         delta_t = mjd_now - peak_mjd if np.isfinite(peak_mjd) else np.nan
 
@@ -908,7 +1030,9 @@ def main():
         description='SN Ia nightly monitoring pipeline for Magellan follow-up',
         epilog='Example: python run_tonight.py 61100',
     )
-    parser.add_argument('mjd', type=float, help='MJD of the observing night')
+    parser.add_argument('mjd', type=float, nargs='?',
+                        default=Time.now().mjd,
+                        help='MJD of the observing night (default: now)')
     parser.add_argument('--min-prob', type=float, default=0.3,
                         help='Minimum SN score (default: 0.3)')
     parser.add_argument('--days-back', type=int, default=30,
@@ -959,18 +1083,24 @@ def main():
 
     # --- Step 1: Connect to Fink ---
     fink = FinkLSSTClient()
-    if not fink.available:
-        logger.error("Fink LSST API not reachable")
-        sys.exit(1)
-    logger.info("Fink LSST API: connected")
+    fink_available = fink.available
+    if not fink_available:
+        logger.warning("Fink LSST API not reachable — will use other brokers only")
+    else:
+        logger.info("Fink LSST API: connected")
 
     # --- Step 2: Query all brokers, merge, deduplicate, screen variables ---
+    if args.fink_only and not fink_available:
+        logger.error("--fink-only mode but Fink API is not reachable")
+        sys.exit(1)
     if args.fink_only:
         logger.info("Mode: Fink only (--fink-only)")
-    else:
+    elif fink_available:
         logger.info("Mode: All brokers (Fink + ANTARES + ALeRCE-ZTF + ALeRCE-LSST)")
+    else:
+        logger.info("Mode: Non-Fink brokers only (ANTARES + ALeRCE-ZTF + ALeRCE-LSST)")
     candidates = fetch_all_broker_candidates(
-        fink,
+        fink if fink_available else None,
         min_prob=args.min_prob,
         days_back=args.days_back,
         n_fetch=args.max_candidates,
@@ -990,7 +1120,8 @@ def main():
         logger.info("ATLAS photometry: %s (batch, bright < %.1f mag only)",
                      "enabled" if HAS_ATLAS else "SKIPPED (atlas_client not available)",
                      ATLAS_BRIGHT_MAG_CUT)
-    fit_results = fetch_and_fit(fink, candidates, mjd_now,
+    fit_results = fetch_and_fit(fink if fink_available else None,
+                                candidates, mjd_now,
                                 fetch_ztf=do_ztf and HAS_ALERCE,
                                 fetch_atlas=do_atlas and HAS_ATLAS)
     if not fit_results:

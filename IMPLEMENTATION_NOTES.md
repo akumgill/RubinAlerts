@@ -103,9 +103,19 @@ All photometry is standardized to a common DataFrame format before fitting:
 1. **Deduplication**: when detection + forced_phot share the same (MJD, band), keep the detection (better errors)
 2. **Sigma clipping**: per (night, band), reject points > 4σ from the weighted mean flux
 
+### Photometric quality cuts
+
+Before fitting, candidates must pass:
+1. **SNR cut**: ≥ 5 data points with SNR > 5
+2. **Multi-band**: detections in ≥ 2 photometric bands (among high-SNR points)
+3. **Time baseline**: ≥ 2 days between first and last observation (rejects single-epoch events)
+4. **Fit convergence**: multiband Villar fit or parabola must converge in ≥ 2 bands
+
+These cuts reject single-epoch transients, cosmic ray artifacts, and poorly-sampled objects that cannot be reliably classified as SNe Ia.
+
 ### Inverted parabola (per-band)
 
-`fit_parabola()` — fits `flux(t) = peak_flux - a*(t-t0)^2` independently per band using `scipy.optimize.curve_fit`. Always available, requires ≥ 3 points per band.
+`fit_parabola()` — fits `flux(t) = peak_flux - a*(t-t0)^2` independently per band using `scipy.optimize.curve_fit`. Requires ≥ 3 points per band. Used as fallback when Villar fails.
 
 ### Multi-band Villar SPM
 

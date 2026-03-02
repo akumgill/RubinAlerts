@@ -209,11 +209,11 @@ class AlerceClient(BaseBrokerClient):
         alerts_list = []
         prob_lookup = {}
         if len(prob_df) > 0:
-            prob_lookup = prob_df.set_index('oid').to_dict('index')
+            prob_lookup = prob_df.drop_duplicates('oid').set_index('oid').to_dict('index')
 
         ps1_lookup = {}
         if len(ps1_df) > 0:
-            ps1_lookup = ps1_df.set_index('oid').to_dict('index')
+            ps1_lookup = ps1_df.drop_duplicates('oid').set_index('oid').to_dict('index')
 
         for (_, row), ddf_name in zip(ddf_top.iterrows(), ddf_names):
             oid = row['oid']

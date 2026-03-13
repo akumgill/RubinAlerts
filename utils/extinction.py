@@ -25,6 +25,16 @@ IRSA_FILTER_MAP = {
     'SDSS z': 'z',
 }
 
+# SFD extinction coefficients R_lambda = A_lambda / E(B-V)
+# From Schlafly & Finkbeiner (2011), Table 6, for SDSS filters
+SFD_R_COEFFICIENTS = {
+    'u': 4.239,
+    'g': 3.303,
+    'r': 2.285,
+    'i': 1.698,
+    'z': 1.263,
+}
+
 
 def get_extinction(ra: float, dec: float) -> Dict[str, float]:
     """Query IRSA for SFD galactic extinction at a sky position.
@@ -75,11 +85,13 @@ def get_extinction_batch(coords_df: pd.DataFrame,
 
     Returns
     -------
-    Copy of coords_df with added columns: A_u, A_g, A_r, A_i, A_z.
+    Copy of coords_df with added columns: A_u, A_g, A_r, A_i, A_z, E_BV.
+    E_BV is computed as A_g / R_g where R_g = 3.303 (Schlafly & Finkbeiner 2011).
     """
     df = coords_df.copy()
     for band in ['u', 'g', 'r', 'i', 'z']:
         df[f'A_{band}'] = np.nan
+    df['E_BV'] = np.nan  # E(B-V) color excess
 
     total = len(df)
     if total == 0:
@@ -101,6 +113,9 @@ def get_extinction_batch(coords_df: pd.DataFrame,
                 for band, a_val in cached.items():
                     if f'A_{band}' in df.columns:
                         df.at[idx, f'A_{band}'] = a_val
+                # Compute E(B-V) from A_g
+                if 'g' in cached and cached['g'] is not None:
+                    df.at[idx, 'E_BV'] = cached['g'] / SFD_R_COEFFICIENTS['g']
                 n_cached += 1
                 continue
 
@@ -111,6 +126,9 @@ def get_extinction_batch(coords_df: pd.DataFrame,
             for band, a_val in extinction.items():
                 if f'A_{band}' in df.columns:
                     df.at[idx, f'A_{band}'] = a_val
+            # Compute E(B-V) from A_g
+            if 'g' in extinction and extinction['g'] is not None:
+                df.at[idx, 'E_BV'] = extinction['g'] / SFD_R_COEFFICIENTS['g']
             n_queried += 1
 
             # Store in cache

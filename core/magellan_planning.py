@@ -113,11 +113,12 @@ def compute_merit(delta_t, peak_mag,
                   ia_prob=None, host_morphology=None,
                   extinction_ebv=None, num_brokers=None,
                   moon_penalty=None,
+                  salt_chi2_dof=None, absolute_mag=None,
                   tau=10.0, mag_optimal=20.5,
                   mag_bright=18.0, mag_faint=23.0):
     """Compute spectroscopic follow-up merit score.
 
-    M = W_t * W_m * W_p * W_h * W_ext * W_broker * W_moon
+    M = W_t * W_m * W_p * W_h * W_ext * W_broker * W_moon * W_salt * W_absmag
 
     W_t = exp(-delta_t^2 / (2 * tau^2))        Gaussian time weight
     W_m = exp(-((m - m_opt) / sigma_m)^2)      Gaussian magnitude weight
@@ -126,6 +127,8 @@ def compute_merit(delta_t, peak_mag,
     W_ext = exp(-E(B-V) / 0.15)                Extinction penalty
     W_broker = 1.0 + 0.1*(num_brokers - 1)     Multi-broker bonus
     W_moon = moon_penalty                       Moon proximity penalty (0-1)
+    W_salt = SALT2 chi2/dof quality            Good template fit bonus (0.5-1.2)
+    W_absmag = absolute mag consistency        SN Ia M_B ~ -19.3 (0.5-1.0)
 
     Parameters
     ----------
@@ -149,6 +152,12 @@ def compute_merit(delta_t, peak_mag,
         If None, this factor is omitted (equivalent to 1.0).
     moon_penalty : float or array-like, optional
         Moon proximity/phase penalty factor (0-1). 1.0 = no penalty.
+        If None, this factor is omitted (equivalent to 1.0).
+    salt_chi2_dof : float or array-like, optional
+        SALT2/SALT3 fit chi2/dof. Lower is better (good fit to SN Ia template).
+        If None, this factor is omitted (equivalent to 1.0).
+    absolute_mag : float or array-like, optional
+        Absolute magnitude (peak_mag - distmod). SNe Ia have M_B ~ -19.3.
         If None, this factor is omitted (equivalent to 1.0).
     tau : float
         Time decay half-width in days (default 10).
@@ -213,6 +222,30 @@ def compute_merit(delta_t, peak_mag,
         w_moon = np.where(np.isfinite(moon_penalty), w_moon, 1.0)
         merit = merit * w_moon
 
+    # SALT2 chi2/dof quality — good template fit = higher confidence it's a SN Ia
+    if salt_chi2_dof is not None:
+        salt_chi2_dof = np.asarray(salt_chi2_dof, dtype=float)
+        # chi2/dof < 1.5 is excellent (bonus), 1.5-3 is acceptable (neutral),
+        # > 3 is poor fit (penalty). Use sigmoid-like mapping.
+        # w_salt = 1.2 for chi2/dof=1, 1.0 for chi2/dof=2, 0.5 for chi2/dof>5
+        w_salt = 1.2 - 0.7 * (1 - np.exp(-np.maximum(salt_chi2_dof - 1, 0) / 2))
+        w_salt = np.clip(w_salt, 0.5, 1.2)
+        w_salt = np.where(np.isfinite(salt_chi2_dof), w_salt, 1.0)
+        merit = merit * w_salt
+
+    # Absolute magnitude consistency with SN Ia (M_B ~ -19.3 ± 0.5)
+    if absolute_mag is not None:
+        absolute_mag = np.asarray(absolute_mag, dtype=float)
+        # SNe Ia have M_B ~ -19.3. Gaussian penalty for deviations.
+        # sigma = 0.7 mag to allow for intrinsic scatter + stretch/color variations
+        M_Ia = -19.3
+        sigma_M = 0.7
+        w_absmag = np.exp(-((absolute_mag - M_Ia) / sigma_M)**2 / 2)
+        # Clamp to [0.3, 1.0] to not completely reject outliers
+        w_absmag = np.clip(w_absmag, 0.3, 1.0)
+        w_absmag = np.where(np.isfinite(absolute_mag), w_absmag, 1.0)
+        merit = merit * w_absmag
+
     # NaN propagation is automatic from numpy, but be explicit
     merit = np.where(np.isfinite(delta_t) & np.isfinite(peak_mag),
                      merit, np.nan)
@@ -223,6 +256,7 @@ def compute_merit_breakdown(delta_t, peak_mag,
                             ia_prob=None, host_morphology=None,
                             extinction_ebv=None, num_brokers=None,
                             moon_penalty=None,
+                            salt_chi2_dof=None, absolute_mag=None,
                             tau=10.0, mag_optimal=20.5,
                             mag_bright=18.0, mag_faint=23.0):
     """Compute merit score and return individual component weights.
@@ -240,6 +274,8 @@ def compute_merit_breakdown(delta_t, peak_mag,
         'w_ext': Extinction penalty
         'w_broker': Multi-broker bonus
         'w_moon': Moon penalty
+        'w_salt': SALT2 fit quality weight
+        'w_absmag': Absolute magnitude consistency weight
     """
     delta_t = np.asarray(delta_t, dtype=float)
     peak_mag = np.asarray(peak_mag, dtype=float)
@@ -255,6 +291,8 @@ def compute_merit_breakdown(delta_t, peak_mag,
     w_ext = np.ones_like(delta_t)
     w_broker = np.ones_like(delta_t)
     w_moon = np.ones_like(delta_t)
+    w_salt = np.ones_like(delta_t)
+    w_absmag = np.ones_like(delta_t)
 
     if ia_prob is not None:
         ia_prob = np.asarray(ia_prob, dtype=float)
@@ -287,7 +325,24 @@ def compute_merit_breakdown(delta_t, peak_mag,
         w_moon = np.clip(moon_penalty, 0.3, 1.0)
         w_moon = np.where(np.isfinite(moon_penalty), w_moon, 1.0)
 
-    merit = w_time * w_mag * w_prob * w_host * w_ext * w_broker * w_moon
+    if salt_chi2_dof is not None:
+        salt_chi2_dof = np.asarray(salt_chi2_dof, dtype=float)
+        # chi2/dof < 1.5 is excellent (bonus), 1.5-3 is acceptable (neutral),
+        # > 3 is poor fit (penalty)
+        w_salt = 1.2 - 0.7 * (1 - np.exp(-np.maximum(salt_chi2_dof - 1, 0) / 2))
+        w_salt = np.clip(w_salt, 0.5, 1.2)
+        w_salt = np.where(np.isfinite(salt_chi2_dof), w_salt, 1.0)
+
+    if absolute_mag is not None:
+        absolute_mag = np.asarray(absolute_mag, dtype=float)
+        # SNe Ia have M_B ~ -19.3. Gaussian penalty for deviations.
+        M_Ia = -19.3
+        sigma_M = 0.7
+        w_absmag = np.exp(-((absolute_mag - M_Ia) / sigma_M)**2 / 2)
+        w_absmag = np.clip(w_absmag, 0.3, 1.0)
+        w_absmag = np.where(np.isfinite(absolute_mag), w_absmag, 1.0)
+
+    merit = w_time * w_mag * w_prob * w_host * w_ext * w_broker * w_moon * w_salt * w_absmag
     merit = np.where(np.isfinite(delta_t) & np.isfinite(peak_mag), merit, np.nan)
 
     return {
@@ -299,6 +354,8 @@ def compute_merit_breakdown(delta_t, peak_mag,
         'w_ext': w_ext,
         'w_broker': w_broker,
         'w_moon': w_moon,
+        'w_salt': w_salt,
+        'w_absmag': w_absmag,
     }
 
 

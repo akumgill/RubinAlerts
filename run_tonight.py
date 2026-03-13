@@ -33,8 +33,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from broker_clients.fink_client import FinkLSSTClient
 from core.peak_fitting import (
-    fit_parabola, fit_villar_multiband, plot_mag, clean_light_curve,
-    AB_ZP_NJY, BAND_PRIORITY,
+    fit_parabola, fit_villar_multiband, fit_salt, plot_mag, clean_light_curve,
+    AB_ZP_NJY, BAND_PRIORITY, HAS_SNCOSMO,
 )
 from core.magellan_planning import (
     compute_merit, compute_merit_breakdown, filter_observable_targets,
@@ -68,6 +68,13 @@ try:
     HAS_MORPHOLOGY = True
 except ImportError:
     HAS_MORPHOLOGY = False
+
+# NED redshift queries
+try:
+    from utils.ned_query import query_ned_batch, query_ned_redshift
+    HAS_NED = True
+except ImportError:
+    HAS_NED = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -477,7 +484,7 @@ def _atlas_filter_to_nJy(by_filter):
 
 def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True,
                   min_snr_points=5, min_bands=2, min_fit_bands=2,
-                  prefilter_min_sources=0):
+                  prefilter_min_sources=0, use_salt=False, redshifts=None):
     """Fetch light curves from all surveys and run peak fitting for each candidate.
 
     Two-pass approach:
@@ -493,7 +500,10 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
       min_fit_bands: Minimum bands for successful fit (default 2, try 1).
       prefilter_min_sources: If > 0, batch pre-filter to candidates with at least
                              this many Fink sources (saves API calls). Default 0 (disabled).
+      use_salt: If True and sncosmo is available, run SALT2 template fits.
+      redshifts: Dict mapping diaObjectId -> redshift for SALT fitting.
     """
+    redshifts = redshifts or {}
     dia_ids = candidates_df['diaObjectId'].unique()
     logger.info("Fitting %d candidates...", len(dia_ids))
 
@@ -718,6 +728,18 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
         vil = fit_villar_multiband(combined)
         par = fit_parabola(combined)
 
+        # --- Optional SALT2 template fit ---
+        salt_result = None
+        if use_salt and HAS_SNCOSMO:
+            z = redshifts.get(did)
+            salt_result = fit_salt(combined, model_name='salt2', z=z)
+            if salt_result.get('status') == 'ok':
+                logger.info("  SALT2: x1=%.2f, c=%.2f, chi2/dof=%.1f, z=%.3f",
+                           salt_result.get('x1', np.nan),
+                           salt_result.get('c', np.nan),
+                           salt_result.get('chi2_dof', np.nan),
+                           salt_result.get('z', np.nan))
+
         # Extract peak info
         vil_best = vil.get('best')
         par_best = par.get('best')
@@ -769,6 +791,7 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
             'diaObjectId': did,
             'parabola': par,
             'villar': vil,
+            'salt': salt_result,
             'light_curve': combined,
             'light_curve_clean': lc_clean,
             'peak_mag': peak_mag,
@@ -794,7 +817,8 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
     return results
 
 
-def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=None):
+def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=None,
+                        redshifts=None):
     """Build a merged summary DataFrame with merit scores.
 
     Parameters
@@ -808,9 +832,13 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=N
     host_morphologies : dict, optional
         Host galaxy morphologies keyed by diaObjectId. Values should be
         'elliptical', 'spiral', 'uncertain', or 'unknown'.
+    redshifts : dict, optional
+        Redshift info keyed by diaObjectId. Values should be dicts with
+        'redshift', 'distmod', 'ned_name', 'separation_arcsec' keys.
     """
     rows = []
     host_morphologies = host_morphologies or {}
+    redshifts = redshifts or {}
 
     for _, cand in candidates_df.iterrows():
         did = cand['diaObjectId']
@@ -835,17 +863,42 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=N
         extinction_ebv = cand.get('E_BV', cand.get('ebv', np.nan))
         num_brokers = cand.get('num_brokers', 1)
 
+        # Get redshift info
+        z_info = redshifts.get(did, {})
+        redshift = z_info.get('redshift', np.nan) if z_info else np.nan
+        distmod = z_info.get('distmod', np.nan) if z_info else np.nan
+        ned_name = z_info.get('ned_name', '') if z_info else ''
+        ned_sep = z_info.get('separation_arcsec', np.nan) if z_info else np.nan
+
+        # Compute absolute magnitude if we have redshift
+        absolute_mag = np.nan
+        if np.isfinite(peak_mag) and np.isfinite(distmod):
+            absolute_mag = peak_mag - distmod
+
+        # Get SALT fit results
+        salt = fit.get('salt')
+        salt_status = salt.get('status', '') if salt else ''
+        salt_x1 = salt.get('x1', np.nan) if salt and salt.get('status') == 'ok' else np.nan
+        salt_c = salt.get('c', np.nan) if salt and salt.get('status') == 'ok' else np.nan
+        salt_chi2_dof = salt.get('chi2_dof', np.nan) if salt and salt.get('status') == 'ok' else np.nan
+        salt_z = salt.get('z', np.nan) if salt and salt.get('status') == 'ok' else np.nan
+        salt_peak_mag_B = salt.get('peak_mag_B', np.nan) if salt and salt.get('status') == 'ok' else np.nan
+
         # Merit score with all factors (moon penalty computed later in observability filter)
         # Use breakdown version to get individual component weights
         if np.isfinite(delta_t) and np.isfinite(peak_mag):
             prob_arg = ia_prob if np.isfinite(ia_prob) else None
             ext_arg = extinction_ebv if np.isfinite(extinction_ebv) else None
+            salt_arg = salt_chi2_dof if np.isfinite(salt_chi2_dof) else None
+            absmag_arg = absolute_mag if np.isfinite(absolute_mag) else None
             breakdown = compute_merit_breakdown(
                 delta_t, peak_mag,
                 ia_prob=prob_arg,
                 host_morphology=host_morph,
                 extinction_ebv=ext_arg,
                 num_brokers=num_brokers,
+                salt_chi2_dof=salt_arg,
+                absolute_mag=absmag_arg,
             )
             merit = float(breakdown['merit'])
             w_time = float(breakdown['w_time'])
@@ -854,9 +907,12 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=N
             w_host = float(breakdown['w_host'])
             w_ext = float(breakdown['w_ext'])
             w_broker = float(breakdown['w_broker'])
+            w_salt = float(breakdown['w_salt'])
+            w_absmag = float(breakdown['w_absmag'])
         else:
             merit = np.nan
             w_time = w_mag = w_prob = w_host = w_ext = w_broker = np.nan
+            w_salt = w_absmag = np.nan
 
         rows.append({
             'diaObjectId': did,
@@ -870,6 +926,13 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=N
             'mean_ia_prob': cand.get('mean_ia_prob', np.nan),
             'host_morphology': host_morph,
             'E_BV': extinction_ebv,
+            # Redshift info
+            'redshift': redshift,
+            'distmod': distmod,
+            'ned_name': ned_name,
+            'ned_sep_arcsec': ned_sep,
+            'absolute_mag': absolute_mag,
+            # Peak fit info
             'peak_mag': peak_mag,
             'peak_mjd': fit['peak_mjd'],
             'peak_band': fit['peak_band'],
@@ -880,6 +943,14 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=N
             'surveys': '+'.join(fit.get('surveys', ['Rubin'])),
             'n_ztf': fit.get('n_ztf', 0),
             'n_atlas': fit.get('n_atlas', 0),
+            # SALT fit results
+            'salt_status': salt_status,
+            'salt_x1': salt_x1,
+            'salt_c': salt_c,
+            'salt_chi2_dof': salt_chi2_dof,
+            'salt_z': salt_z,
+            'salt_peak_mag_B': salt_peak_mag_B,
+            # Merit breakdown
             'merit': merit,
             'w_time': w_time,
             'w_mag': w_mag,
@@ -887,6 +958,8 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=N
             'w_host': w_host,
             'w_ext': w_ext,
             'w_broker': w_broker,
+            'w_salt': w_salt,
+            'w_absmag': w_absmag,
             'object_id': did,  # alias for magellan_planning
         })
 
@@ -1458,6 +1531,10 @@ def main():
                         help='Skip ATLAS forced photometry')
     parser.add_argument('--fink-only', action='store_true',
                         help='Only query Fink (skip ANTARES/ALeRCE brokers)')
+    parser.add_argument('--use-salt', action='store_true',
+                        help='Enable SALT2 template fitting (requires sncosmo)')
+    parser.add_argument('--no-redshift', action='store_true',
+                        help='Skip NED redshift queries')
 
     # Quality cuts (relax for sparse early Rubin data)
     parser.add_argument('--min-snr-points', type=int, default=5,
@@ -1539,6 +1616,38 @@ def main():
                 args.min_snr_points, args.min_bands, args.min_fit_bands)
     if args.prefilter_min_sources > 0:
         logger.info("Pre-filter: enabled (min %d Fink sources)", args.prefilter_min_sources)
+
+    # SALT fitting requires redshifts, so query NED first if SALT is requested
+    do_salt = args.use_salt and HAS_SNCOSMO
+    do_redshift = not args.no_redshift and HAS_NED
+    if args.use_salt and not HAS_SNCOSMO:
+        logger.warning("--use-salt requested but sncosmo not installed — skipping SALT fits")
+    if args.use_salt:
+        logger.info("SALT2 fitting: %s", "enabled" if do_salt else "disabled (sncosmo not available)")
+
+    # --- Step 3a: Query NED redshifts (needed for SALT fitting and absolute mag) ---
+    redshifts = {}  # did -> {redshift, distmod, ned_name, separation_arcsec}
+    if do_redshift:
+        logger.info("Querying NED for host galaxy redshifts...")
+        n_with_z = 0
+        for _, row in candidates.iterrows():
+            did = row['diaObjectId']
+            ra, dec = row['ra'], row['dec']
+            try:
+                result = query_ned_redshift(ra, dec, radius_arcsec=18.0)
+                if result is not None:
+                    redshifts[did] = result
+                    n_with_z += 1
+            except Exception as e:
+                logger.debug("NED query failed for %s: %s", did, e)
+        logger.info("NED redshifts: %d/%d candidates have host z", n_with_z, len(candidates))
+    elif not args.no_redshift:
+        logger.info("NED redshifts: SKIPPED (ned_query not available)")
+
+    # Build redshift lookup for SALT fitting (just the z values)
+    z_for_salt = {did: info['redshift'] for did, info in redshifts.items()
+                  if info.get('redshift') is not None and info['redshift'] > 0}
+
     fit_results = fetch_and_fit(fink if fink_available else None,
                                 candidates, mjd_now,
                                 fetch_ztf=do_ztf and HAS_ALERCE,
@@ -1546,7 +1655,9 @@ def main():
                                 min_snr_points=args.min_snr_points,
                                 min_bands=args.min_bands,
                                 min_fit_bands=args.min_fit_bands,
-                                prefilter_min_sources=args.prefilter_min_sources)
+                                prefilter_min_sources=args.prefilter_min_sources,
+                                use_salt=do_salt,
+                                redshifts=z_for_salt)
     if not fit_results:
         logger.error("No successful fits")
         sys.exit(1)

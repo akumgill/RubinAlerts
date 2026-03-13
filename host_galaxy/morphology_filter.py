@@ -44,16 +44,25 @@ class MorphologyFilter:
         morphology = 'unknown'
         galaxy_info = None
 
+        # Search radius in arcmin - larger for host galaxy searches
+        # since SNe can be offset from galaxy centers
+        search_radius = 2.0  # arcmin
+
         # Try SDSS first (northern sky, dec > -10)
         if dec > -10:
-            galaxy_info = CatalogQuery.query_sdss(ra, dec)
-            if galaxy_info is None:
-                # Try Pan-STARRS (dec > -30)
-                galaxy_info = CatalogQuery.query_panstarrs(ra, dec)
+            galaxy_info = CatalogQuery.query_sdss(ra, dec, radius_arcmin=search_radius)
+
+        # Always try Pan-STARRS for dec > -30 (deeper than SDSS, good coverage)
+        if galaxy_info is None and dec > -30:
+            galaxy_info = CatalogQuery.query_panstarrs(ra, dec, radius_arcmin=search_radius)
 
         # Try SkyMapper for southern sky (dec < +10)
         if galaxy_info is None and dec < 10:
-            galaxy_info = CatalogQuery.query_skymapper(ra, dec)
+            galaxy_info = CatalogQuery.query_skymapper(ra, dec, radius_arcmin=search_radius)
+
+        # Final fallback: GLADE+ galaxy catalog (all-sky, optimized for transients)
+        if galaxy_info is None:
+            galaxy_info = CatalogQuery.query_glade(ra, dec, radius_arcmin=search_radius)
 
         # Log which catalog was used
         if galaxy_info:

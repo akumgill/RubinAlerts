@@ -4,6 +4,7 @@ import os
 import json
 import logging
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Dict, Any, List, Tuple
 import pandas as pd
 import numpy as np
@@ -12,6 +13,9 @@ from .base_client import BaseBrokerClient
 from core.ddf_fields import DDF_FIELDS, DDF_SEARCH_RADIUS_DEG
 
 logger = logging.getLogger(__name__)
+
+# Default MJD cutoff for recent activity (days before current MJD)
+DEFAULT_DAYS_RECENT = 60
 
 # ANTARES ant_survey codes
 SURVEY_ZTF_DETECTION = 1
@@ -28,6 +32,9 @@ SURVEY_NAMES = {
 MAX_SGSCORE = 0.5       # reject point sources (stars)
 MIN_RB_SCORE = 0.5      # reject likely bogus detections
 MAX_DURATION_DAYS = 200  # reject persistent variables
+MIN_MAG_VALUES = 5      # require enough photometry for fitting
+MIN_DURATION_DAYS = 2   # require multi-epoch baseline
+MAX_BRIGHTEST_MAG = 23  # reject very faint candidates (hard to type)
 
 
 class AntaresClient(BaseBrokerClient):
@@ -115,101 +122,240 @@ class AntaresClient(BaseBrokerClient):
         except Exception as e:
             logger.warning(f"Failed to save cache: {e}")
 
+    def _get_locus_cache_path(self) -> str:
+        """Get path for persistent locus-level cache."""
+        return os.path.join(self.cache_dir, "antares_locus_cache.json")
+
+    def _load_locus_cache(self) -> Dict[str, Dict]:
+        """Load persistent locus cache (locus_id -> parsed data)."""
+        path = self._get_locus_cache_path()
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                    logger.info(f"Loaded {len(data)} cached ANTARES loci")
+                    return data
+            except Exception as e:
+                logger.warning(f"Failed to load locus cache: {e}")
+        return {}
+
+    def _save_locus_cache(self, cache: Dict[str, Dict]):
+        """Save persistent locus cache."""
+        path = self._get_locus_cache_path()
+        try:
+            with open(path, 'w') as f:
+                json.dump(cache, f, default=str)
+        except Exception as e:
+            logger.warning(f"Failed to save locus cache: {e}")
+
+    def _search_single_field(self, field: Dict, per_field_limit: int,
+                              max_checked: int, require_rubin: bool,
+                              mjd_cutoff: Optional[float],
+                              locus_cache: Dict[str, Dict],
+                              seen_ids: set) -> Tuple[List[Dict], Dict[str, int], int]:
+        """Search a single DDF field for transient candidates.
+
+        Returns (alerts_list, rejection_reasons, checked_count).
+        """
+        from antares_client.search import cone_search
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+
+        field_name = field['name']
+        center = SkyCoord(ra=field['ra'] * u.deg, dec=field['dec'] * u.deg)
+        radius = DDF_SEARCH_RADIUS_DEG * u.deg
+
+        logger.info(f"  Searching DDF {field_name} "
+                   f"(RA={field['ra']:.2f}, Dec={field['dec']:.2f}, "
+                   f"r={DDF_SEARCH_RADIUS_DEG:.2f} deg)")
+
+        alerts_list = []
+        rejection_reasons = {}
+        field_count = 0
+        field_accepted = 0
+        cache_hits = 0
+
+        try:
+            for locus in cone_search(center, radius):
+                locus_id = locus.locus_id
+                if locus_id in seen_ids:
+                    continue
+                seen_ids.add(locus_id)
+                field_count += 1
+
+                if field_accepted >= per_field_limit:
+                    break
+                if field_count >= max_checked:
+                    logger.info(f"    {field_name}: hit search cap ({max_checked})")
+                    break
+
+                if field_count % 500 == 0:
+                    logger.info(f"    {field_name}: checked {field_count} loci, "
+                               f"accepted {field_accepted} so far...")
+
+                try:
+                    # Date pre-filter: skip loci without recent activity
+                    if mjd_cutoff is not None:
+                        newest_obs = locus.properties.get('newest_alert_observation_time')
+                        if newest_obs is not None:
+                            try:
+                                if float(newest_obs) < mjd_cutoff:
+                                    rejection_reasons['old_activity'] = rejection_reasons.get('old_activity', 0) + 1
+                                    continue
+                            except (TypeError, ValueError):
+                                pass
+
+                    # Check locus cache first
+                    if locus_id in locus_cache:
+                        alert_dict = locus_cache[locus_id].copy()
+                        cache_hits += 1
+                    else:
+                        alert_dict = self._parse_locus(locus, f'ddf_{field_name}')
+                        alert_dict['has_rubin'] = self._locus_has_rubin_data(locus)
+                        alert_dict['has_ztf'] = self._locus_has_ztf_data(locus)
+                        # Cache the parsed locus
+                        locus_cache[locus_id] = alert_dict.copy()
+
+                    alert_dict['ddf_field'] = field_name
+
+                    # Quality filters
+                    passed, reason = self._passes_quality_cuts(alert_dict, return_reason=True)
+                    if not passed:
+                        rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+                        continue
+
+                    if require_rubin and not alert_dict['has_rubin']:
+                        rejection_reasons['no_rubin'] = rejection_reasons.get('no_rubin', 0) + 1
+                        continue
+
+                    alerts_list.append(alert_dict)
+                    field_accepted += 1
+
+                except Exception as e:
+                    logger.debug(f"Failed to parse locus {locus_id}: {e}")
+
+        except Exception as e:
+            logger.warning(f"Error searching DDF {field_name}: {e}")
+
+        # Log rejection breakdown
+        if field_count > 100 and field_accepted < per_field_limit // 2:
+            reasons_str = ', '.join(f"{k}={v}" for k, v in sorted(
+                rejection_reasons.items(), key=lambda x: -x[1])[:5])
+            logger.info(f"    {field_name}: low acceptance — rejections: {reasons_str}")
+
+        logger.info(f"    {field_name}: checked {field_count}, accepted {field_accepted}"
+                   + (f" ({cache_hits} cache hits)" if cache_hits > 0 else ""))
+
+        return alerts_list, rejection_reasons, field_count
+
     def query_alerts(self,
                     class_name: str = 'SN Ia',
                     min_probability: float = 0.5,
                     days_back: int = 30,
                     limit: int = 200,
                     require_rubin: bool = False,
-                    ddf_fields: Optional[List[Dict]] = None) -> pd.DataFrame:
+                    ddf_fields: Optional[List[Dict]] = None,
+                    parallel: bool = True,
+                    max_workers: int = 3) -> pd.DataFrame:
         """
         Query ANTARES for transient candidates in Rubin Deep Drilling Fields.
 
         Strategy:
-        1. Cone search each DDF for loci
-        2. Filter for galaxy-associated objects (sgscore < 0.5)
-        3. Filter for transient-like duration (< 200 days)
-        4. Filter for real detections (rb >= 0.5)
-        5. Optionally require Rubin/LSST photometry
+        1. Cone search each DDF for loci (in parallel if enabled)
+        2. Pre-filter by date (skip loci without recent activity)
+        3. Filter for galaxy-associated objects (sgscore < 0.5)
+        4. Filter for transient-like duration (< 200 days)
+        5. Filter for real detections (rb >= 0.5)
+        6. Optionally require Rubin/LSST photometry
+
+        Parameters
+        ----------
+        parallel : bool
+            If True, search DDF fields in parallel (default True)
+        max_workers : int
+            Max parallel threads for field searches (default 3)
         """
         fields = ddf_fields or DDF_FIELDS
         field_names = ','.join(f['name'] for f in fields)
-        cache_key = f"alerts_v4_ddf_{field_names}_d{days_back}_n{limit}_rubin{int(require_rubin)}"
+        cache_key = f"alerts_v5_ddf_{field_names}_d{days_back}_n{limit}_rubin{int(require_rubin)}"
         cache_path = self._get_cache_path(cache_key)
         cached_data = self._load_cache(cache_path)
         if cached_data:
             return pd.DataFrame(cached_data)
 
         try:
-            from antares_client.search import search, cone_search
-            from astropy.coordinates import SkyCoord
-            import astropy.units as u
+            from astropy.time import Time
+
+            # Compute MJD cutoff for date pre-filtering
+            current_mjd = Time.now().mjd
+            mjd_cutoff = current_mjd - DEFAULT_DAYS_RECENT
+
+            # Load persistent locus cache
+            locus_cache = self._load_locus_cache()
+            initial_cache_size = len(locus_cache)
+
+            # Shared set for deduplication across fields
+            seen_ids = set()
+
+            # Allocate quota per field
+            per_field_limit = max(limit // len(fields), 20)
+            max_checked_per_field = 2000
 
             alerts_list = []
-            seen_ids = set()
             total_checked = 0
 
-            # Allocate quota per field so all DDFs get searched
-            per_field_limit = max(limit // len(fields), 20)
-            max_checked_per_field = 500  # don't iterate forever
+            if parallel and len(fields) > 1:
+                logger.info(f"Searching {len(fields)} DDF fields in parallel (max_workers={max_workers})")
 
-            # Search each DDF field
-            for field in fields:
-                field_name = field['name']
-                center = SkyCoord(ra=field['ra'] * u.deg, dec=field['dec'] * u.deg)
-                radius = DDF_SEARCH_RADIUS_DEG * u.deg
+                # Thread-safe seen_ids handled via manager or post-merge dedup
+                field_results = {}
 
-                logger.info(f"  Searching DDF {field_name} "
-                           f"(RA={field['ra']:.2f}, Dec={field['dec']:.2f}, "
-                           f"r={DDF_SEARCH_RADIUS_DEG:.2f} deg)")
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(
+                            self._search_single_field,
+                            field, per_field_limit, max_checked_per_field,
+                            require_rubin, mjd_cutoff, locus_cache, set()
+                        ): field['name']
+                        for field in fields
+                    }
 
-                field_count = 0
-                field_accepted = 0
-
-                try:
-                    for locus in cone_search(center, radius):
-                        if locus.locus_id in seen_ids:
-                            continue
-                        seen_ids.add(locus.locus_id)
-                        total_checked += 1
-                        field_count += 1
-
-                        # Cap check MUST be outside inner try so `continue` can't skip it
-                        if field_accepted >= per_field_limit:
-                            break
-                        if field_count >= max_checked_per_field:
-                            logger.info(f"    {field_name}: hit search cap ({max_checked_per_field})")
-                            break
-
-                        if field_count % 200 == 0:
-                            logger.info(f"    {field_name}: checked {field_count} loci, "
-                                       f"accepted {field_accepted} so far...")
-
+                    for future in as_completed(futures):
+                        field_name = futures[future]
                         try:
-                            alert_dict = self._parse_locus(locus, f'ddf_{field_name}')
-                            alert_dict['ddf_field'] = field_name
-                            alert_dict['has_rubin'] = self._locus_has_rubin_data(locus)
-                            alert_dict['has_ztf'] = self._locus_has_ztf_data(locus)
-
-                            # Quality filters
-                            if not self._passes_quality_cuts(alert_dict):
-                                continue
-
-                            if require_rubin and not alert_dict['has_rubin']:
-                                continue
-
-                            alerts_list.append(alert_dict)
-                            field_accepted += 1
+                            field_alerts, _, field_checked = future.result()
+                            field_results[field_name] = field_alerts
+                            total_checked += field_checked
                         except Exception as e:
-                            logger.debug(f"Failed to parse locus {locus.locus_id}: {e}")
-                except Exception as e:
-                    logger.warning(f"Error searching DDF {field_name}: {e}")
+                            logger.warning(f"Field {field_name} search failed: {e}")
 
-                logger.info(f"    {field_name}: checked {field_count}, "
-                           f"accepted {field_accepted}")
+                # Merge and deduplicate results
+                merged_ids = set()
+                for field_name in [f['name'] for f in fields]:  # preserve field order
+                    if field_name in field_results:
+                        for alert in field_results[field_name]:
+                            oid = alert.get('object_id')
+                            if oid and oid not in merged_ids:
+                                merged_ids.add(oid)
+                                alerts_list.append(alert)
+
+            else:
+                # Sequential search (original behavior)
+                for field in fields:
+                    field_alerts, _, field_checked = self._search_single_field(
+                        field, per_field_limit, max_checked_per_field,
+                        require_rubin, mjd_cutoff, locus_cache, seen_ids
+                    )
+                    alerts_list.extend(field_alerts)
+                    total_checked += field_checked
 
             logger.info(f"DDF search: checked {total_checked} loci total, "
                        f"accepted {len(alerts_list)} transient candidates")
+
+            # Save updated locus cache if it grew
+            if len(locus_cache) > initial_cache_size:
+                self._save_locus_cache(locus_cache)
+                logger.info(f"Locus cache updated: {initial_cache_size} -> {len(locus_cache)}")
 
             if alerts_list:
                 self._save_cache(cache_path, alerts_list)
@@ -222,24 +368,53 @@ class AntaresClient(BaseBrokerClient):
             logger.error(f"Error querying ANTARES: {e}")
             return pd.DataFrame()
 
-    def _passes_quality_cuts(self, alert_dict: Dict) -> bool:
-        """Check if a locus passes quality cuts for transient candidacy."""
+    def _passes_quality_cuts(self, alert_dict: Dict, return_reason: bool = False):
+        """Check if a locus passes quality cuts for transient candidacy.
+
+        Early filtering: reject candidates that won't have enough data
+        for light curve fitting, saving downstream processing.
+
+        Parameters
+        ----------
+        alert_dict : dict
+            Parsed locus data.
+        return_reason : bool
+            If True, return (passed, reason) tuple instead of just bool.
+
+        Returns
+        -------
+        bool or (bool, str) depending on return_reason.
+        """
+        # Photometry count: require enough points for fitting
+        num_mags = alert_dict.get('num_mag_values', 0)
+        if num_mags < MIN_MAG_VALUES:
+            return (False, 'few_mags') if return_reason else False
+
+        # Duration: require multi-epoch baseline (not single-night)
+        duration = alert_dict.get('duration_days')
+        if duration is not None and duration < MIN_DURATION_DAYS:
+            return (False, 'short_duration') if return_reason else False
+
+        # Duration: reject persistent variables (too long)
+        if duration is not None and duration > MAX_DURATION_DAYS:
+            return (False, 'long_duration') if return_reason else False
+
+        # Brightness: reject very faint candidates
+        brightest = alert_dict.get('brightest_mag')
+        if brightest is not None and brightest > MAX_BRIGHTEST_MAG:
+            return (False, 'too_faint') if return_reason else False
+
         # Star/galaxy separation: reject point sources
         sgscore = alert_dict.get('ztf_sgscore1')
         if sgscore is not None and sgscore >= MAX_SGSCORE:
-            return False
-
-        # Duration: reject persistent variables
-        duration = alert_dict.get('duration_days')
-        if duration is not None and duration > MAX_DURATION_DAYS:
-            return False
+            return (False, 'star') if return_reason else False
 
         # Real/bogus: reject likely artifacts
         rb = alert_dict.get('ztf_rb')
         if rb is not None and rb < MIN_RB_SCORE:
-            return False
+            return (False, 'low_rb') if return_reason else False
 
-        return True
+        return (True, None) if return_reason else True
 
     def _parse_locus(self, locus, source_tag: str) -> Dict[str, Any]:
         """Parse an ANTARES Locus object into a flat dictionary."""

@@ -14,11 +14,13 @@ API docs: https://api.lsst.fink-portal.org
 """
 
 import logging
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 import numpy as np
 import pandas as pd
 import requests
+
+from .base_client import BaseBrokerClient
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +49,7 @@ _FP_COLS = ",".join([
 ])
 
 
-class FinkLSSTClient:
+class FinkLSSTClient(BaseBrokerClient):
     """Client for Fink's Rubin/LSST alert API.
 
     Provides current prompt photometry for transient candidates,
@@ -60,9 +62,13 @@ class FinkLSSTClient:
         Fink LSST API base URL.
     timeout : int
         HTTP request timeout in seconds.
+    cache_dir : str
+        Directory for caching data.
     """
 
-    def __init__(self, base_url: str = FINK_LSST_URL, timeout: int = 60):
+    def __init__(self, base_url: str = FINK_LSST_URL, timeout: int = 60,
+                 cache_dir: str = './cache/data'):
+        super().__init__(broker_name='Fink', cache_dir=cache_dir)
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
@@ -121,6 +127,69 @@ class FinkLSSTClient:
         df["survey"] = "Rubin"
         return df
 
+    def batch_query_source_counts(self, dia_object_ids: List[str],
+                                    min_sources: int = 5
+                                    ) -> Dict[str, int]:
+        """Batch query source counts for multiple diaObjectIds.
+
+        Efficiently pre-filters candidates before expensive light curve
+        fetches. Uses comma-separated diaObjectIds in a single API call.
+
+        Parameters
+        ----------
+        dia_object_ids : list of str
+            List of diaObjectIds to query.
+        min_sources : int
+            Minimum source count threshold (for logging stats).
+
+        Returns
+        -------
+        dict mapping diaObjectId (str) → source count (int).
+        Objects not found return 0.
+        """
+        if not dia_object_ids:
+            return {}
+
+        # Deduplicate and convert to strings
+        unique_ids = list(set(str(oid) for oid in dia_object_ids if oid))
+        if not unique_ids:
+            return {}
+
+        # Batch query with minimal columns for efficiency
+        batch_size = 100  # API may have limits; chunk if needed
+        all_counts = {}
+
+        for i in range(0, len(unique_ids), batch_size):
+            chunk = unique_ids[i:i + batch_size]
+            ids_str = ",".join(chunk)
+
+            data = self._post("/api/v1/sources", {
+                "diaObjectId": ids_str,
+                "columns": "r:diaObjectId,r:diaSourceId",
+            })
+
+            if data:
+                # Count sources per object
+                chunk_counts = {}
+                for row in data:
+                    oid = str(row.get("r:diaObjectId", ""))
+                    if oid:
+                        chunk_counts[oid] = chunk_counts.get(oid, 0) + 1
+                all_counts.update(chunk_counts)
+
+            # Mark missing objects as 0
+            for oid in chunk:
+                if oid not in all_counts:
+                    all_counts[oid] = 0
+
+        # Log summary
+        n_total = len(all_counts)
+        n_above = sum(1 for c in all_counts.values() if c >= min_sources)
+        logger.info("Fink batch source counts: %d/%d objects have >= %d sources",
+                    n_above, n_total, min_sources)
+
+        return all_counts
+
     def query_forced_photometry(self, dia_object_id: str
                                 ) -> Optional[pd.DataFrame]:
         """Fetch forced photometry for one object.
@@ -140,6 +209,65 @@ class FinkLSSTClient:
         df["source"] = "forced_phot"
         df["survey"] = "Rubin"
         return df
+
+    def prefilter_by_source_count(self, candidates_df: pd.DataFrame,
+                                    min_sources: int = 5,
+                                    id_column: str = None
+                                    ) -> pd.DataFrame:
+        """Pre-filter candidates by Fink source count.
+
+        Efficiently removes candidates with too few detections before
+        expensive light curve fetches.
+
+        Parameters
+        ----------
+        candidates_df : DataFrame
+            Candidates with diaObjectId column.
+        min_sources : int
+            Minimum number of DiaSource detections required.
+        id_column : str, optional
+            Column containing diaObjectId. Auto-detected if None.
+
+        Returns
+        -------
+        Filtered DataFrame with only candidates meeting threshold.
+        Adds 'fink_source_count' column.
+        """
+        # Find the diaObjectId column
+        if id_column is None:
+            for col in ['diaObjectId', 'fink_diaObjectId', 'object_id',
+                        'r:diaObjectId']:
+                if col in candidates_df.columns:
+                    id_column = col
+                    break
+
+        if id_column is None or id_column not in candidates_df.columns:
+            logger.warning("No diaObjectId column found for pre-filtering")
+            return candidates_df
+
+        # Get unique IDs
+        dia_ids = candidates_df[id_column].dropna().astype(str).unique().tolist()
+        if not dia_ids:
+            logger.warning("No valid diaObjectIds to pre-filter")
+            return candidates_df
+
+        # Batch query counts
+        counts = self.batch_query_source_counts(dia_ids, min_sources=min_sources)
+
+        # Add count column and filter
+        df = candidates_df.copy()
+        df['fink_source_count'] = df[id_column].astype(str).map(
+            lambda x: counts.get(x, 0)
+        )
+
+        n_before = len(df)
+        df_filtered = df[df['fink_source_count'] >= min_sources].copy()
+        n_after = len(df_filtered)
+
+        logger.info("Pre-filter: %d -> %d candidates (>= %d sources)",
+                    n_before, n_after, min_sources)
+
+        return df_filtered
 
     def get_light_curve(self, dia_object_id: str,
                         include_forced: bool = True
@@ -341,6 +469,79 @@ class FinkLSSTClient:
                     n_lc, len(candidates_df))
         return light_curves
 
+    def get_classifications(self, candidates_df: pd.DataFrame,
+                             radius_arcsec: float = 2.0
+                             ) -> pd.DataFrame:
+        """Get Fink SN classifications for candidates by coordinate cross-match.
+
+        Useful for enriching ANTARES-only candidates that lack ML classifiers.
+        Uses cone search to find Fink objects and retrieves their SN classifier
+        scores (f:clf_snnSnVsOthers_score).
+
+        Parameters
+        ----------
+        candidates_df : DataFrame
+            Must have 'ra', 'dec' columns. Optionally 'diaObjectId' or 'object_id'.
+        radius_arcsec : float
+            Cross-match radius in arcseconds.
+
+        Returns
+        -------
+        DataFrame with original columns plus:
+            - fink_sn_score: Fink SN vs Others classifier score (0-1)
+            - fink_diaObjectId: Matched Fink diaObjectId
+            - fink_sep_arcsec: Separation to matched object
+        """
+        fink_scores = []
+        fink_ids = []
+        fink_seps = []
+
+        for idx, row in candidates_df.iterrows():
+            ra, dec = row.get('ra'), row.get('dec')
+            if pd.isna(ra) or pd.isna(dec):
+                fink_scores.append(np.nan)
+                fink_ids.append(None)
+                fink_seps.append(np.nan)
+                continue
+
+            try:
+                result = self.cone_search(float(ra), float(dec),
+                                          radius_arcsec=radius_arcsec, n=5)
+                if result is not None and len(result) > 0:
+                    # Sort by separation if available
+                    if "v:separation_degree" in result.columns:
+                        result = result.sort_values("v:separation_degree")
+                    best = result.iloc[0]
+
+                    fink_ids.append(str(best.get("r:diaObjectId", "")))
+                    sep = best.get("v:separation_degree", np.nan)
+                    fink_seps.append(float(sep) * 3600 if pd.notna(sep) else np.nan)
+
+                    # Get SN classifier score
+                    sn_score = best.get("f:clf_snnSnVsOthers_score", np.nan)
+                    fink_scores.append(float(sn_score) if pd.notna(sn_score) else np.nan)
+                else:
+                    fink_scores.append(np.nan)
+                    fink_ids.append(None)
+                    fink_seps.append(np.nan)
+
+            except Exception as e:
+                logger.debug("Fink classification lookup failed for (%.4f, %.4f): %s",
+                             ra, dec, e)
+                fink_scores.append(np.nan)
+                fink_ids.append(None)
+                fink_seps.append(np.nan)
+
+        out = candidates_df.copy()
+        out["fink_sn_score"] = fink_scores
+        out["fink_diaObjectId"] = fink_ids
+        out["fink_sep_arcsec"] = fink_seps
+
+        n_matched = pd.notna(out["fink_sn_score"]).sum()
+        logger.info("Fink classifications: %d / %d candidates have SN scores",
+                    n_matched, len(out))
+        return out
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -388,3 +589,42 @@ class FinkLSSTClient:
         df["magnitude"] = magnitude
         df["mag_err"] = mag_err
         return df
+
+    # ------------------------------------------------------------------
+    # BaseBrokerClient abstract method implementations
+    # ------------------------------------------------------------------
+
+    def query_alerts(self,
+                     class_name: str = 'SN Ia',
+                     min_probability: float = 0.7,
+                     days_back: int = 30,
+                     **kwargs) -> pd.DataFrame:
+        """Query Fink for SN candidates using the tag-based search.
+
+        Maps to query_sn_candidates() with appropriate tag.
+        """
+        # Map class names to Fink tags
+        tag_map = {
+            'SN Ia': 'sn_near_galaxy_candidate',
+            'SNIa': 'sn_near_galaxy_candidate',
+            'SN': 'extragalactic_new_candidate',
+        }
+        tag = tag_map.get(class_name, 'sn_near_galaxy_candidate')
+
+        result = self.query_sn_candidates(tag=tag, n=kwargs.get('limit', 1000))
+        if result is None:
+            return pd.DataFrame()
+
+        # Filter by SN score if available
+        if 'f:clf_snnSnVsOthers_score' in result.columns:
+            result = result[result['f:clf_snnSnVsOthers_score'] >= min_probability]
+
+        return result
+
+    def get_stamps(self, object_id: str, ra: float, dec: float) -> Dict[str, Any]:
+        """Retrieve postage stamp images (not implemented for Fink).
+
+        Fink provides stamps via a different endpoint; return empty for now.
+        """
+        logger.debug("Stamp retrieval not implemented for Fink")
+        return {}

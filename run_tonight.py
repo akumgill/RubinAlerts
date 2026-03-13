@@ -37,8 +37,9 @@ from core.peak_fitting import (
     AB_ZP_NJY, BAND_PRIORITY,
 )
 from core.magellan_planning import (
-    compute_merit, filter_observable_targets, write_magellan_catalog,
-    radec_to_sexagesimal,
+    compute_merit, compute_merit_breakdown, filter_observable_targets,
+    write_magellan_catalog, radec_to_sexagesimal, prioritize_targets,
+    optimize_observing_sequence,
 )
 from core.ddf_fields import DDF_FIELDS, is_in_ddf
 
@@ -61,6 +62,12 @@ try:
     HAS_ALERCE = True
 except ImportError:
     HAS_ALERCE = False
+
+try:
+    from host_galaxy.morphology_filter import MorphologyFilter
+    HAS_MORPHOLOGY = True
+except ImportError:
+    HAS_MORPHOLOGY = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -346,6 +353,38 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
         logger.warning("Variable screening failed: %s", e)
         screened = merged
 
+    # --- Enrich ANTARES-only candidates with Fink classifications ---
+    # ANTARES has no ML classifier; we use a heuristic proxy capped at 0.5
+    # For better P(Ia), query Fink for SN classifier scores
+    if fink is not None and len(screened) > 0:
+        antares_only = screened[
+            (screened['brokers_detected'] == 'ANTARES') &
+            (screened['mean_ia_prob'] < 0.5)  # Likely using our proxy
+        ].copy()
+
+        if len(antares_only) > 0:
+            logger.info("Enriching %d ANTARES-only candidates with Fink classifications...",
+                        len(antares_only))
+            try:
+                enriched = fink.get_classifications(antares_only, radius_arcsec=2.0)
+                n_enriched = enriched['fink_sn_score'].notna().sum()
+
+                if n_enriched > 0:
+                    # Update mean_ia_prob with Fink scores where available
+                    for idx, row in enriched.iterrows():
+                        fink_score = row.get('fink_sn_score')
+                        if pd.notna(fink_score) and fink_score > 0:
+                            orig_idx = screened.index[screened['diaObjectId'] == row.get('diaObjectId', row.get('object_id'))]
+                            if len(orig_idx) > 0:
+                                # Use Fink score instead of ANTARES proxy
+                                screened.loc[orig_idx, 'sn_score'] = fink_score
+                                screened.loc[orig_idx, 'mean_ia_prob'] = fink_score
+                                screened.loc[orig_idx, 'fink_sn_score'] = fink_score
+
+                    logger.info("  Updated %d candidates with Fink SN scores", n_enriched)
+            except Exception as e:
+                logger.warning("Fink classification enrichment failed: %s", e)
+
     # --- Filter by P(Ia) ---
     if 'mean_ia_prob' in screened.columns:
         before = len(screened)
@@ -356,17 +395,23 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
     # --- Normalize output columns for downstream compatibility ---
     # Need: diaObjectId, ra, dec, ddf_field, sn_score
     if 'diaObjectId' not in screened.columns:
-        # Use rubin_dia_object_id if available, else unique_id or object_id
-        if 'rubin_dia_object_id' in screened.columns:
-            screened['diaObjectId'] = screened['rubin_dia_object_id'].fillna(
-                screened.get('unique_id', screened.get('object_id', ''))
-            )
-        elif 'unique_id' in screened.columns:
-            screened['diaObjectId'] = screened['unique_id']
-        elif 'object_id' in screened.columns:
-            screened['diaObjectId'] = screened['object_id']
-        else:
-            screened['diaObjectId'] = [f"obj_{i}" for i in range(len(screened))]
+        # Build diaObjectId from available ID columns, preferring Rubin IDs
+        def _get_best_id(row):
+            # Priority: rubin_dia_object_id > object_id_ANTARES > object_id > unique_id > coord-based
+            for col in ['rubin_dia_object_id', 'object_id_ANTARES', 'object_id_Fink',
+                        'object_id_ALeRCE', 'object_id', 'unique_id']:
+                if col in row.index:
+                    val = row.get(col)
+                    if pd.notna(val) and str(val).strip():
+                        return str(val).strip()
+            # Fallback: coordinate-based ID
+            ra, dec = row.get('ra'), row.get('dec')
+            if pd.notna(ra) and pd.notna(dec):
+                return f"coord_{ra:.5f}_{dec:.5f}"
+            return f"obj_{row.name}"
+
+        screened['diaObjectId'] = screened.apply(_get_best_id, axis=1)
+        logger.debug("Created diaObjectId for %d candidates", len(screened))
 
     if 'sn_score' not in screened.columns:
         screened['sn_score'] = screened.get('mean_ia_prob', np.nan)
@@ -430,17 +475,38 @@ def _atlas_filter_to_nJy(by_filter):
     return None
 
 
-def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True):
+def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True,
+                  min_snr_points=5, min_bands=2, min_fit_bands=2,
+                  prefilter_min_sources=0):
     """Fetch light curves from all surveys and run peak fitting for each candidate.
 
     Two-pass approach:
+      Pass 0: (Optional) Batch query Fink source counts to pre-filter candidates.
       Pass 1: Fetch Fink/Rubin photometry for all candidates, identify bright ones.
       Batch:  Submit bright candidates (any Rubin detection < 20 mag) to ATLAS
               as a single batch, and fetch ZTF per-candidate.
       Pass 2: Combine all photometry and run fits.
+
+    Quality cut parameters (relax for sparse early Rubin data):
+      min_snr_points: Minimum points with SNR > 5 (default 5, try 3).
+      min_bands: Minimum bands with detections (default 2, try 1).
+      min_fit_bands: Minimum bands for successful fit (default 2, try 1).
+      prefilter_min_sources: If > 0, batch pre-filter to candidates with at least
+                             this many Fink sources (saves API calls). Default 0 (disabled).
     """
     dia_ids = candidates_df['diaObjectId'].unique()
     logger.info("Fitting %d candidates...", len(dia_ids))
+
+    # ---- Pass 0: Optional batch pre-filter by source count ----
+    if prefilter_min_sources > 0 and fink is not None:
+        logger.info("Pre-filtering by Fink source count (min=%d)...", prefilter_min_sources)
+        candidates_df = fink.prefilter_by_source_count(
+            candidates_df, min_sources=prefilter_min_sources, id_column='diaObjectId'
+        )
+        dia_ids = candidates_df['diaObjectId'].unique()
+        if len(dia_ids) == 0:
+            logger.warning("No candidates passed pre-filter — nothing to fit")
+            return {}
 
     # Lookup RA/Dec for each candidate
     coord_lookup = {}
@@ -626,13 +692,15 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
         n_bands_detected = high_snr['band'].nunique() if len(high_snr) > 0 else 0
         band_counts = lc_clean.groupby('band').size()
 
-        if n_high_snr < 5:
-            logger.warning("  Too few high-SNR points (%d, need >=5): %s",
-                          n_high_snr, ', '.join(f"{b}={n}" for b, n in band_counts.items()))
+        if n_high_snr < min_snr_points:
+            logger.warning("  Too few high-SNR points (%d, need >=%d): %s",
+                          n_high_snr, min_snr_points,
+                          ', '.join(f"{b}={n}" for b, n in band_counts.items()))
             continue
 
-        if n_bands_detected < 2:
-            logger.warning("  Single-band detections only (%s) — need >=2 bands",
+        if n_bands_detected < min_bands:
+            logger.warning("  Too few bands (%d, need >=%d): %s",
+                          n_bands_detected, min_bands,
                           ', '.join(f"{b}={n}" for b, n in band_counts.items()))
             continue
 
@@ -655,15 +723,15 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
         par_best = par.get('best')
         n_bands_fit = vil.get('n_bands_fit', 0)
 
-        # Require multiband Villar fit to converge — this is the SN Ia quality gate
-        if vil_best and vil_best.get('status') == 'ok' and n_bands_fit >= 2:
+        # Require fit to converge in min_fit_bands — quality gate (relax for sparse data)
+        if vil_best and vil_best.get('status') == 'ok' and n_bands_fit >= min_fit_bands:
             best = vil_best
             fit_method = 'villar_mb'
         elif par_best and par_best.get('status') == 'ok':
-            # Accept parabola only if it fit in at least 2 bands
+            # Accept parabola only if it fit in at least min_fit_bands
             par_bands_ok = sum(1 for b, info in par.get('per_band', {}).items()
                                if info.get('status') == 'ok')
-            if par_bands_ok >= 2:
+            if par_bands_ok >= min_fit_bands:
                 best = par_best
                 fit_method = 'parabola'
             else:
@@ -726,9 +794,24 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
     return results
 
 
-def build_summary_table(candidates_df, fit_results, mjd_now):
-    """Build a merged summary DataFrame with merit scores."""
+def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=None):
+    """Build a merged summary DataFrame with merit scores.
+
+    Parameters
+    ----------
+    candidates_df : pd.DataFrame
+        Candidate metadata from brokers.
+    fit_results : dict
+        Light curve fit results keyed by diaObjectId.
+    mjd_now : float
+        Current MJD for delta_t calculation.
+    host_morphologies : dict, optional
+        Host galaxy morphologies keyed by diaObjectId. Values should be
+        'elliptical', 'spiral', 'uncertain', or 'unknown'.
+    """
     rows = []
+    host_morphologies = host_morphologies or {}
+
     for _, cand in candidates_df.iterrows():
         did = cand['diaObjectId']
         fit = fit_results.get(did)
@@ -738,10 +821,42 @@ def build_summary_table(candidates_df, fit_results, mjd_now):
         peak_mag = fit['peak_mag']
         delta_t = fit['delta_t']
 
-        # Merit score
-        merit = compute_merit(delta_t, peak_mag) if (
-            np.isfinite(delta_t) and np.isfinite(peak_mag)
-        ) else np.nan
+        # Get classifier probability and host morphology for merit calculation
+        # Prefer Fink's sn_score (real ML classifier) over mean_ia_prob (may include ANTARES proxy)
+        sn_score = cand.get('sn_score')
+        mean_prob = cand.get('mean_ia_prob', np.nan)
+        if pd.notna(sn_score) and float(sn_score) > 0:
+            ia_prob = float(sn_score)
+        else:
+            ia_prob = mean_prob
+        host_morph = host_morphologies.get(did, 'unknown')
+
+        # Get extinction and broker count for merit calculation
+        extinction_ebv = cand.get('E_BV', cand.get('ebv', np.nan))
+        num_brokers = cand.get('num_brokers', 1)
+
+        # Merit score with all factors (moon penalty computed later in observability filter)
+        # Use breakdown version to get individual component weights
+        if np.isfinite(delta_t) and np.isfinite(peak_mag):
+            prob_arg = ia_prob if np.isfinite(ia_prob) else None
+            ext_arg = extinction_ebv if np.isfinite(extinction_ebv) else None
+            breakdown = compute_merit_breakdown(
+                delta_t, peak_mag,
+                ia_prob=prob_arg,
+                host_morphology=host_morph,
+                extinction_ebv=ext_arg,
+                num_brokers=num_brokers,
+            )
+            merit = float(breakdown['merit'])
+            w_time = float(breakdown['w_time'])
+            w_mag = float(breakdown['w_mag'])
+            w_prob = float(breakdown['w_prob'])
+            w_host = float(breakdown['w_host'])
+            w_ext = float(breakdown['w_ext'])
+            w_broker = float(breakdown['w_broker'])
+        else:
+            merit = np.nan
+            w_time = w_mag = w_prob = w_host = w_ext = w_broker = np.nan
 
         rows.append({
             'diaObjectId': did,
@@ -751,8 +866,10 @@ def build_summary_table(candidates_df, fit_results, mjd_now):
             'sn_score': cand.get('sn_score', np.nan),
             'early_ia_score': cand.get('early_ia_score', np.nan),
             'brokers_detected': cand.get('brokers_detected', 'Fink'),
-            'num_brokers': cand.get('num_brokers', 1),
+            'num_brokers': num_brokers,
             'mean_ia_prob': cand.get('mean_ia_prob', np.nan),
+            'host_morphology': host_morph,
+            'E_BV': extinction_ebv,
             'peak_mag': peak_mag,
             'peak_mjd': fit['peak_mjd'],
             'peak_band': fit['peak_band'],
@@ -764,6 +881,12 @@ def build_summary_table(candidates_df, fit_results, mjd_now):
             'n_ztf': fit.get('n_ztf', 0),
             'n_atlas': fit.get('n_atlas', 0),
             'merit': merit,
+            'w_time': w_time,
+            'w_mag': w_mag,
+            'w_prob': w_prob,
+            'w_host': w_host,
+            'w_ext': w_ext,
+            'w_broker': w_broker,
             'object_id': did,  # alias for magellan_planning
         })
 
@@ -797,8 +920,91 @@ def generate_light_curve_plots(fit_results, lc_dir, summary_df):
     return plot_paths
 
 
+def plot_observing_sequence_skymap(sequence_df, obs_date, ax=None):
+    """Plot optimized observing sequence on a sky map.
+
+    Shows targets color-coded by observation order (start=blue -> end=red),
+    with arrows indicating slew path.
+
+    Parameters
+    ----------
+    sequence_df : pd.DataFrame
+        From optimize_observing_sequence(), must have ra, dec, obs_order, obs_time_ut.
+    obs_date : str
+        Observing date for title.
+    ax : matplotlib.axes.Axes, optional
+        Axes to plot on. If None, creates new figure.
+
+    Returns
+    -------
+    fig, ax : Figure and Axes objects.
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 6))
+    else:
+        fig = ax.figure
+
+    if len(sequence_df) == 0:
+        ax.text(0.5, 0.5, 'No targets in sequence', ha='center', va='center',
+                transform=ax.transAxes, fontsize=14)
+        return fig, ax
+
+    df = sequence_df.sort_values('obs_order')
+    n = len(df)
+
+    # Color gradient: start (blue/purple) -> end (orange/red)
+    cmap = plt.cm.plasma
+    colors = [cmap(i / max(n - 1, 1)) for i in range(n)]
+
+    # Plot DDF field markers
+    for f in DDF_FIELDS:
+        ax.scatter(f['ra'], f['dec'], s=300, marker='s', facecolors='none',
+                   edgecolors='lightgray', linewidths=1.5, alpha=0.5, zorder=1)
+        ax.annotate(f['name'], (f['ra'], f['dec']), fontsize=7,
+                    ha='center', va='bottom', alpha=0.4, xytext=(0, 8),
+                    textcoords='offset points')
+
+    # Plot slew arrows
+    ras = df['ra'].values
+    decs = df['dec'].values
+    for i in range(n - 1):
+        ax.annotate('', xy=(ras[i + 1], decs[i + 1]), xytext=(ras[i], decs[i]),
+                    arrowprops=dict(arrowstyle='->', color='gray',
+                                    alpha=0.4, lw=0.8),
+                    zorder=2)
+
+    # Plot targets
+    sc = ax.scatter(ras, decs, c=range(n), cmap='plasma', s=80, zorder=3,
+                    edgecolors='white', linewidths=0.8)
+
+    # Add observation order labels
+    for i, (_, row) in enumerate(df.iterrows()):
+        ax.annotate(f"{int(row['obs_order'])}", (row['ra'], row['dec']),
+                    fontsize=7, ha='center', va='center', fontweight='bold',
+                    color='white', zorder=4)
+
+    # Colorbar showing time progression
+    cbar = plt.colorbar(sc, ax=ax, label='Observation Order', shrink=0.8)
+    cbar.set_ticks([0, n // 2, n - 1])
+    times = df['obs_time_ut'].values
+    cbar.set_ticklabels([f'Start ({times[0]})', f'Mid ({times[n // 2]})',
+                         f'End ({times[-1]})'])
+
+    # Formatting
+    ax.set_xlabel('RA (deg)')
+    ax.set_ylabel('Dec (deg)')
+    ax.set_title(f'Optimized Observing Sequence — {obs_date}\n'
+                 f'{n} targets, {df["slew_deg"].sum():.1f}° total slew')
+    ax.grid(True, alpha=0.3)
+
+    # Invert RA axis (convention: RA increases right-to-left on sky)
+    ax.invert_xaxis()
+
+    return fig, ax
+
+
 def generate_pdf_report(summary_df, fit_results, plot_paths,
-                        pdf_path, mjd_now, obs_date):
+                        pdf_path, mjd_now, obs_date, observing_sequence=None):
     """Generate multi-page PDF report with summary and light curves."""
     from matplotlib.backends.backend_pdf import PdfPages
 
@@ -878,6 +1084,129 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
             tbl.auto_set_column_width(range(len(display_df.columns)))
             tbl.scale(1.0, 1.3)
 
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+        # --- Merit Breakdown table page ---
+        has_breakdown = all(c in summary_df.columns for c in ['w_time', 'w_mag', 'w_prob'])
+        if len(summary_df) > 0 and has_breakdown:
+            fig, ax = plt.subplots(figsize=(11, 8.5))
+            ax.axis('off')
+            ax.set_title('Merit Breakdown — Top 30 Candidates', fontsize=14, pad=20)
+
+            # Add formula explanation
+            ax.text(0.5, 0.95, 'Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker',
+                   ha='center', va='top', fontsize=10, fontfamily='monospace',
+                   transform=ax.transAxes)
+
+            table_df = summary_df.sort_values('merit', ascending=False).head(30).copy()
+
+            breakdown_cols = ['diaObjectId', 'merit', 'w_time', 'w_mag', 'w_prob',
+                             'w_host', 'w_ext', 'w_broker']
+            breakdown_df = table_df[[c for c in breakdown_cols if c in table_df.columns]].copy()
+
+            # Format numbers
+            for col in breakdown_df.columns:
+                if col == 'diaObjectId':
+                    breakdown_df[col] = breakdown_df[col].astype(str).str[-10:]
+                else:
+                    breakdown_df[col] = breakdown_df[col].apply(
+                        lambda x: f'{x:.3f}' if pd.notna(x) and np.isfinite(x) else '--')
+
+            # Rename columns for display
+            col_names = {
+                'diaObjectId': 'Object',
+                'merit': 'Merit',
+                'w_time': 'W_time',
+                'w_mag': 'W_mag',
+                'w_prob': 'W_prob',
+                'w_host': 'W_host',
+                'w_ext': 'W_ext',
+                'w_broker': 'W_broker',
+            }
+            breakdown_df.columns = [col_names.get(c, c) for c in breakdown_df.columns]
+
+            tbl = ax.table(
+                cellText=breakdown_df.values,
+                colLabels=breakdown_df.columns,
+                loc='center',
+                cellLoc='center',
+            )
+            tbl.auto_set_font_size(False)
+            tbl.set_fontsize(8)
+            tbl.auto_set_column_width(range(len(breakdown_df.columns)))
+            tbl.scale(1.0, 1.4)
+
+            # Add legend at bottom
+            legend_text = (
+                'W_time: Gaussian decay from peak (τ=10d)  |  '
+                'W_mag: Optimal ~20.5 AB  |  W_prob: P(Ia) classifier\n'
+                'W_host: Elliptical=1.0, Spiral=0.6  |  '
+                'W_ext: Galactic extinction  |  W_broker: Multi-broker bonus'
+            )
+            ax.text(0.5, 0.02, legend_text, ha='center', va='bottom',
+                   fontsize=8, color='dimgray', transform=ax.transAxes)
+
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+        # --- Merit Function Reference page ---
+        fig, ax = plt.subplots(figsize=(11, 8.5))
+        ax.axis('off')
+        ax.set_title('Merit Function Reference', fontsize=16, fontweight='bold', pad=20)
+
+        merit_text = """
+MERIT FUNCTION
+
+    Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker
+
+Each component ranges from 0 to ~1 (W_broker can reach 1.2). The multiplicative
+structure means a candidate needs to score well on ALL factors to rank highly.
+
+
+COMPONENT DEFINITIONS
+
+W_time  — Time from Peak
+    exp(−Δt² / 2τ²)  with τ = 10 days
+    Supernovae are most valuable for spectroscopy near peak brightness.
+    Gaussian decay strongly penalizes targets far past peak.
+
+W_mag   — Magnitude Suitability
+    Gaussian centered at m_opt = 20.5 AB, σ = 1.5 mag
+    Penalizes targets that are too bright (could use smaller telescope)
+    or too faint (poor S/N even with Magellan).
+
+W_prob  — Type Ia Probability
+    P(Ia) from ML classifier, clipped to [0.1, 1.0]
+    From ALeRCE or Fink's supernova classifiers.
+    ANTARES-only candidates use a heuristic proxy capped at 0.50.
+
+W_host  — Host Galaxy Morphology
+    Elliptical = 1.0, Spiral = 0.6, Unknown = 0.7
+    SNe Ia in elliptical hosts have lower Hubble diagram scatter,
+    making them more valuable for cosmology.
+
+W_ext   — Galactic Extinction Penalty
+    exp(−E(B−V) / 0.15)
+    Heavily penalizes targets behind significant Milky Way dust
+    that would require large, uncertain extinction corrections.
+
+W_broker — Multi-broker Agreement
+    1.0 + 0.1 × (N − 1)  where N = number of brokers detecting the candidate
+    Independent detections increase confidence the transient is real.
+    Ranges from 1.0 (single broker) to ~1.2 (3 brokers).
+"""
+        ax.text(0.05, 0.95, merit_text, ha='left', va='top',
+                fontsize=10, fontfamily='monospace', transform=ax.transAxes)
+
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+        # --- Observing Sequence Sky Map page ---
+        if observing_sequence is not None and len(observing_sequence) > 0:
+            fig, ax = plt.subplots(figsize=(11, 7))
+            plot_observing_sequence_skymap(observing_sequence, obs_date, ax=ax)
+            plt.tight_layout()
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
@@ -995,27 +1324,40 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
 
 
 def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path):
-    """Generate a human-readable observing schedule ordered by RA.
+    """Generate a human-readable observing schedule ordered by priority.
 
-    Assumes 30 minutes per observation. Lists targets in RA order
-    with coordinates, magnitude, merit, and estimated UT time.
+    Uses exposure time estimates if available, otherwise assumes 30 min.
+    Lists targets in priority order with coordinates, magnitude, merit,
+    optimal observing time, and estimated exposure. Includes merit breakdown.
     """
     if len(plan_df) == 0:
         return
 
-    df = plan_df.sort_values('ra').reset_index(drop=True)
+    # Use the priority ordering from plan_df (don't re-sort)
+    df = plan_df.reset_index(drop=True)
+
+    # Calculate total observing time from exposure estimates or 30 min default
+    has_exp = 'exposure_minutes' in df.columns
+    if has_exp:
+        exp_vals = df['exposure_minutes'].fillna(30).values
+        total_hours = exp_vals.sum() / 60
+    else:
+        total_hours = len(df) * 0.5
+
+    # Check for merit breakdown columns
+    has_breakdown = all(c in df.columns for c in ['w_time', 'w_mag', 'w_prob'])
 
     lines = []
     lines.append(f'# Magellan Observing Schedule — {obs_date} UT')
-    lines.append(f'# MJD {mjd_now:.1f} | {len(df)} targets | ~30 min each')
-    lines.append(f'# Sorted by RA for efficient slewing')
+    lines.append(f'# MJD {mjd_now:.1f} | {len(df)} targets | ~{total_hours:.1f} hours total')
+    lines.append(f'# Sorted by priority: time-critical > setting soon > merit')
     lines.append('#')
     lines.append(f'# {"#":>3s}  {"Object":20s}  {"RA":>11s}  {"Dec":>10s}  '
-                 f'{"Band":>4s}  {"PkMag":>6s}  {"dt":>6s}  {"Merit":>6s}  '
-                 f'{"DDF":>8s}  {"Brokers":>20s}  {"Phot":>16s}')
+                 f'{"PkMag":>6s}  {"dt":>6s}  {"Merit":>6s}  '
+                 f'{"OptUT":>5s}  {"Exp":>5s}  {"DDF":>8s}')
     lines.append(f'# {"---":>3s}  {"----":20s}  {"--":>11s}  {"---":>10s}  '
-                 f'{"----":>4s}  {"-----":>6s}  {"--":>6s}  {"-----":>6s}  '
-                 f'{"---":>8s}  {"-------":>20s}  {"----":>16s}')
+                 f'{"-----":>6s}  {"--":>6s}  {"-----":>6s}  '
+                 f'{"-----":>5s}  {"---":>5s}  {"---":>8s}')
 
     for i, (_, row) in enumerate(df.iterrows()):
         ra_s, dec_s = radec_to_sexagesimal(row['ra'], row['dec'])
@@ -1023,19 +1365,64 @@ def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path):
         pmag = f"{row['peak_mag']:.1f}" if np.isfinite(row.get('peak_mag', np.nan)) else '--'
         dt = f"{row['delta_t']:+.0f}d" if np.isfinite(row.get('delta_t', np.nan)) else '--'
         merit = f"{row['merit']:.3f}" if np.isfinite(row.get('merit', np.nan)) else '--'
-        ddf = row.get('ddf_field', '') or ''
-        band = row.get('peak_band', '') or ''
-        brokers = row.get('brokers_detected', 'Fink') or 'Fink'
-        surveys = row.get('surveys', 'Rubin') or 'Rubin'
+        ddf = str(row.get('ddf_field', '') or '')
         did = str(row['diaObjectId'])[-12:]
 
+        # Optimal observing time
+        opt_ut = str(row.get('optimal_time_ut', '--') or '--')
+
+        # Exposure time estimate
+        exp_min = row.get('exposure_minutes', np.nan)
+        exp_str = f"{exp_min:.0f}m" if np.isfinite(exp_min) else '30m'
+
         lines.append(f'  {i+1:3d}  {did:20s}  {ra_s:>11s}  {dec_s:>10s}  '
-                     f'{band:>4s}  {pmag:>6s}  {dt:>6s}  {merit:>6s}  '
-                     f'{ddf:>8s}  {brokers:>20s}  {surveys:>16s}')
+                     f'{pmag:>6s}  {dt:>6s}  {merit:>6s}  '
+                     f'{opt_ut:>5s}  {exp_str:>5s}  {ddf:>8s}')
 
     lines.append('#')
-    lines.append(f'# Total observing time: ~{len(df) * 0.5:.1f} hours '
-                 f'({len(df)} targets x 30 min)')
+    lines.append(f'# Total estimated observing time: ~{total_hours:.1f} hours')
+
+    # Add moon info if available
+    if 'moon_illumination' in df.columns:
+        moon_illum = df['moon_illumination'].iloc[0]
+        if np.isfinite(moon_illum):
+            lines.append(f'# Moon illumination: {moon_illum * 100:.0f}%')
+
+    # Add merit breakdown section
+    if has_breakdown:
+        lines.append('#')
+        lines.append('# ' + '=' * 90)
+        lines.append('# MERIT BREAKDOWN')
+        lines.append('# Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker × W_moon')
+        lines.append('#   W_time  : exp(-dt²/200)      Gaussian decay from peak (tau=10d)')
+        lines.append('#   W_mag   : exp(-(m-20.5)²/σ²) Optimal mag ~20.5 AB')
+        lines.append('#   W_prob  : P(Ia) clipped      ML classifier probability [0.1-1.0]')
+        lines.append('#   W_host  : morphology weight  Elliptical=1.0, Spiral=0.6, Unknown=0.7')
+        lines.append('#   W_ext   : exp(-E(B-V)/0.15)  Galactic extinction penalty')
+        lines.append('#   W_broker: 1 + 0.1*(N-1)      Multi-broker agreement bonus')
+        lines.append('#   W_moon  : moon penalty       Phase/separation penalty [0.3-1.0]')
+        lines.append('# ' + '=' * 90)
+        lines.append(f'# {"#":>3s}  {"Object":>12s}  {"Merit":>6s}  '
+                     f'{"W_time":>6s}  {"W_mag":>6s}  {"W_prob":>6s}  '
+                     f'{"W_host":>6s}  {"W_ext":>6s}  {"W_brok":>6s}  {"W_moon":>6s}')
+        lines.append(f'# {"---":>3s}  {"------":>12s}  {"-----":>6s}  '
+                     f'{"------":>6s}  {"-----":>6s}  {"------":>6s}  '
+                     f'{"------":>6s}  {"-----":>6s}  {"------":>6s}  {"------":>6s}')
+
+        for i, (_, row) in enumerate(df.iterrows()):
+            did = str(row['diaObjectId'])[-12:]
+            merit = f"{row['merit']:.3f}" if np.isfinite(row.get('merit', np.nan)) else '--'
+            w_time = f"{row['w_time']:.3f}" if np.isfinite(row.get('w_time', np.nan)) else '--'
+            w_mag = f"{row['w_mag']:.3f}" if np.isfinite(row.get('w_mag', np.nan)) else '--'
+            w_prob = f"{row['w_prob']:.3f}" if np.isfinite(row.get('w_prob', np.nan)) else '--'
+            w_host = f"{row['w_host']:.3f}" if np.isfinite(row.get('w_host', np.nan)) else '--'
+            w_ext = f"{row['w_ext']:.3f}" if np.isfinite(row.get('w_ext', np.nan)) else '--'
+            w_broker = f"{row['w_broker']:.3f}" if np.isfinite(row.get('w_broker', np.nan)) else '--'
+            w_moon = f"{row.get('moon_penalty', 1.0):.3f}" if np.isfinite(row.get('moon_penalty', np.nan)) else '1.000'
+
+            lines.append(f'  {i+1:3d}  {did:>12s}  {merit:>6s}  '
+                         f'{w_time:>6s}  {w_mag:>6s}  {w_prob:>6s}  '
+                         f'{w_host:>6s}  {w_ext:>6s}  {w_broker:>6s}  {w_moon:>6s}')
 
     with open(output_path, 'w') as f:
         f.write('\n'.join(lines) + '\n')
@@ -1071,6 +1458,16 @@ def main():
                         help='Skip ATLAS forced photometry')
     parser.add_argument('--fink-only', action='store_true',
                         help='Only query Fink (skip ANTARES/ALeRCE brokers)')
+
+    # Quality cuts (relax for sparse early Rubin data)
+    parser.add_argument('--min-snr-points', type=int, default=5,
+                        help='Min points with SNR>5 (default: 5, try 3 for sparse data)')
+    parser.add_argument('--min-bands', type=int, default=2,
+                        help='Min bands with detections (default: 2, try 1 for sparse data)')
+    parser.add_argument('--min-fit-bands', type=int, default=2,
+                        help='Min bands for successful fit (default: 2, try 1 for sparse data)')
+    parser.add_argument('--prefilter-min-sources', type=int, default=0,
+                        help='Pre-filter candidates with fewer Fink sources (0=disabled, try 5)')
 
     args = parser.parse_args()
     mjd_now = args.mjd
@@ -1138,24 +1535,76 @@ def main():
         logger.info("ATLAS photometry: %s (batch, bright < %.1f mag only)",
                      "enabled" if HAS_ATLAS else "SKIPPED (atlas_client not available)",
                      ATLAS_BRIGHT_MAG_CUT)
+    logger.info("Quality cuts: min_snr_points=%d, min_bands=%d, min_fit_bands=%d",
+                args.min_snr_points, args.min_bands, args.min_fit_bands)
+    if args.prefilter_min_sources > 0:
+        logger.info("Pre-filter: enabled (min %d Fink sources)", args.prefilter_min_sources)
     fit_results = fetch_and_fit(fink if fink_available else None,
                                 candidates, mjd_now,
                                 fetch_ztf=do_ztf and HAS_ALERCE,
-                                fetch_atlas=do_atlas and HAS_ATLAS)
+                                fetch_atlas=do_atlas and HAS_ATLAS,
+                                min_snr_points=args.min_snr_points,
+                                min_bands=args.min_bands,
+                                min_fit_bands=args.min_fit_bands,
+                                prefilter_min_sources=args.prefilter_min_sources)
     if not fit_results:
         logger.error("No successful fits")
         sys.exit(1)
     logger.info("Successful fits: %d / %d", len(fit_results), len(candidates))
 
-    # --- Step 4: Build summary table with merit scores ---
-    summary = build_summary_table(candidates, fit_results, mjd_now)
+    # --- Step 4: Host galaxy morphology classification ---
+    host_morphologies = {}
+    if HAS_MORPHOLOGY:
+        logger.info("Classifying host galaxy morphologies for %d candidates...",
+                    len(fit_results))
+        morph_filter = MorphologyFilter(cache_dir='./cache/data')
+        morph_counts = {'elliptical': 0, 'spiral': 0, 'uncertain': 0, 'unknown': 0}
+        n_processed = 0
+        n_no_match = 0
+
+        for did in fit_results.keys():
+            cand_row = candidates[candidates['diaObjectId'] == did]
+            if len(cand_row) == 0:
+                n_no_match += 1
+                host_morphologies[did] = 'unknown'
+                continue
+
+            ra, dec = float(cand_row.iloc[0]['ra']), float(cand_row.iloc[0]['dec'])
+            try:
+                info = morph_filter.classify_host_galaxy(ra, dec)
+                morph = info.get('morphology', 'unknown')
+                host_morphologies[did] = morph
+                morph_counts[morph] = morph_counts.get(morph, 0) + 1
+                n_processed += 1
+
+                # Log progress every 10 candidates
+                if n_processed % 10 == 0:
+                    logger.info("  Morphology progress: %d/%d processed",
+                                n_processed, len(fit_results))
+
+            except Exception as e:
+                logger.warning("Host morphology query failed for %s at (%.3f, %.3f): %s",
+                               did, ra, dec, e)
+                host_morphologies[did] = 'unknown'
+                morph_counts['unknown'] += 1
+
+        # Summary breakdown
+        logger.info("Host morphology complete: %d elliptical, %d spiral, "
+                    "%d uncertain, %d unknown (+ %d no coord match)",
+                    morph_counts['elliptical'], morph_counts['spiral'],
+                    morph_counts['uncertain'], morph_counts['unknown'], n_no_match)
+    else:
+        logger.info("Host morphology: SKIPPED (morphology_filter not available)")
+
+    # --- Step 5: Build summary table with merit scores ---
+    summary = build_summary_table(candidates, fit_results, mjd_now, host_morphologies)
     logger.info("Summary table: %d rows", len(summary))
 
     if len(summary) == 0:
         logger.error("Empty summary table")
         sys.exit(1)
 
-    # --- Step 5: Observability filter ---
+    # --- Step 6: Observability filter ---
     if not args.no_observability:
         logger.info("Filtering for observability from Las Campanas on %s...", obs_date)
         try:
@@ -1170,14 +1619,28 @@ def main():
     else:
         plan = summary.copy()
 
-    # Sort by RA for observing efficiency
-    plan = plan.sort_values('ra').reset_index(drop=True)
-    logger.info("Observing plan: %d targets (RA-ordered)", len(plan))
+    # Prioritize targets by time-criticality, setting time, and merit
+    plan = prioritize_targets(plan)
+    plan = plan.reset_index(drop=True)
+    logger.info("Observing plan: %d targets (priority-ordered)", len(plan))
 
-    # --- Step 6: Generate light curve plots ---
+    # Generate optimized single-night observing sequence (minimizes slew)
+    logger.info("Computing optimized observing sequence...")
+    observing_sequence = optimize_observing_sequence(
+        plan, obs_date,
+        max_targets=min(20, len(plan)),  # Realistic for one night
+        slew_weight=0.4,
+        merit_weight=0.6,
+        exposure_minutes=30,
+    )
+    logger.info("Optimized sequence: %d targets, %.1f deg total slew",
+                len(observing_sequence),
+                observing_sequence['slew_deg'].sum() if len(observing_sequence) > 0 else 0)
+
+    # --- Step 7: Generate light curve plots ---
     plot_paths = generate_light_curve_plots(fit_results, lc_dir, summary)
 
-    # --- Step 7: Save outputs ---
+    # --- Step 8: Save outputs ---
     # Summary CSV
     csv_path = os.path.join(night_dir, 'candidates.csv')
     summary.to_csv(csv_path, index=False)
@@ -1198,7 +1661,8 @@ def main():
     # PDF report
     pdf_path = os.path.join(night_dir, f'report_{ut_stamp}.pdf')
     generate_pdf_report(summary, fit_results, plot_paths,
-                        pdf_path, mjd_now, obs_date)
+                        pdf_path, mjd_now, obs_date,
+                        observing_sequence=observing_sequence)
 
     # --- Done ---
     logger.info("=" * 70)
@@ -1206,7 +1670,7 @@ def main():
     logger.info("=" * 70)
     logger.info("Night directory: %s", night_dir)
     logger.info("  candidates.csv         %d candidates", len(summary))
-    logger.info("  magellan_plan.cat      %d targets (RA-ordered)", len(plan))
+    logger.info("  magellan_plan.cat      %d targets (priority-ordered)", len(plan))
     logger.info("  observing_schedule.txt readable schedule")
     logger.info("  report_%s.pdf       summary + light curves", ut_stamp)
     logger.info("  lightcurves/           %d plots", len(plot_paths))
@@ -1230,16 +1694,41 @@ def main():
                         r['merit'] if np.isfinite(r['merit']) else 0,
                         r.get('ddf_field', ''))
 
-    # Print RA-ordered schedule summary
+    # Print priority-ordered schedule summary
     if len(plan) > 0:
-        logger.info("\nRA-ordered schedule (%d targets, ~%.1f hours):",
-                    len(plan), len(plan) * 0.5)
+        has_exp = 'exposure_minutes' in plan.columns
+        total_exp = plan['exposure_minutes'].sum() / 60 if has_exp else len(plan) * 0.5
+        logger.info("\nPriority-ordered schedule (%d targets, ~%.1f hours):",
+                    len(plan), total_exp)
         for i, (_, r) in enumerate(plan.iterrows()):
             ra_s, _ = radec_to_sexagesimal(r['ra'], r['dec'])
-            logger.info("  %2d. %s  RA=%s  mag=%.1f  merit=%.3f",
+            exp_str = f"{r['exposure_minutes']:.0f}m" if has_exp and np.isfinite(r.get('exposure_minutes', np.nan)) else "30m"
+            opt_ut = r.get('optimal_time_ut', '--') or '--'
+            logger.info("  %2d. %s  RA=%s  mag=%.1f  merit=%.3f  exp=%s  opt=%s",
                         i + 1, str(r['diaObjectId'])[-12:], ra_s,
                         r['peak_mag'] if np.isfinite(r['peak_mag']) else 0,
-                        r['merit'] if np.isfinite(r['merit']) else 0)
+                        r['merit'] if np.isfinite(r['merit']) else 0,
+                        exp_str, opt_ut)
+
+    # Print optimized observing sequence (slew-minimized)
+    if len(observing_sequence) > 0:
+        total_slew = observing_sequence['slew_deg'].sum()
+        logger.info("\nOptimized single-night sequence (%d targets, %.1f deg total slew):",
+                    len(observing_sequence), total_slew)
+        for _, r in observing_sequence.iterrows():
+            ra_s, _ = radec_to_sexagesimal(r['ra'], r['dec'])
+            logger.info("  %2d. %s  UT=%s  RA=%s  slew=%4.1f°  merit=%.3f",
+                        int(r['obs_order']), str(r['diaObjectId'])[-12:],
+                        r['obs_time_ut'], ra_s,
+                        r['slew_deg'], r['merit'] if np.isfinite(r['merit']) else 0)
+
+        # Save optimized sequence to file
+        seq_path = os.path.join(night_dir, 'optimized_sequence.csv')
+        seq_cols = ['obs_order', 'obs_time_ut', 'diaObjectId', 'ra', 'dec',
+                    'peak_mag', 'merit', 'slew_deg', 'cumulative_time_hr', 'ddf_field']
+        observing_sequence[[c for c in seq_cols if c in observing_sequence.columns]].to_csv(
+            seq_path, index=False)
+        logger.info("Optimized sequence saved: %s", seq_path)
 
 
 if __name__ == '__main__':

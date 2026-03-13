@@ -243,6 +243,23 @@ class AlertCache:
                     pass
         return df
 
+    @staticmethod
+    def _convert_numpy_types(obj):
+        """Convert numpy types to native Python for JSON serialization."""
+        if isinstance(obj, dict):
+            return {k: AlertCache._convert_numpy_types(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [AlertCache._convert_numpy_types(v) for v in obj]
+        elif isinstance(obj, (np.integer,)):
+            return int(obj)
+        elif isinstance(obj, (np.floating,)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif pd.isna(obj):
+            return None
+        return obj
+
     def cache_galaxy_info(self, ra: float, dec: float,
                          morphology: str, catalog_info: Dict[str, Any],
                          redshift: Optional[float] = None):
@@ -261,13 +278,15 @@ class AlertCache:
             cursor = conn.cursor()
 
             mags = catalog_info or {}
+            # Convert numpy types for JSON serialization
+            catalog_json = self._convert_numpy_types(catalog_info)
             cursor.execute('''
                 INSERT OR REPLACE INTO galaxy_info
                 (ra, dec, morphology, catalog, redshift, magnitude_g, magnitude_r, magnitude_i, magnitude_z, queried_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ''', (
                 ra, dec, morphology,
-                json.dumps(catalog_info),
+                json.dumps(catalog_json),
                 redshift,
                 mags.get('mag_g'),
                 mags.get('mag_r'),
@@ -311,9 +330,11 @@ class AlertCache:
 
             if len(df) > 0:
                 row = df.iloc[0]
+                catalog_str = row.get('catalog')
+                catalog = json.loads(catalog_str) if catalog_str else {}
                 return {
                     'morphology': row.get('morphology'),
-                    'catalog': json.loads(row.get('catalog', '{}')),
+                    'catalog': catalog,
                     'redshift': row.get('redshift'),
                     'mag_g': row.get('magnitude_g'),
                     'mag_r': row.get('magnitude_r'),

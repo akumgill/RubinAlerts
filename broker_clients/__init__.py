@@ -1,13 +1,20 @@
 """Alert broker client modules for querying supernova candidates."""
 
-from .base_client import BaseBrokerClient
+from .base_client import BaseBrokerClient, Alert
 from .antares_client import AntaresClient
 from .alerce_client import AlerceClient
 from .alerce_db_client import AlerceDBClient
 from .rubin_tap_client import RubinTAPClient
 from .fink_client import FinkLSSTClient
+from .atlas_client import AtlasClient
 
 __all__ = [
-    'BaseBrokerClient', 'AntaresClient', 'AlerceClient',
-    'AlerceDBClient', 'RubinTAPClient', 'FinkLSSTClient',
+    'BaseBrokerClient',
+    'Alert',
+    'AntaresClient',
+    'AlerceClient',
+    'AlerceDBClient',
+    'RubinTAPClient',
+    'FinkLSSTClient',
+    'AtlasClient',
 ]

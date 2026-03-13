@@ -7,7 +7,13 @@ from .peak_fitting import (
     villar_peak_from_params,
     extract_villar_peaks,
 )
-from .magellan_planning import compute_merit, filter_observable_targets, write_magellan_catalog
+from .magellan_planning import (
+    compute_merit,
+    filter_observable_targets,
+    write_magellan_catalog,
+    optimize_observing_sequence,
+)
+from .report import ReportGenerator
 
 __all__ = [
     'AlertAggregator',
@@ -18,4 +24,6 @@ __all__ = [
     'compute_merit',
     'filter_observable_targets',
     'write_magellan_catalog',
+    'optimize_observing_sequence',
+    'ReportGenerator',
 ]

@@ -44,11 +44,23 @@ class MorphologyFilter:
         morphology = 'unknown'
         galaxy_info = None
 
-        # Try SDSS first
-        galaxy_info = CatalogQuery.query_sdss(ra, dec)
-        if galaxy_info is None:
-            # Try Pan-STARRS
-            galaxy_info = CatalogQuery.query_panstarrs(ra, dec)
+        # Try SDSS first (northern sky, dec > -10)
+        if dec > -10:
+            galaxy_info = CatalogQuery.query_sdss(ra, dec)
+            if galaxy_info is None:
+                # Try Pan-STARRS (dec > -30)
+                galaxy_info = CatalogQuery.query_panstarrs(ra, dec)
+
+        # Try SkyMapper for southern sky (dec < +10)
+        if galaxy_info is None and dec < 10:
+            galaxy_info = CatalogQuery.query_skymapper(ra, dec)
+
+        # Log which catalog was used
+        if galaxy_info:
+            logger.debug("Host galaxy found in %s for (%.4f, %.4f)",
+                        galaxy_info.get('catalog', '?'), ra, dec)
+        else:
+            logger.debug("No host galaxy found for (%.4f, %.4f) in any catalog", ra, dec)
 
         if galaxy_info:
             morphology = CatalogQuery.classify_morphology(galaxy_info)

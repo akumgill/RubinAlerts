@@ -215,6 +215,21 @@ class AlertAggregator:
             merged[f'object_id_{broker}'] = alert.get('object_id')
             merged[f'magnitude_{broker}'] = alert.get('magnitude') or alert.get('brightest_mag')
 
+            # Carry Fink-specific classifier scores (preserved separately from mean_ia_prob)
+            if broker == 'Fink':
+                # sn_score is the primary Fink SN classifier score
+                sn_score = alert.get('sn_score') or alert.get('sn_ia_prob')
+                if pd.notna(sn_score):
+                    merged['sn_score'] = float(sn_score)
+                # early_ia_score is Fink's early SN Ia classifier
+                early_score = alert.get('early_ia_score')
+                if pd.notna(early_score):
+                    merged['early_ia_score'] = float(early_score)
+                # Preserve Fink's diaObjectId
+                fink_did = alert.get('diaObjectId') or alert.get('object_id')
+                if pd.notna(fink_did) and str(fink_did).strip():
+                    merged['rubin_dia_object_id'] = str(fink_did).strip()
+
             # Carry ANTARES-specific metadata and quality fields
             if broker == 'ANTARES':
                 merged[f'tags_{broker}'] = alert.get('tags', '')

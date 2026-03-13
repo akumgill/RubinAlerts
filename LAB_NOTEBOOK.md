@@ -6,6 +6,69 @@ Automated SN Ia candidate identification pipeline for Rubin LSST Deep Drilling F
 
 ---
 
+## 2026-03-13 — Data Population Analysis & Fixes
+
+### Session Summary
+Diagnosed why merit function weights were defaulting to 1.0. Found critical bugs in E(B-V) propagation and host morphology classification. Added GLADE+ galaxy catalog.
+
+### Data Population Audit
+
+Analyzed 64 final candidates to identify where default values were being used:
+
+| Parameter | Default Rate | Root Cause | Fix Applied |
+|-----------|-------------|------------|-------------|
+| `w_ext` = 1.0 | 100% | E_BV column never computed | ✓ Fixed |
+| `w_host` = 0.7 | 98% | Catalog queries returning NULL | ✓ Fixed |
+| `n_ztf` = 0 | 100% | ALeRCE photometry not fetched | Planned |
+| `n_atlas` = 0 | 100% | ATLAS forced phot disabled | Planned |
+
+### Bug Fixes
+
+#### 1. Extinction E(B-V) Not Propagating
+**Problem:** `get_extinction_batch()` returned `A_u`, `A_g`, `A_r`, `A_i`, `A_z` columns, but `run_tonight.py` looked for `E_BV` which didn't exist.
+
+**Diagnosis:** Cache showed 506/507 positions had `extinction_json` stored, but `w_ext` was 1.0 for all candidates.
+
+**Fix:** Compute E(B-V) from A_g using Schlafly & Finkbeiner (2011) coefficients:
+```python
+E_BV = A_g / R_g   # R_g = 3.303
+```
+
+#### 2. Host Morphology 98% Unknown
+**Problem:** SDSS, Pan-STARRS, SkyMapper queries returning NULL for faint DDF galaxies.
+
+**Diagnosis:** Cache showed 506/507 records with `morphology = NULL` and `catalog = NULL`. Only 1 galaxy found (SDSS elliptical at z~0.04).
+
+**Fixes:**
+- Increased search radius: 1 → 2 arcmin (SNe can be offset from host centers)
+- Added Pan-STARRS fallback for all dec > -30 (deeper than SDSS)
+- Added GLADE+ galaxy catalog as final fallback (22M galaxies with redshifts)
+- Return 'uncertain' instead of 'unknown' when galaxy found but no optical colors
+
+### New Catalog: GLADE+
+
+Added `CatalogQuery.query_glade()` for GLADE+ (Galaxy List for Advanced Detector Era):
+- VizieR catalog VII/291
+- 22 million galaxies optimized for GW follow-up
+- Provides spectroscopic/photometric redshifts
+- All-sky coverage, good for southern DDFs
+
+**Limitation:** Most GLADE+ entries lack B-band photometry (only WISE W1/W2), so morphology classification returns 'uncertain'. But we still get:
+- Confirmation of host galaxy presence
+- Redshift for distance modulus calculation
+- Galaxy position for offset measurements
+
+### Files Changed
+```
+utils/extinction.py              — Added E_BV computation, SFD_R_COEFFICIENTS
+utils/catalog_query.py           — Added query_glade(), improved classify_morphology()
+host_galaxy/morphology_filter.py — 2 arcmin search, PS1 fallback, GLADE+ fallback
+core/magellan_planning.py        — Added w_salt, w_absmag to merit function
+run_tonight.py                   — SALT fitting hooks, NED redshift support
+```
+
+---
+
 ## 2026-03-13 — Major Pipeline Enhancements
 
 ### Session Summary
@@ -198,13 +261,20 @@ python run_tonight.py 61101 --min-prob 0.3 --days-back 30
 - [x] LaTeX-formatted output
 - [x] ANTARES parallel search & date pre-filter
 - [x] Host morphology catalog queries (SDSS/PS1/SkyMapper)
+- [x] E(B-V) extinction propagation fix
+- [x] GLADE+ galaxy catalog integration
+- [x] Increased morphology search radius (2 arcmin)
 
 ### Remaining
 - [ ] Historical validation on archived DP1 data (MJD 60630-60650)
 - [ ] Unit tests with pytest coverage
 - [ ] Direct RSP DiaObject photometry queries
 - [ ] ATLAS forced photometry integration (credentials ready)
+- [ ] ZTF photometry via ALeRCE (API configured)
+- [ ] NED redshift queries for distance modulus
+- [ ] SALT2/SALT3 template fitting (sncosmo ready)
 
 ### Known Issues
-1. **Host morphology sparse** — many candidates return "unknown" due to catalog coverage
+1. **GLADE+ optical photometry sparse** — most entries have only WISE, morphology returns 'uncertain'
 2. **Rubin cadence** — DP1 has sparse early data, limiting light curve quality
+3. **ALeRCE ZTF photometry** — API available but not yet integrated into main pipeline

@@ -1162,20 +1162,27 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
 
         # --- Merit Breakdown table page ---
         has_breakdown = all(c in summary_df.columns for c in ['w_time', 'w_mag', 'w_prob'])
+        has_salt_weight = 'w_salt' in summary_df.columns
         if len(summary_df) > 0 and has_breakdown:
             fig, ax = plt.subplots(figsize=(11, 8.5))
             ax.axis('off')
             ax.set_title('Merit Breakdown — Top 30 Candidates', fontsize=14, pad=20)
 
             # Add formula explanation
-            ax.text(0.5, 0.95, 'Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker',
-                   ha='center', va='top', fontsize=10, fontfamily='monospace',
+            if has_salt_weight:
+                formula = 'Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker × W_salt × W_absmag'
+            else:
+                formula = 'Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker'
+            ax.text(0.5, 0.95, formula,
+                   ha='center', va='top', fontsize=9, fontfamily='monospace',
                    transform=ax.transAxes)
 
             table_df = summary_df.sort_values('merit', ascending=False).head(30).copy()
 
             breakdown_cols = ['diaObjectId', 'merit', 'w_time', 'w_mag', 'w_prob',
                              'w_host', 'w_ext', 'w_broker']
+            if has_salt_weight:
+                breakdown_cols.extend(['w_salt', 'w_absmag'])
             breakdown_df = table_df[[c for c in breakdown_cols if c in table_df.columns]].copy()
 
             # Format numbers
@@ -1195,7 +1202,9 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
                 'w_prob': 'W_prob',
                 'w_host': 'W_host',
                 'w_ext': 'W_ext',
-                'w_broker': 'W_broker',
+                'w_broker': 'W_brok',
+                'w_salt': 'W_salt',
+                'w_absmag': 'W_abs',
             }
             breakdown_df.columns = [col_names.get(c, c) for c in breakdown_df.columns]
 
@@ -1206,17 +1215,24 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
                 cellLoc='center',
             )
             tbl.auto_set_font_size(False)
-            tbl.set_fontsize(8)
+            tbl.set_fontsize(7 if has_salt_weight else 8)
             tbl.auto_set_column_width(range(len(breakdown_df.columns)))
             tbl.scale(1.0, 1.4)
 
             # Add legend at bottom
-            legend_text = (
-                'W_time: Gaussian decay from peak (τ=10d)  |  '
-                'W_mag: Optimal ~20.5 AB  |  W_prob: P(Ia) classifier\n'
-                'W_host: Elliptical=1.0, Spiral=0.6  |  '
-                'W_ext: Galactic extinction  |  W_broker: Multi-broker bonus'
-            )
+            if has_salt_weight:
+                legend_text = (
+                    'W_time: Gaussian decay from peak (τ=10d)  |  W_mag: Optimal ~20.5 AB  |  W_prob: P(Ia) classifier\n'
+                    'W_host: Elliptical=1.0, Spiral=0.6  |  W_ext: Galactic extinction  |  W_brok: Multi-broker bonus\n'
+                    'W_salt: SALT2 chi2/dof quality [0.5-1.2]  |  W_abs: Absolute mag ~ -19.3 [0.3-1.0]'
+                )
+            else:
+                legend_text = (
+                    'W_time: Gaussian decay from peak (τ=10d)  |  '
+                    'W_mag: Optimal ~20.5 AB  |  W_prob: P(Ia) classifier\n'
+                    'W_host: Elliptical=1.0, Spiral=0.6  |  '
+                    'W_ext: Galactic extinction  |  W_broker: Multi-broker bonus'
+                )
             ax.text(0.5, 0.02, legend_text, ha='center', va='bottom',
                    fontsize=8, color='dimgray', transform=ax.transAxes)
 
@@ -1231,43 +1247,39 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
         merit_text = """
 MERIT FUNCTION
 
-    Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker
+    Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker × W_salt × W_absmag
 
-Each component ranges from 0 to ~1 (W_broker can reach 1.2). The multiplicative
+Each component ranges from 0 to ~1 (W_broker/W_salt can reach 1.2). The multiplicative
 structure means a candidate needs to score well on ALL factors to rank highly.
 
 
 COMPONENT DEFINITIONS
 
-W_time  — Time from Peak
-    exp(−Δt² / 2τ²)  with τ = 10 days
+W_time  — Time from Peak: exp(−Δt² / 2τ²) with τ = 10 days
     Supernovae are most valuable for spectroscopy near peak brightness.
-    Gaussian decay strongly penalizes targets far past peak.
 
-W_mag   — Magnitude Suitability
-    Gaussian centered at m_opt = 20.5 AB, σ = 1.5 mag
-    Penalizes targets that are too bright (could use smaller telescope)
-    or too faint (poor S/N even with Magellan).
+W_mag   — Magnitude Suitability: Gaussian at m_opt = 20.5 AB, σ = 1.5
+    Penalizes targets too bright or too faint for Magellan spectroscopy.
 
-W_prob  — Type Ia Probability
-    P(Ia) from ML classifier, clipped to [0.1, 1.0]
-    From ALeRCE or Fink's supernova classifiers.
-    ANTARES-only candidates use a heuristic proxy capped at 0.50.
+W_prob  — Type Ia Probability: P(Ia) from ML classifier [0.1, 1.0]
+    From ALeRCE or Fink. ANTARES-only use proxy capped at 0.50.
 
-W_host  — Host Galaxy Morphology
-    Elliptical = 1.0, Spiral = 0.6, Unknown = 0.7
-    SNe Ia in elliptical hosts have lower Hubble diagram scatter,
-    making them more valuable for cosmology.
+W_host  — Host Galaxy Morphology: Elliptical=1.0, Spiral=0.6, Unknown=0.7
+    SNe Ia in elliptical hosts have lower Hubble diagram scatter.
 
-W_ext   — Galactic Extinction Penalty
-    exp(−E(B−V) / 0.15)
-    Heavily penalizes targets behind significant Milky Way dust
-    that would require large, uncertain extinction corrections.
+W_ext   — Galactic Extinction Penalty: exp(−E(B−V) / 0.15)
+    Heavily penalizes targets behind significant Milky Way dust.
 
-W_broker — Multi-broker Agreement
-    1.0 + 0.1 × (N − 1)  where N = number of brokers detecting the candidate
-    Independent detections increase confidence the transient is real.
-    Ranges from 1.0 (single broker) to ~1.2 (3 brokers).
+W_broker — Multi-broker Agreement: 1.0 + 0.1×(N−1)
+    Independent detections increase confidence. Range [1.0, 1.2].
+
+W_salt  — SALT2 Template Fit Quality: sigmoid(chi2/dof) [0.5, 1.2]
+    Good SALT2 fit (chi2/dof < 2) indicates SN Ia template match.
+    Bonus for excellent fits, penalty for poor fits.
+
+W_absmag — Absolute Magnitude: Gaussian at M_B = −19.3, σ = 0.7
+    SNe Ia have M_B ~ −19.3 ± 0.5. Requires host redshift.
+    Penalizes candidates with absolute mag inconsistent with SN Ia.
 """
         ax.text(0.05, 0.95, merit_text, ha='left', va='top',
                 fontsize=10, fontfamily='monospace', transform=ax.transAxes)
@@ -1463,10 +1475,14 @@ def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path):
 
     # Add merit breakdown section
     if has_breakdown:
+        has_salt_weight = 'w_salt' in df.columns
         lines.append('#')
-        lines.append('# ' + '=' * 90)
+        lines.append('# ' + '=' * 110)
         lines.append('# MERIT BREAKDOWN')
-        lines.append('# Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker × W_moon')
+        if has_salt_weight:
+            lines.append('# Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker × W_moon × W_salt × W_absmag')
+        else:
+            lines.append('# Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker × W_moon')
         lines.append('#   W_time  : exp(-dt²/200)      Gaussian decay from peak (tau=10d)')
         lines.append('#   W_mag   : exp(-(m-20.5)²/σ²) Optimal mag ~20.5 AB')
         lines.append('#   W_prob  : P(Ia) clipped      ML classifier probability [0.1-1.0]')
@@ -1474,13 +1490,27 @@ def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path):
         lines.append('#   W_ext   : exp(-E(B-V)/0.15)  Galactic extinction penalty')
         lines.append('#   W_broker: 1 + 0.1*(N-1)      Multi-broker agreement bonus')
         lines.append('#   W_moon  : moon penalty       Phase/separation penalty [0.3-1.0]')
-        lines.append('# ' + '=' * 90)
-        lines.append(f'# {"#":>3s}  {"Object":>12s}  {"Merit":>6s}  '
-                     f'{"W_time":>6s}  {"W_mag":>6s}  {"W_prob":>6s}  '
-                     f'{"W_host":>6s}  {"W_ext":>6s}  {"W_brok":>6s}  {"W_moon":>6s}')
-        lines.append(f'# {"---":>3s}  {"------":>12s}  {"-----":>6s}  '
-                     f'{"------":>6s}  {"-----":>6s}  {"------":>6s}  '
-                     f'{"------":>6s}  {"-----":>6s}  {"------":>6s}  {"------":>6s}')
+        if has_salt_weight:
+            lines.append('#   W_salt  : SALT2 chi2/dof     Good template fit bonus [0.5-1.2]')
+            lines.append('#   W_absmag: absolute mag       M_B ~ -19.3 consistency [0.3-1.0]')
+        lines.append('# ' + '=' * 110)
+
+        if has_salt_weight:
+            lines.append(f'# {"#":>3s}  {"Object":>12s}  {"Merit":>6s}  '
+                         f'{"W_time":>6s}  {"W_mag":>6s}  {"W_prob":>6s}  '
+                         f'{"W_host":>6s}  {"W_ext":>6s}  {"W_brok":>6s}  '
+                         f'{"W_moon":>6s}  {"W_salt":>6s}  {"W_abs":>6s}')
+            lines.append(f'# {"---":>3s}  {"------":>12s}  {"-----":>6s}  '
+                         f'{"------":>6s}  {"-----":>6s}  {"------":>6s}  '
+                         f'{"------":>6s}  {"-----":>6s}  {"------":>6s}  '
+                         f'{"------":>6s}  {"------":>6s}  {"-----":>6s}')
+        else:
+            lines.append(f'# {"#":>3s}  {"Object":>12s}  {"Merit":>6s}  '
+                         f'{"W_time":>6s}  {"W_mag":>6s}  {"W_prob":>6s}  '
+                         f'{"W_host":>6s}  {"W_ext":>6s}  {"W_brok":>6s}  {"W_moon":>6s}')
+            lines.append(f'# {"---":>3s}  {"------":>12s}  {"-----":>6s}  '
+                         f'{"------":>6s}  {"-----":>6s}  {"------":>6s}  '
+                         f'{"------":>6s}  {"-----":>6s}  {"------":>6s}  {"------":>6s}')
 
         for i, (_, row) in enumerate(df.iterrows()):
             did = str(row['diaObjectId'])[-12:]
@@ -1493,9 +1523,17 @@ def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path):
             w_broker = f"{row['w_broker']:.3f}" if np.isfinite(row.get('w_broker', np.nan)) else '--'
             w_moon = f"{row.get('moon_penalty', 1.0):.3f}" if np.isfinite(row.get('moon_penalty', np.nan)) else '1.000'
 
-            lines.append(f'  {i+1:3d}  {did:>12s}  {merit:>6s}  '
-                         f'{w_time:>6s}  {w_mag:>6s}  {w_prob:>6s}  '
-                         f'{w_host:>6s}  {w_ext:>6s}  {w_broker:>6s}  {w_moon:>6s}')
+            if has_salt_weight:
+                w_salt = f"{row['w_salt']:.3f}" if np.isfinite(row.get('w_salt', np.nan)) else '1.000'
+                w_absmag = f"{row['w_absmag']:.3f}" if np.isfinite(row.get('w_absmag', np.nan)) else '1.000'
+                lines.append(f'  {i+1:3d}  {did:>12s}  {merit:>6s}  '
+                             f'{w_time:>6s}  {w_mag:>6s}  {w_prob:>6s}  '
+                             f'{w_host:>6s}  {w_ext:>6s}  {w_broker:>6s}  '
+                             f'{w_moon:>6s}  {w_salt:>6s}  {w_absmag:>6s}')
+            else:
+                lines.append(f'  {i+1:3d}  {did:>12s}  {merit:>6s}  '
+                             f'{w_time:>6s}  {w_mag:>6s}  {w_prob:>6s}  '
+                             f'{w_host:>6s}  {w_ext:>6s}  {w_broker:>6s}  {w_moon:>6s}')
 
     with open(output_path, 'w') as f:
         f.write('\n'.join(lines) + '\n')
@@ -1609,9 +1647,18 @@ def main():
     if do_ztf:
         logger.info("ZTF photometry: %s", "enabled (via ALeRCE)" if HAS_ALERCE else "SKIPPED (alerce not installed)")
     if do_atlas:
-        logger.info("ATLAS photometry: %s (batch, bright < %.1f mag only)",
-                     "enabled" if HAS_ATLAS else "SKIPPED (atlas_client not available)",
-                     ATLAS_BRIGHT_MAG_CUT)
+        if HAS_ATLAS:
+            # Verify ATLAS credentials at startup
+            atlas_test = AtlasClient()
+            atlas_ok, atlas_msg = atlas_test.verify_credentials()
+            if atlas_ok:
+                logger.info("ATLAS photometry: enabled (batch, bright < %.1f mag) - %s",
+                            ATLAS_BRIGHT_MAG_CUT, atlas_msg)
+            else:
+                logger.warning("ATLAS photometry: DISABLED - %s", atlas_msg)
+                do_atlas = False
+        else:
+            logger.info("ATLAS photometry: SKIPPED (atlas_client not available)")
     logger.info("Quality cuts: min_snr_points=%d, min_bands=%d, min_fit_bands=%d",
                 args.min_snr_points, args.min_bands, args.min_fit_bands)
     if args.prefilter_min_sources > 0:
@@ -1708,7 +1755,8 @@ def main():
         logger.info("Host morphology: SKIPPED (morphology_filter not available)")
 
     # --- Step 5: Build summary table with merit scores ---
-    summary = build_summary_table(candidates, fit_results, mjd_now, host_morphologies)
+    summary = build_summary_table(candidates, fit_results, mjd_now, host_morphologies,
+                                  redshifts=redshifts)
     logger.info("Summary table: %d rows", len(summary))
 
     if len(summary) == 0:
@@ -1791,6 +1839,19 @@ def main():
         n_with_ztf = (summary['n_ztf'] > 0).sum() if 'n_ztf' in summary.columns else 0
         n_with_atlas = (summary['n_atlas'] > 0).sum() if 'n_atlas' in summary.columns else 0
         logger.info("  Survey coverage: %d with ZTF, %d with ATLAS", n_with_ztf, n_with_atlas)
+
+    # Redshift and SALT summary
+    if 'redshift' in summary.columns:
+        n_with_z = summary['redshift'].notna().sum()
+        if n_with_z > 0:
+            z_median = summary['redshift'].dropna().median()
+            logger.info("  Redshifts: %d candidates with z (median z=%.3f)", n_with_z, z_median)
+    if 'salt_status' in summary.columns:
+        n_salt_ok = (summary['salt_status'] == 'ok').sum()
+        if n_salt_ok > 0:
+            good_chi2 = summary[(summary['salt_status'] == 'ok') & (summary['salt_chi2_dof'] < 2)]
+            logger.info("  SALT2 fits: %d successful (%d with chi2/dof < 2)",
+                       n_salt_ok, len(good_chi2))
 
     # Print top 5 by merit
     if len(plan) > 0:

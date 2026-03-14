@@ -75,6 +75,7 @@ class AtlasClient:
     def __init__(self):
         self.token = None
         self._available = None
+        self._verified = None
 
     @property
     def available(self) -> bool:
@@ -86,6 +87,36 @@ class AtlasClient:
             except RuntimeError:
                 self._available = False
         return self._available
+
+    def verify_credentials(self) -> Tuple[bool, str]:
+        """Test ATLAS credentials by attempting authentication.
+
+        Returns (success, message) tuple.
+        """
+        if not self.available:
+            return False, "Credentials not configured"
+        try:
+            username, password = get_atlas_credentials()
+            resp = requests.post(
+                f"{ATLAS_BASE_URL}/api-token-auth/",
+                data={'username': username, 'password': password},
+            )
+            if resp.status_code == 200:
+                token = resp.json().get('token')
+                if token:
+                    self._verified = True
+                    return True, f"Authentication successful (user: {username})"
+            # Parse error message
+            try:
+                err = resp.json()
+                msg = err.get('non_field_errors', [err])[0] if isinstance(err, dict) else str(err)
+            except Exception:
+                msg = resp.text
+            self._verified = False
+            return False, f"Authentication failed (HTTP {resp.status_code}): {msg}"
+        except Exception as e:
+            self._verified = False
+            return False, f"Connection error: {e}"
 
     def _ensure_token(self):
         """Authenticate and cache the ATLAS API token."""

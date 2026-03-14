@@ -1,0 +1,84 @@
+name,type,host,mag,year,field,is_ia
+2010aq,II P,?,,,COSMOS,False
+2010ar,Ia,?,,,COSMOS,True
+2001kh,Ia,?,,,XMM-LSS,True
+2002km,Ia,?,,,XMM-LSS,True
+2002kn,Ia,?,,,XMM-LSS,True
+2002ko,Ia,?,,,XMM-LSS,True
+2002kp,,?,,,XMM-LSS,False
+2002kq,,?,,,XMM-LSS,False
+2002kr,Ia,?,,,XMM-LSS,True
+2002ks,,?,,,XMM-LSS,False
+2002kt,,?,,,XMM-LSS,False
+2002ku,,?,,,XMM-LSS,False
+2002kv,,?,,,XMM-LSS,False
+2002kw,,?,,,XMM-LSS,False
+2002kx,,?,,,XMM-LSS,False
+2002ky,,?,,,XMM-LSS,False
+2002kz,,?,,,XMM-LSS,False
+2002la,,?,,,XMM-LSS,False
+2002lb,,?,,,XMM-LSS,False
+2002lc,,?,,,XMM-LSS,False
+2002ld,,?,,,XMM-LSS,False
+2003id,Ic pec,?,,,XMM-LSS,False
+2005ky,Ia,?,,,XMM-LSS,True
+2008id,Ia,?,,,XMM-LSS,True
+2009kt,Ia,?,,,XMM-LSS,True
+2009kv,Ia,?,,,XMM-LSS,True
+2009kx,Ia,?,,,XMM-LSS,True
+2009kz,Ia,?,,,XMM-LSS,True
+2010be,Ia,?,,,XMM-LSS,True
+2010gy,Ia,?,,,XMM-LSS,True
+1999gt,Ia:,?,,,ECDFS,True
+1999gu,II,?,,,ECDFS,False
+2001ip,Ia,?,,,ECDFS,True
+2002fv,,?,,,ECDFS,False
+2002fw,Ia,?,,,ECDFS,True
+2002fx,Ia,?,,,ECDFS,True
+2002fy,,?,,,ECDFS,False
+2002fz,,?,,,ECDFS,False
+2002ga,,?,,,ECDFS,False
+2002hp,Ia,?,,,ECDFS,True
+2002hq,,?,,,ECDFS,False
+2002hr,Ia,?,,,ECDFS,True
+2002hs,,?,,,ECDFS,False
+2002ht,,?,,,ECDFS,False
+2002kb,,?,,,ECDFS,False
+2002kc,Ia,?,,,ECDFS,True
+2002kd,Ia,?,,,ECDFS,True
+2002ke,,?,,,ECDFS,False
+2002lg,,?,,,ECDFS,False
+2003aj,Ia,?,,,ECDFS,True
+2003ak,Ia,?,,,ECDFS,True
+2003al,,?,,,ECDFS,False
+2003lt,,?,,,ECDFS,False
+2003lu,,?,,,ECDFS,False
+2004R,,?,,,ECDFS,False
+2009ku,Ia pec,?,,,ECDFS,True
+2009kw,Ia,?,,,ECDFS,True
+2009ky,Ia,?,,,ECDFS,True
+2012ez,Ia,?,,,ECDFS,True
+2012fa,Ia pec,?,,,ECDFS,True
+2012fn,Ic,?,,,ECDFS,False
+2012fo,II,?,,,ECDFS,False
+2012fp,IIn,?,,,ECDFS,False
+2012fq,Ia,?,,,ECDFS,True
+2012gs,Ia,?,,,ECDFS,True
+2012gt,Ia,?,,,ECDFS,True
+2012gv,Ia,?,,,ECDFS,True
+2013go,Ia pec,?,,,ECDFS,True
+2013gp,Ia,?,,,ECDFS,True
+2008ge,Ia pec,?,,,EDFS_b,True
+1895A,,?,,,M49,False
+1960B,,?,,,M49,False
+1985G,II P,?,,,M49,False
+1992ad,II,?,,,M49,False
+1993I,Ia,?,,,M49,True
+1994D,Ia,?,,,M49,True
+1998aa,Ia,?,,,M49,True
+2005X,Ia,?,,,M49,True
+2008cb,Ia,?,,,M49,True
+2009bh,Ic,?,,,M49,False
+2009cx,Ia,?,,,M49,True
+2009np,Ic:,?,,,M49,False
+2012cg,Ia,?,,,M49,True

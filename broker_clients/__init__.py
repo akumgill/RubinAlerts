@@ -7,6 +7,7 @@ from .alerce_db_client import AlerceDBClient
 from .rubin_tap_client import RubinTAPClient
 from .fink_client import FinkLSSTClient
 from .atlas_client import AtlasClient
+from .tns_client import TNSClient
 
 __all__ = [
     'BaseBrokerClient',
@@ -17,4 +18,5 @@ __all__ = [
     'RubinTAPClient',
     'FinkLSSTClient',
     'AtlasClient',
+    'TNSClient',
 ]

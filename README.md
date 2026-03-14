@@ -25,14 +25,14 @@ python run_tonight.py 61100 --no-observability
 
 This creates a night directory `nights/ut20260301/` containing:
 
-| File | Contents |
-|------|----------|
-| `candidates.csv` | Summary table of all candidates with peak fits and merit scores |
-| `magellan_plan.cat` | Magellan TCS catalog (RA-ordered, 16-field format) |
-| `observing_schedule.txt` | Human-readable schedule with coordinates, magnitudes, merit |
-| `report_{ut_stamp}.pdf` | Multi-page PDF: title page, summary table, discovery space plot, light curves |
-| `lightcurves/*.png` | Per-candidate magnitude-space light curve plots |
-| `pipeline.log` | Full DEBUG-level log of the pipeline run (warnings, errors, timing) |
+| File                     | Contents                                                                      |
+| ------------------------ | ----------------------------------------------------------------------------- |
+| `candidates.csv`         | Summary table of all candidates with peak fits and merit scores               |
+| `magellan_plan.cat`      | Magellan TCS catalog (RA-ordered, 16-field format)                            |
+| `observing_schedule.txt` | Human-readable schedule with coordinates, magnitudes, merit                   |
+| `report_{ut_stamp}.pdf`  | Multi-page PDF: title page, summary table, discovery space plot, light curves |
+| `lightcurves/*.png`      | Per-candidate magnitude-space light curve plots                               |
+| `pipeline.log`           | Full DEBUG-level log of the pipeline run (warnings, errors, timing)           |
 
 ### Interactive supervision (notebook)
 
@@ -142,15 +142,15 @@ RubinAlerts/
 
 The pipeline searches 7 fields (6 Rubin DDFs + M49):
 
-| Field | RA | Dec | ZTF? | Notes |
-|-------|-----|------|------|-------|
-| COSMOS | 150.1 | +2.2 | Yes | Northern, full ZTF coverage |
-| XMM-LSS | 35.6 | -4.8 | Yes | Northern |
-| ECDFS | 53.0 | -28.1 | Marginal | Near ZTF limit |
-| ELAIS-S1 | 9.5 | -44.0 | No | Southern, Rubin-only |
-| EDFS_a | 58.9 | -49.3 | No | Southern, Rubin-only |
-| EDFS_b | 63.6 | -47.6 | No | Southern, Rubin-only |
-| M49 | 187.4 | +8.0 | Yes | Virgo Cluster |
+| Field    | RA    | Dec   | ZTF?     | Notes                       |
+| -------- | ----- | ----- | -------- | --------------------------- |
+| COSMOS   | 150.1 | +2.2  | Yes      | Northern, full ZTF coverage |
+| XMM-LSS  | 35.6  | -4.8  | Yes      | Northern                    |
+| ECDFS    | 53.0  | -28.1 | Marginal | Near ZTF limit              |
+| ELAIS-S1 | 9.5   | -44.0 | No       | Southern, Rubin-only        |
+| EDFS_a   | 58.9  | -49.3 | No       | Southern, Rubin-only        |
+| EDFS_b   | 63.6  | -47.6 | No       | Southern, Rubin-only        |
+| M49      | 187.4 | +8.0  | Yes      | Virgo Cluster               |
 
 ## Light Curve Fitting
 
@@ -169,3 +169,4 @@ Copyright (c) 2025 President and Fellows of Harvard College. All rights reserved
 ## Contact
 
 Christopher Stubbs — Harvard University — stubbs@g.harvard.edu
+Akum Gill - Harvard University - akum@g.harvard.edu

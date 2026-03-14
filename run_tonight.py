@@ -76,6 +76,13 @@ try:
 except ImportError:
     HAS_NED = False
 
+# TNS (Transient Name Server) cross-matching
+try:
+    from broker_clients.tns_client import TNSClient
+    HAS_TNS = True
+except ImportError:
+    HAS_TNS = False
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(name)s %(levelname)s %(message)s',
@@ -926,6 +933,11 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=N
             'mean_ia_prob': cand.get('mean_ia_prob', np.nan),
             'host_morphology': host_morph,
             'E_BV': extinction_ebv,
+            # TNS cross-match info
+            'tns_name': cand.get('tns_name'),
+            'tns_type': cand.get('tns_type'),
+            'tns_redshift': cand.get('tns_redshift', np.nan),
+            'tns_match': cand.get('tns_match', False),
             # Redshift info
             'redshift': redshift,
             'distmod': distmod,
@@ -1567,6 +1579,8 @@ def main():
                         help='Skip ZTF photometry from ALeRCE')
     parser.add_argument('--no-atlas', action='store_true',
                         help='Skip ATLAS forced photometry')
+    parser.add_argument('--no-tns', action='store_true',
+                        help='Skip TNS cross-matching')
     parser.add_argument('--fink-only', action='store_true',
                         help='Only query Fink (skip ANTARES/ALeRCE brokers)')
     parser.add_argument('--use-salt', action='store_true',
@@ -1639,6 +1653,26 @@ def main():
     if len(candidates) == 0:
         logger.error("No candidates found")
         sys.exit(1)
+
+    # --- Step 2a: TNS cross-match (identify already-reported transients) ---
+    do_tns = not args.no_tns if hasattr(args, 'no_tns') else True
+    if do_tns and HAS_TNS:
+        logger.info("TNS cross-match: checking %d candidates...", len(candidates))
+        try:
+            tns_client = TNSClient()
+            tns_ok, tns_msg = tns_client.verify_connection()
+            if tns_ok:
+                candidates = tns_client.cross_match_candidates(candidates, radius_arcsec=5.0)
+                n_tns_match = candidates['tns_match'].sum() if 'tns_match' in candidates.columns else 0
+                n_classified = (candidates['tns_type'].notna()).sum() if 'tns_type' in candidates.columns else 0
+                logger.info("TNS: %d/%d already reported, %d spectroscopically classified",
+                           n_tns_match, len(candidates), n_classified)
+            else:
+                logger.warning("TNS cross-match: SKIPPED - %s", tns_msg)
+        except Exception as e:
+            logger.warning("TNS cross-match failed: %s", e)
+    elif do_tns:
+        logger.info("TNS cross-match: SKIPPED (tns_client not available)")
 
     # --- Step 3: Fetch light curves and fit peaks ---
     # ZTF: per-candidate ALeRCE queries; ATLAS: batch for bright candidates only
@@ -1839,6 +1873,15 @@ def main():
         n_with_ztf = (summary['n_ztf'] > 0).sum() if 'n_ztf' in summary.columns else 0
         n_with_atlas = (summary['n_atlas'] > 0).sum() if 'n_atlas' in summary.columns else 0
         logger.info("  Survey coverage: %d with ZTF, %d with ATLAS", n_with_ztf, n_with_atlas)
+
+    # TNS cross-match summary
+    if 'tns_match' in summary.columns:
+        n_in_tns = summary['tns_match'].sum()
+        n_tns_classified = summary['tns_type'].notna().sum()
+        n_tns_snia = (summary['tns_type'].str.contains('Ia', case=False, na=False)).sum()
+        if n_in_tns > 0:
+            logger.info("  TNS status: %d/%d already reported, %d spectroscopically classified (%d SN Ia)",
+                       n_in_tns, len(summary), n_tns_classified, n_tns_snia)
 
     # Redshift and SALT summary
     if 'redshift' in summary.columns:

@@ -824,7 +824,7 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
     return results
 
 
-def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=None,
+def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
                         redshifts=None):
     """Build a merged summary DataFrame with merit scores.
 
@@ -836,15 +836,16 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=N
         Light curve fit results keyed by diaObjectId.
     mjd_now : float
         Current MJD for delta_t calculation.
-    host_morphologies : dict, optional
-        Host galaxy morphologies keyed by diaObjectId. Values should be
-        'elliptical', 'spiral', 'uncertain', or 'unknown'.
+    host_info : dict, optional
+        Host galaxy info keyed by diaObjectId. Values should be dicts with
+        'morphology', 'nuclear_offset_arcsec', 'offset_class', etc.
+        For backwards compatibility, also accepts plain strings (morphology only).
     redshifts : dict, optional
         Redshift info keyed by diaObjectId. Values should be dicts with
         'redshift', 'distmod', 'ned_name', 'separation_arcsec' keys.
     """
     rows = []
-    host_morphologies = host_morphologies or {}
+    host_info = host_info or {}
     redshifts = redshifts or {}
 
     for _, cand in candidates_df.iterrows():
@@ -864,7 +865,19 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=N
             ia_prob = float(sn_score)
         else:
             ia_prob = mean_prob
-        host_morph = host_morphologies.get(did, 'unknown')
+
+        # Get host galaxy info (handle both dict and string formats for backwards compat)
+        host_data = host_info.get(did, {})
+        if isinstance(host_data, str):
+            # Old format: just morphology string
+            host_morph = host_data
+            nuclear_offset = np.nan
+            offset_class = 'unknown'
+        else:
+            # New format: full host info dict
+            host_morph = host_data.get('morphology', 'unknown')
+            nuclear_offset = host_data.get('nuclear_offset_arcsec', np.nan)
+            offset_class = host_data.get('offset_class', 'unknown')
 
         # Get extinction and broker count for merit calculation
         extinction_ebv = cand.get('E_BV', cand.get('ebv', np.nan))
@@ -932,6 +945,8 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_morphologies=N
             'num_brokers': num_brokers,
             'mean_ia_prob': cand.get('mean_ia_prob', np.nan),
             'host_morphology': host_morph,
+            'nuclear_offset_arcsec': nuclear_offset,
+            'offset_class': offset_class,
             'E_BV': extinction_ebv,
             # TNS cross-match info
             'tns_name': cand.get('tns_name'),
@@ -1744,13 +1759,14 @@ def main():
         sys.exit(1)
     logger.info("Successful fits: %d / %d", len(fit_results), len(candidates))
 
-    # --- Step 4: Host galaxy morphology classification ---
-    host_morphologies = {}
+    # --- Step 4: Host galaxy morphology classification + nuclear offset ---
+    host_info = {}  # did -> {morphology, nuclear_offset_arcsec, offset_class, ...}
     if HAS_MORPHOLOGY:
         logger.info("Classifying host galaxy morphologies for %d candidates...",
                     len(fit_results))
         morph_filter = MorphologyFilter(cache_dir='./cache/data')
         morph_counts = {'elliptical': 0, 'spiral': 0, 'uncertain': 0, 'unknown': 0}
+        offset_counts = {'nuclear': 0, 'offset': 0, 'distant': 0, 'unknown': 0}
         n_processed = 0
         n_no_match = 0
 
@@ -1758,15 +1774,18 @@ def main():
             cand_row = candidates[candidates['diaObjectId'] == did]
             if len(cand_row) == 0:
                 n_no_match += 1
-                host_morphologies[did] = 'unknown'
+                host_info[did] = {'morphology': 'unknown', 'offset_class': 'unknown'}
                 continue
 
             ra, dec = float(cand_row.iloc[0]['ra']), float(cand_row.iloc[0]['dec'])
             try:
                 info = morph_filter.classify_host_galaxy(ra, dec)
                 morph = info.get('morphology', 'unknown')
-                host_morphologies[did] = morph
+                offset_class = info.get('offset_class', 'unknown')
+
+                host_info[did] = info
                 morph_counts[morph] = morph_counts.get(morph, 0) + 1
+                offset_counts[offset_class] = offset_counts.get(offset_class, 0) + 1
                 n_processed += 1
 
                 # Log progress every 10 candidates
@@ -1777,7 +1796,7 @@ def main():
             except Exception as e:
                 logger.warning("Host morphology query failed for %s at (%.3f, %.3f): %s",
                                did, ra, dec, e)
-                host_morphologies[did] = 'unknown'
+                host_info[did] = {'morphology': 'unknown', 'offset_class': 'unknown'}
                 morph_counts['unknown'] += 1
 
         # Summary breakdown
@@ -1785,11 +1804,18 @@ def main():
                     "%d uncertain, %d unknown (+ %d no coord match)",
                     morph_counts['elliptical'], morph_counts['spiral'],
                     morph_counts['uncertain'], morph_counts['unknown'], n_no_match)
+        logger.info("Nuclear offset: %d nuclear (<1\"), %d offset (1-30\"), "
+                    "%d distant (>30\"), %d unknown",
+                    offset_counts['nuclear'], offset_counts['offset'],
+                    offset_counts['distant'], offset_counts['unknown'])
+        if offset_counts['nuclear'] > 0:
+            logger.warning("  *** %d candidates are NUCLEAR (potential AGN/TDE) ***",
+                          offset_counts['nuclear'])
     else:
         logger.info("Host morphology: SKIPPED (morphology_filter not available)")
 
     # --- Step 5: Build summary table with merit scores ---
-    summary = build_summary_table(candidates, fit_results, mjd_now, host_morphologies,
+    summary = build_summary_table(candidates, fit_results, mjd_now, host_info,
                                   redshifts=redshifts)
     logger.info("Summary table: %d rows", len(summary))
 
@@ -1882,6 +1908,18 @@ def main():
         if n_in_tns > 0:
             logger.info("  TNS status: %d/%d already reported, %d spectroscopically classified (%d SN Ia)",
                        n_in_tns, len(summary), n_tns_classified, n_tns_snia)
+
+    # Nuclear offset summary (AGN/TDE screening)
+    if 'offset_class' in summary.columns:
+        n_nuclear = (summary['offset_class'] == 'nuclear').sum()
+        n_offset = (summary['offset_class'] == 'offset').sum()
+        n_distant = (summary['offset_class'] == 'distant').sum()
+        if n_nuclear > 0:
+            logger.warning("  Nuclear offset: %d NUCLEAR (likely AGN/TDE), %d offset (SN-like), %d distant",
+                          n_nuclear, n_offset, n_distant)
+            # List nuclear candidates for attention
+            nuclear_cands = summary[summary['offset_class'] == 'nuclear']['diaObjectId'].tolist()
+            logger.warning("    Nuclear candidates: %s", ', '.join(str(c) for c in nuclear_cands[:5]))
 
     # Redshift and SALT summary
     if 'redshift' in summary.columns:

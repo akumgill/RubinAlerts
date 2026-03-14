@@ -6,6 +6,72 @@ Automated SN Ia candidate identification pipeline for Rubin LSST Deep Drilling F
 
 ---
 
+## 2026-03-13 — False Positive Rejection Pipeline
+
+### Session Summary
+Added three major features for reducing false positives and avoiding duplicate discoveries: ATLAS credential verification, TNS cross-matching, and nuclear offset filtering.
+
+### 1. ATLAS Forced Photometry (Credential Verification)
+
+**Status:** Integration complete, awaiting valid credentials.
+
+The ATLAS forced photometry integration was already implemented, but silently failing due to credential issues. Added:
+- `verify_credentials()` method to AtlasClient
+- Startup verification before pipeline runs
+- Clear error messages for troubleshooting
+
+ATLAS provides ~2 years of pre-discovery baseline photometry in cyan (c) and orange (o) filters.
+
+### 2. TNS Cross-Match
+
+**New file:** `broker_clients/tns_client.py`
+
+Cross-matches candidates against IAU Transient Name Server to:
+- **Avoid duplicating known discoveries** — objects already reported to TNS
+- **Validate classifications** — compare our P(Ia) with spectroscopic confirmations
+- **Get redshifts** — additional source beyond NED for SALT fitting
+
+**Columns added:** `tns_name`, `tns_type`, `tns_redshift`, `tns_match`
+
+**Usage:**
+```bash
+python run_tonight.py 61100           # TNS enabled by default
+python run_tonight.py 61100 --no-tns  # Skip TNS
+```
+
+### 3. Nuclear Offset Filter
+
+**Purpose:** Distinguish SNe from nuclear transients (AGN, TDE)
+
+Uses host galaxy positions from GLADE+, SDSS, PS1, SkyMapper to compute the angular separation between transient and host nucleus.
+
+**Classifications:**
+| Offset | Classification | Interpretation |
+|--------|---------------|----------------|
+| < 1" | `nuclear` | Likely AGN or TDE (flagged with warning) |
+| 1-30" | `offset` | Consistent with SN in host galaxy |
+| > 30" | `distant` | May not be associated with detected host |
+
+**Columns added:** `nuclear_offset_arcsec`, `offset_class`
+
+**Example output:**
+```
+Nuclear offset: 2 NUCLEAR (likely AGN/TDE), 45 offset (SN-like), 3 distant
+  *** 2 candidates are NUCLEAR (potential AGN/TDE) ***
+    Nuclear candidates: obj_12345, obj_67890
+```
+
+### Files Changed
+```
+broker_clients/atlas_client.py   — Added verify_credentials()
+broker_clients/tns_client.py     — NEW: TNS cross-match client
+broker_clients/__init__.py       — Export TNSClient
+host_galaxy/morphology_filter.py — Nuclear offset calculation
+run_tonight.py                   — TNS + offset integration, --no-tns flag
+```
+
+---
+
 ## 2026-03-13 — Data Population Analysis & Fixes
 
 ### Session Summary
@@ -246,7 +312,8 @@ python run_tonight.py 61101 --min-prob 0.3 --days-back 30
 
 **Key credentials:**
 - RSP TAP: `~/.rsp_token`
-- ATLAS: `~/.atlas_credentials`
+- ATLAS: `~/.atlas_credentials` (register at https://fallingstar-data.com/forcedphot/)
+- TNS: `~/.tns_credentials` (register at https://www.wis-tns.org/user)
 - ALeRCE DB: hardcoded in `alerce_db_client.py`
 
 ---
@@ -264,17 +331,23 @@ python run_tonight.py 61101 --min-prob 0.3 --days-back 30
 - [x] E(B-V) extinction propagation fix
 - [x] GLADE+ galaxy catalog integration
 - [x] Increased morphology search radius (2 arcmin)
+- [x] TNS cross-matching for duplicate detection
+- [x] Nuclear offset filter for AGN/TDE rejection
+- [x] ATLAS credential verification (integration complete, needs valid credentials)
 
 ### Remaining
 - [ ] Historical validation on archived DP1 data (MJD 60630-60650)
 - [ ] Unit tests with pytest coverage
 - [ ] Direct RSP DiaObject photometry queries
-- [ ] ATLAS forced photometry integration (credentials ready)
+- [ ] ATLAS forced photometry (credentials need renewal)
 - [ ] ZTF photometry via ALeRCE (API configured)
 - [ ] NED redshift queries for distance modulus
 - [ ] SALT2/SALT3 template fitting (sncosmo ready)
+- [ ] Rise time constraints filter
+- [ ] AGN/QSO catalog cross-match (Million Quasar Catalog)
 
 ### Known Issues
 1. **GLADE+ optical photometry sparse** — most entries have only WISE, morphology returns 'uncertain'
 2. **Rubin cadence** — DP1 has sparse early data, limiting light curve quality
-3. **ALeRCE ZTF photometry** — API available but not yet integrated into main pipeline
+3. **ATLAS credentials invalid** — need to renew at https://fallingstar-data.com/forcedphot/
+4. **TNS API key required** — register at https://www.wis-tns.org/user

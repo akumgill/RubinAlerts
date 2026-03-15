@@ -315,3 +315,85 @@ class AlerceDBClient:
         except Exception as e:
             logger.warning("ALeRCE DB query_magstats failed: %s", e)
             return pd.DataFrame()
+
+    def crossmatch_positions(self, positions: List[tuple],
+                             radius_arcsec: float = 2.0,
+                             min_dec: float = -32.0) -> Dict[Any, str]:
+        """Batch cross-match positions against ZTF object table.
+
+        Uses box query for speed, then filters by exact angular distance.
+
+        Parameters
+        ----------
+        positions : list of (id, ra, dec) tuples
+            Positions to cross-match. id can be any hashable type.
+        radius_arcsec : float
+            Cross-match radius in arcseconds.
+        min_dec : float
+            Skip positions below this declination (no ZTF coverage).
+
+        Returns
+        -------
+        dict of id -> ztf_oid for matched positions
+        """
+        if not positions:
+            return {}
+
+        # Filter to positions with ZTF coverage (dec > -32)
+        valid_positions = [(pid, ra, dec) for pid, ra, dec in positions
+                          if dec > min_dec]
+        if not valid_positions:
+            logger.info("ALeRCE DB: no positions with ZTF coverage (all dec < %.0f)",
+                       min_dec)
+            return {}
+
+        radius_deg = radius_arcsec / 3600.0
+        results = {}
+
+        # Build UNION query for all positions (more efficient than N queries)
+        # Use box query: |ra - ra0| < r/cos(dec) AND |dec - dec0| < r
+        union_parts = []
+        for pid, ra, dec in valid_positions:
+            # RA tolerance depends on declination
+            cos_dec = np.cos(np.radians(dec))
+            ra_tol = radius_deg / max(cos_dec, 0.1)  # avoid div by zero near poles
+            dec_tol = radius_deg
+
+            # Subquery for this position
+            part = f"""
+                SELECT '{pid}' as query_id, oid, meanra, meandec,
+                    SQRT(POWER((meanra - {ra}) * {cos_dec}, 2) +
+                         POWER(meandec - {dec}, 2)) * 3600 as sep_arcsec
+                FROM object
+                WHERE meanra BETWEEN {ra - ra_tol} AND {ra + ra_tol}
+                  AND meandec BETWEEN {dec - dec_tol} AND {dec + dec_tol}
+            """
+            union_parts.append(part)
+
+        # Combine with UNION ALL (faster than UNION for large result sets)
+        # Limit results per position to avoid runaway queries
+        query = " UNION ALL ".join(union_parts)
+        query = f"""
+            SELECT * FROM ({query}) AS matches
+            WHERE sep_arcsec < {radius_arcsec}
+            ORDER BY query_id, sep_arcsec
+        """
+
+        try:
+            df = self._read_sql(query)
+            if len(df) == 0:
+                logger.info("ALeRCE DB: no ZTF cross-matches for %d positions",
+                           len(valid_positions))
+                return {}
+
+            # Keep only closest match per query_id
+            df_closest = df.drop_duplicates('query_id', keep='first')
+            results = dict(zip(df_closest['query_id'], df_closest['oid']))
+
+            logger.info("ALeRCE DB: cross-matched %d/%d positions to ZTF objects",
+                       len(results), len(valid_positions))
+            return results
+
+        except Exception as e:
+            logger.warning("ALeRCE DB crossmatch_positions failed: %s", e)
+            return {}

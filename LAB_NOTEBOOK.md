@@ -6,6 +6,62 @@ Automated SN Ia candidate identification pipeline for Rubin LSST Deep Drilling F
 
 ---
 
+## 2026-03-15 — Rise Time Constraints Filter
+
+### Session Summary
+Added rise time filter to reject slow-rising transients that are unlikely to be SNe Ia.
+
+### Implementation
+
+**Science basis:** SNe Ia rise from explosion to peak in ~17-20 days. Slower transients (Type IIP SNe, some TDEs) take longer.
+
+**Rise time calculation:**
+- For Villar fits: `rise_time = peak_mjd - shared_t0` (explosion epoch from fit)
+- For parabola fits: `rise_time = peak_mjd - first_detection_mjd` (approximate)
+
+**Filter criteria:**
+- Reject if `rise_time > 30 days` (configurable via `--max-rise-time`)
+- Reject if `rise_time < 5 days` (unphysical, bad fit)
+
+**Output:** `rise_time` column added to `candidates.csv`
+
+**CLI:**
+```bash
+python run_tonight.py 61100 --max-rise-time 25  # stricter filter
+```
+
+**Files changed:**
+```
+run_tonight.py  — Added rise time computation, filter, CLI argument, CSV output
+```
+
+---
+
+## 2026-03-13 — ZTF Batch Photometry Optimization
+
+### Session Summary
+Optimized ZTF photometry fetching from per-candidate REST API calls to batch database queries.
+
+### Changes
+
+**Problem:** Per-candidate ZTF queries via ALeRCE REST API were slow (~1-2 sec each), creating significant overhead for large candidate lists.
+
+**Solution:** Added batch fetching via direct PostgreSQL access:
+1. `AlerceDBClient.crossmatch_positions()` — spatial cross-match of candidate positions to ZTF OIDs using box query with spherical distance filter
+2. `fetch_ztf_photometry_batch()` — batch fetch all ZTF detections in single DB query, convert to nJy flux format
+
+**Performance:** 3 candidates × 85 detections fetched in ~1 second (vs ~6 seconds with REST API).
+
+**Files changed:**
+```
+broker_clients/alerce_db_client.py  — Added crossmatch_positions() method
+run_tonight.py                      — Added fetch_ztf_photometry_batch(), updated Pass 2 to use batch
+```
+
+**Note:** Most Rubin transients won't have ZTF counterparts (fainter, newer, or in southern DDFs). The batch optimization helps when there ARE matches.
+
+---
+
 ## 2026-03-13 — False Positive Rejection Pipeline
 
 ### Session Summary
@@ -333,21 +389,19 @@ python run_tonight.py 61101 --min-prob 0.3 --days-back 30
 - [x] Increased morphology search radius (2 arcmin)
 - [x] TNS cross-matching for duplicate detection
 - [x] Nuclear offset filter for AGN/TDE rejection
-- [x] ATLAS credential verification (integration complete, needs valid credentials)
+- [x] ATLAS credential verification (integration complete)
+- [x] ATLAS forced photometry (credentials working)
+- [x] NED redshift queries with caching
+- [x] SALT2/SALT3 template fitting (sncosmo)
+- [x] ZTF photometry via ALeRCE (batch DB queries, 2" position cross-match)
+- [x] Rise time constraints filter (rejects slow risers > 30 days)
 
 ### Remaining
 - [ ] Historical validation on archived DP1 data (MJD 60630-60650)
 - [ ] Unit tests with pytest coverage
 - [ ] Direct RSP DiaObject photometry queries
-- [ ] ATLAS forced photometry (credentials need renewal)
-- [ ] ZTF photometry via ALeRCE (API configured)
-- [ ] NED redshift queries for distance modulus
-- [ ] SALT2/SALT3 template fitting (sncosmo ready)
-- [ ] Rise time constraints filter
 - [ ] AGN/QSO catalog cross-match (Million Quasar Catalog)
 
 ### Known Issues
 1. **GLADE+ optical photometry sparse** — most entries have only WISE, morphology returns 'uncertain'
 2. **Rubin cadence** — DP1 has sparse early data, limiting light curve quality
-3. **ATLAS credentials invalid** — need to renew at https://fallingstar-data.com/forcedphot/
-4. **TNS API key required** — register at https://www.wis-tns.org/user

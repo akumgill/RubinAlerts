@@ -183,6 +183,102 @@ def fetch_ztf_photometry(ra, dec, radius_arcsec=2.0):
         return None
 
 
+def fetch_ztf_photometry_batch(positions, radius_arcsec=2.0):
+    """Batch fetch ZTF light curves from ALeRCE via direct DB access.
+
+    Much faster than per-candidate REST API queries. Uses spatial cross-match
+    to find ZTF OIDs, then batch-fetches detections.
+
+    Parameters
+    ----------
+    positions : list of (id, ra, dec) tuples
+        Candidate positions to fetch ZTF photometry for.
+    radius_arcsec : float
+        Cross-match radius in arcseconds.
+
+    Returns
+    -------
+    dict of id -> DataFrame with ZTF photometry in nJy flux space
+    """
+    if not HAS_ALERCE:
+        return {}
+
+    try:
+        from broker_clients.alerce_db_client import AlerceDBClient
+        db = AlerceDBClient()
+        if not db.available:
+            logger.info("ZTF batch: DB client not available, skipping")
+            return {}
+
+        db.connect()
+
+        # Phase 1: Cross-match positions to ZTF OIDs
+        logger.info("ZTF batch: cross-matching %d positions...", len(positions))
+        id_to_oid = db.crossmatch_positions(positions, radius_arcsec=radius_arcsec)
+
+        if not id_to_oid:
+            logger.info("ZTF batch: no cross-matches found")
+            return {}
+
+        # Phase 2: Batch fetch detections for all matched OIDs
+        unique_oids = list(set(id_to_oid.values()))
+        logger.info("ZTF batch: fetching detections for %d unique ZTF objects...",
+                   len(unique_oids))
+        detections = db.query_detections(unique_oids)
+
+        if detections is None or len(detections) == 0:
+            logger.info("ZTF batch: no detections returned")
+            return {}
+
+        # Phase 3: Convert to nJy flux and group by original ID
+        # ZTF filter codes: 1=g, 2=r, 3=i
+        ztf_band_map = {1: 'g', 2: 'r', 3: 'i'}
+
+        results = {}
+        oid_to_ids = {}  # reverse mapping: oid -> list of original IDs
+        for pid, oid in id_to_oid.items():
+            oid_to_ids.setdefault(oid, []).append(pid)
+
+        for oid, det_df in detections.groupby('oid'):
+            # Convert magnitudes to nJy flux
+            mag = pd.to_numeric(det_df['magpsf'], errors='coerce').values
+            mag_err = pd.to_numeric(det_df['sigmapsf'], errors='coerce').values
+            mag_err = np.where(np.isfinite(mag_err), mag_err, 0.05)
+
+            valid = np.isfinite(mag) & (mag > 0) & (mag < 30)
+            if not valid.any():
+                continue
+
+            flux = 10 ** ((AB_ZP_NJY - mag) / 2.5)
+            flux_err = flux * np.log(10) / 2.5 * np.abs(mag_err)
+
+            mjd = pd.to_numeric(det_df['mjd'], errors='coerce').values
+            fid = det_df.get('fid', pd.Series(dtype=int))
+            bands = fid.map(ztf_band_map).fillna('?').values
+
+            lc_df = pd.DataFrame({
+                'mjd': mjd, 'flux': flux, 'flux_err': flux_err,
+                'magnitude': mag, 'mag_err': mag_err,
+                'band': bands, 'survey': 'ZTF', 'source': 'detection',
+            })
+            lc_df = lc_df[valid].reset_index(drop=True)
+
+            # Assign to all original IDs that matched this OID
+            for pid in oid_to_ids.get(oid, []):
+                results[pid] = lc_df
+
+        n_with_data = len(results)
+        total_detections = sum(len(df) for df in results.values())
+        logger.info("ZTF batch: %d/%d candidates have ZTF data (%d total detections)",
+                   n_with_data, len(positions), total_detections)
+        return results
+
+    except Exception as e:
+        logger.warning("ZTF batch fetch failed: %s", e)
+        import traceback
+        logger.debug(traceback.format_exc())
+        return {}
+
 
 def combine_photometry(fink_lc, ztf_lc=None, atlas_lc=None):
     """Combine light curves from multiple surveys into a single DataFrame.
@@ -491,7 +587,8 @@ def _atlas_filter_to_nJy(by_filter):
 
 def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True,
                   min_snr_points=5, min_bands=2, min_fit_bands=2,
-                  prefilter_min_sources=0, use_salt=False, redshifts=None):
+                  prefilter_min_sources=0, use_salt=False, redshifts=None,
+                  max_rise_time=30.0):
     """Fetch light curves from all surveys and run peak fitting for each candidate.
 
     Two-pass approach:
@@ -509,6 +606,7 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
                              this many Fink sources (saves API calls). Default 0 (disabled).
       use_salt: If True and sncosmo is available, run SALT2 template fits.
       redshifts: Dict mapping diaObjectId -> redshift for SALT fitting.
+      max_rise_time: Maximum rise time in days (default 30). SNe Ia rise in ~17-20d.
     """
     redshifts = redshifts or {}
     dia_ids = candidates_df['diaObjectId'].unique()
@@ -670,20 +768,28 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
         logger.info("ATLAS: no candidates brighter than %.1f mag — skipping",
                      ATLAS_BRIGHT_MAG_CUT)
 
-    # ---- Pass 2: Fetch ZTF, combine, and fit ----
+    # ---- Batch ZTF photometry ----
+    ztf_data = {}  # did -> DataFrame (nJy format)
+    if fetch_ztf and HAS_ALERCE:
+        # Build position list for batch cross-match
+        ztf_positions = []
+        for did in dia_ids:
+            ra, dec = coord_lookup.get(did, (np.nan, np.nan))
+            if np.isfinite(ra) and np.isfinite(dec):
+                ztf_positions.append((str(did), ra, dec))
+
+        if ztf_positions:
+            ztf_data = fetch_ztf_photometry_batch(ztf_positions, radius_arcsec=2.0)
+
+    # ---- Pass 2: Combine photometry and fit ----
     results = {}
     for i, did in enumerate(dia_ids):
         logger.info("[%d/%d] Fitting %s", i + 1, len(dia_ids), did)
         ra, dec = coord_lookup.get(did, (np.nan, np.nan))
         fink_lc = fink_data.get(did)
 
-        # ZTF photometry (per-candidate, fast API query)
-        ztf_lc = None
-        if fetch_ztf and np.isfinite(ra) and np.isfinite(dec):
-            try:
-                ztf_lc = fetch_ztf_photometry(ra, dec)
-            except Exception as e:
-                logger.debug("  ZTF fetch error: %s", e)
+        # ZTF photometry (from batch results)
+        ztf_lc = ztf_data.get(str(did))
 
         # ATLAS photometry (from batch results)
         atlas_lc = atlas_data.get(str(did))
@@ -789,6 +895,31 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
             logger.warning("  Peak too far from now (dt=%.0fd, limit 60d) — skipping", delta_t)
             continue
 
+        # Compute rise time (explosion to peak)
+        rise_time = np.nan
+        if fit_method == 'villar_mb' and vil.get('shared_t0') is not None:
+            # Villar fit gives explosion epoch directly
+            t0_explosion = vil.get('shared_t0')
+            if np.isfinite(t0_explosion) and np.isfinite(peak_mjd):
+                rise_time = peak_mjd - t0_explosion
+        else:
+            # Fallback: estimate from first detection
+            first_mjd = lc_clean['mjd'].min()
+            if np.isfinite(first_mjd) and np.isfinite(peak_mjd):
+                rise_time = peak_mjd - first_mjd
+
+        # Rise time filter: SNe Ia rise in ~17-20 days, reject slow risers
+        MIN_RISE_TIME = 5.0   # days (reject if peak is before first detection)
+        if np.isfinite(rise_time):
+            if rise_time > max_rise_time:
+                logger.warning("  Slow riser (%.1f days > %.0f) — likely not SN Ia, skipping",
+                              rise_time, max_rise_time)
+                continue
+            if rise_time < MIN_RISE_TIME:
+                logger.warning("  Unphysical rise time (%.1f days < %.0f) — bad fit, skipping",
+                              rise_time, MIN_RISE_TIME)
+                continue
+
         # Track survey coverage
         surveys_present = combined['survey'].unique().tolist() if 'survey' in combined.columns else ['Rubin']
         n_ztf = len(ztf_lc) if ztf_lc is not None else 0
@@ -805,6 +936,7 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
             'peak_mjd': peak_mjd,
             'peak_band': peak_band,
             'delta_t': delta_t,
+            'rise_time': rise_time,
             'fit_method': fit_method,
             'n_points': len(lc_clean),
             'n_bands': lc_clean['band'].nunique(),
@@ -964,6 +1096,7 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
             'peak_mjd': fit['peak_mjd'],
             'peak_band': fit['peak_band'],
             'delta_t': delta_t,
+            'rise_time': fit.get('rise_time', np.nan),
             'fit_method': fit['fit_method'],
             'n_points': fit['n_points'],
             'n_bands': fit['n_bands'],
@@ -1610,6 +1743,8 @@ def main():
                         help='Min bands with detections (default: 2, try 1 for sparse data)')
     parser.add_argument('--min-fit-bands', type=int, default=2,
                         help='Min bands for successful fit (default: 2, try 1 for sparse data)')
+    parser.add_argument('--max-rise-time', type=float, default=30.0,
+                        help='Max rise time in days (default: 30, SNe Ia ~17-20d)')
     parser.add_argument('--prefilter-min-sources', type=int, default=0,
                         help='Pre-filter candidates with fewer Fink sources (0=disabled, try 5)')
 
@@ -1724,19 +1859,23 @@ def main():
     # --- Step 3a: Query NED redshifts (needed for SALT fitting and absolute mag) ---
     redshifts = {}  # did -> {redshift, distmod, ned_name, separation_arcsec}
     if do_redshift:
-        logger.info("Querying NED for host galaxy redshifts...")
-        n_with_z = 0
-        for _, row in candidates.iterrows():
+        logger.info("Querying NED for host galaxy redshifts (with caching)...")
+        # Use batch function which handles caching
+        from cache.alert_cache import AlertCache
+        ned_cache = AlertCache(db_path='./cache/data/alert_cache.db')
+        ned_df = query_ned_batch(candidates[['diaObjectId', 'ra', 'dec']].copy(),
+                                  cache=ned_cache, radius_arcsec=18.0)
+        # Convert to dict format for compatibility
+        for _, row in ned_df.iterrows():
             did = row['diaObjectId']
-            ra, dec = row['ra'], row['dec']
-            try:
-                result = query_ned_redshift(ra, dec, radius_arcsec=18.0)
-                if result is not None:
-                    redshifts[did] = result
-                    n_with_z += 1
-            except Exception as e:
-                logger.debug("NED query failed for %s: %s", did, e)
-        logger.info("NED redshifts: %d/%d candidates have host z", n_with_z, len(candidates))
+            if pd.notna(row['ned_redshift']) and row['ned_redshift'] > 0:
+                redshifts[did] = {
+                    'redshift': row['ned_redshift'],
+                    'distmod': row['ned_distmod'],
+                    'ned_name': row['ned_name'],
+                    'separation_arcsec': row['ned_sep_arcsec'],
+                }
+        logger.info("NED redshifts: %d/%d candidates have host z", len(redshifts), len(candidates))
     elif not args.no_redshift:
         logger.info("NED redshifts: SKIPPED (ned_query not available)")
 
@@ -1753,7 +1892,8 @@ def main():
                                 min_fit_bands=args.min_fit_bands,
                                 prefilter_min_sources=args.prefilter_min_sources,
                                 use_salt=do_salt,
-                                redshifts=z_for_salt)
+                                redshifts=z_for_salt,
+                                max_rise_time=args.max_rise_time)
     if not fit_results:
         logger.error("No successful fits")
         sys.exit(1)

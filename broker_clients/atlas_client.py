@@ -118,21 +118,52 @@ class AtlasClient:
             self._verified = False
             return False, f"Connection error: {e}"
 
-    def _ensure_token(self):
-        """Authenticate and cache the ATLAS API token."""
-        if self.token is not None:
+    def _ensure_token(self, force: bool = False):
+        """Authenticate and cache the ATLAS API token with retry/backoff.
+
+        Parameters
+        ----------
+        force : bool
+            If True, re-authenticate even if a token is already cached
+            (used when a request gets a 401/403 indicating token expiry).
+        """
+        if self.token is not None and not force:
             return
         username, password = get_atlas_credentials()
-        resp = requests.post(
-            f"{ATLAS_BASE_URL}/api-token-auth/",
-            data={'username': username, 'password': password},
-        )
-        if resp.status_code != 200:
-            raise RuntimeError(f"ATLAS auth failed (HTTP {resp.status_code}): {resp.text}")
-        self.token = resp.json().get('token')
-        if not self.token:
-            raise RuntimeError("ATLAS auth response missing 'token'")
-        logger.info("ATLAS authenticated successfully")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(
+                    f"{ATLAS_BASE_URL}/api-token-auth/",
+                    data={'username': username, 'password': password},
+                    timeout=30,
+                )
+                if resp.status_code == 200:
+                    self.token = resp.json().get('token')
+                    if not self.token:
+                        raise RuntimeError("ATLAS auth response missing 'token'")
+                    logger.info("ATLAS authenticated successfully")
+                    return
+                elif resp.status_code == 429:
+                    detail = resp.json().get('detail', '')
+                    wait = self._parse_throttle_wait(detail)
+                    logger.info("ATLAS auth rate limited, waiting %ds (attempt %d/%d)",
+                                wait, attempt + 1, max_retries)
+                    time.sleep(wait)
+                else:
+                    logger.warning("ATLAS auth failed (HTTP %d, attempt %d/%d): %s",
+                                   resp.status_code, attempt + 1, max_retries, resp.text)
+                    if attempt < max_retries - 1:
+                        backoff = 2 ** attempt * 5
+                        logger.info("Retrying ATLAS auth in %ds", backoff)
+                        time.sleep(backoff)
+            except requests.RequestException as e:
+                logger.warning("ATLAS auth connection error (attempt %d/%d): %s",
+                               attempt + 1, max_retries, e)
+                if attempt < max_retries - 1:
+                    backoff = 2 ** attempt * 5
+                    time.sleep(backoff)
+        raise RuntimeError(f"ATLAS auth failed after {max_retries} attempts")
 
     def _headers(self):
         return {'Authorization': f'Token {self.token}', 'Accept': 'application/json'}
@@ -163,13 +194,23 @@ class AtlasClient:
         df = self._parse_data(text_data)
         return self._split_by_filter(df)
 
+    def _request_with_reauth(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Make an authenticated request, re-authing once on 401/403."""
+        kwargs.setdefault('headers', self._headers())
+        kwargs.setdefault('timeout', 60)
+        resp = requests.request(method, url, **kwargs)
+        if resp.status_code in (401, 403):
+            logger.info("ATLAS token expired (HTTP %d), re-authenticating", resp.status_code)
+            self._ensure_token(force=True)
+            kwargs['headers'] = self._headers()
+            resp = requests.request(method, url, **kwargs)
+        return resp
+
     def _submit_job(self, data: Dict) -> str:
         """Submit a single forced photometry job, handling rate limiting."""
         while True:
-            resp = requests.post(
-                f"{ATLAS_BASE_URL}/queue/",
-                headers=self._headers(),
-                data=data,
+            resp = self._request_with_reauth(
+                'POST', f"{ATLAS_BASE_URL}/queue/", data=data,
             )
             if resp.status_code == 201:
                 task_url = resp.json().get('url')
@@ -179,7 +220,7 @@ class AtlasClient:
             elif resp.status_code == 429:
                 detail = resp.json().get('detail', '')
                 wait = self._parse_throttle_wait(detail)
-                logger.info(f"ATLAS rate limited, waiting {wait}s")
+                logger.info("ATLAS rate limited, waiting %ds", wait)
                 time.sleep(wait)
             else:
                 raise RuntimeError(
@@ -190,7 +231,7 @@ class AtlasClient:
         """Poll until a single job completes. Returns result_url."""
         elapsed = 0
         while elapsed < ATLAS_POLL_TIMEOUT_SEC:
-            resp = requests.get(task_url, headers=self._headers())
+            resp = self._request_with_reauth('GET', task_url)
             resp.raise_for_status()
             data = resp.json()
             if data.get('finishtimestamp'):
@@ -203,13 +244,13 @@ class AtlasClient:
         raise TimeoutError(f"ATLAS job timed out after {ATLAS_POLL_TIMEOUT_SEC}s")
 
     def _download_results(self, result_url: str) -> str:
-        resp = requests.get(result_url, headers=self._headers())
+        resp = self._request_with_reauth('GET', result_url)
         resp.raise_for_status()
         return resp.text
 
     def _cleanup(self, task_url: str):
         try:
-            requests.delete(task_url, headers=self._headers())
+            self._request_with_reauth('DELETE', task_url)
         except Exception:
             pass
 
@@ -236,10 +277,8 @@ class AtlasClient:
             data['mjd_min'] = mjd_min
 
         while True:
-            resp = requests.post(
-                f"{ATLAS_BASE_URL}/queue/",
-                headers=self._headers(),
-                data=data,
+            resp = self._request_with_reauth(
+                'POST', f"{ATLAS_BASE_URL}/queue/", data=data,
             )
             if resp.status_code == 201:
                 body = resp.json()
@@ -283,7 +322,7 @@ class AtlasClient:
             newly_done = []
             for df_idx, task_url in pending.items():
                 try:
-                    resp = requests.get(task_url, headers=self._headers())
+                    resp = self._request_with_reauth('GET', task_url)
                     resp.raise_for_status()
                     data = resp.json()
                     if data.get('finishtimestamp'):

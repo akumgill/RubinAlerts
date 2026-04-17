@@ -1,0 +1,13 @@
+name,ra,dec,priority,mag,filter,redshift,notes
+313831458352922664,61.157412,-48.502013,1,22.0,r,,precursor; Ashley triggered Gemini
+313963406691402058,148.838,-3.214,1,22.5,r,,LSST object
+2026exc,156.194435,14.976015,1,18.86,r,,double-peaked CSM interaction
+2024ggi,169.592087,-32.837580,1,19.8,r,,SN follow-up
+2026ftj,188.665867,7.162344,2,21.5,r,,SN candidate
+2026fud,171.336708,-4.666281,2,19.4,r,,SN candidate
+2026ftl,188.402319,6.368411,2,20.9,r,,SN candidate
+2025dke,214.841542,-1.785694,2,19.5,r,,SN candidate
+2025iek,238.756958,3.948792,3,21.0,r,,SN candidate
+170028486051233796,58.017831,-50.55077,1,20.8,i,,nearby Rubin SN
+2026enk,167.199601,-6.769045,1,18.5,r,,day 20 SN II high prio
+2026eyb,160.407408,3.546986,2,19.2,g,,suppressed i-flux SLSN probability

@@ -1,0 +1,10 @@
+2025aghn	03:01:05.33	-13:59:41.45	45.272208	-13.994847	2	2026-01-23	N/A	19.7	3x1170s	Classification needed	https://example.com/2025aghn
+2026anl	07:05:24.82	+19:04:10.95	106.353417	19.069708	1	2026-01-23	N/A	19.5	3x900s	Priority target	https://example.com/2026anl
+2026ahi	09:28:14.48	-26:30:04.75	142.060333	-26.501319	2	2026-01-23	N/A	18.7	3x990s	Late-phase follow-up	https://example.com/2026ahi
+ZTF26aaapnjh	09:17:21.41	+17:17:40.03	139.339208	17.294453	1	2026-01-23	N/A	20.0	3x1200s	Faint target	https://example.com/ZTF26aaapnjh
+2026akd	11:37:16.93	-16:13:23.15	174.320542	-16.223097	1	2026-01-23	N/A	19.7	3x1100s	Rising transient	https://example.com/2026akd
+2025ahbd	12:54:17.62	-08:36:07.47	193.573417	-8.602075	1	2026-01-23	N/A	19.3	3x1000s	SN candidate	https://example.com/2025ahbd
+2026xg	12:51:05.00	+08:12:32.07	192.770833	8.208908	1	2026-01-23	N/A	19.2	3x1000s	Confirmed SN	https://example.com/2026xg
+2025agcg	01:35:16.13	+27:44:33.51	23.817208	27.742642	4	2026-01-23	N/A	20.1	3x1000s	Backup target	https://example.com/2025agcg
+2025afxh	01:41:30.43	+12:50:07.59	25.376792	12.835442	4	2026-01-23	N/A	19.4	3x900s	Backup target	https://example.com/2025afxh
+2026alt	08:17:50.50	+11:56:36.50	124.460417	11.943472	4	2026-01-23	N/A	19.3	3x900s	Backup target	https://example.com/2026alt

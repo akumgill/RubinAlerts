@@ -1,0 +1,91 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.6in]{geometry}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\fancyfoot[C]{\footnotesize Akum Gill $\cdot$ \today}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+
+\begin{document}
+
+\begin{center}
+{\Large \textbf{MAGNETS Spectroscopic Orchestration Layer}}\\[4pt]
+{\normalsize Infrastructure for Queue-Based LLAMAS Observing}
+\end{center}
+
+\vspace{-8pt}
+\hrule
+\vspace{8pt}
+
+\textbf{Context.} The MAGNETS collaboration pools Magellan time across partner institutions for Rubin transient follow-up. Per the Stubbs 2026B proposal: ``We will apportion queue observing time and target prioritization in proportion to time awarded by respective TACs.'' This requires automated infrastructure to manage the queue schedule.
+
+\textbf{Problem.} Current workflow (via Ashley's group) uses manual notebook-based scheduling. This doesn't scale with multiple requesters, lacks time accounting, and requires format translation between request intake and scheduling scripts.
+
+\textbf{Proposed Solution.} An orchestration layer connecting RubinAlerts candidate discovery to LLAMAS observing plan generation:
+
+\vspace{-4pt}
+\begin{center}
+\small
+\begin{tabular}{@{}p{2.8cm}p{10cm}@{}}
+\toprule
+\textbf{Component} & \textbf{Function} \\
+\midrule
+Ingester & Pull targets from RubinAlerts \texttt{candidates.csv} and manual requests \\
+Normalizer & Convert to common schema; estimate exposure times by redshift \\
+Prioritizer & Score by merit $\times$ observability $\times$ moon phase compatibility \\
+Time Accountant & Track 30-hour allocation across moon phases (5D + 20G + 5B) \\
+LLAMAS Planner & Greedy scheduling with WD standard interleaving \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{LLAMAS-Specific Scheduling.} From proposal Table 1, exposure times scale with redshift and moon phase:
+
+\vspace{-4pt}
+\begin{center}
+\small
+\begin{tabular}{@{}ccccc@{}}
+\toprule
+\textbf{Redshift} & \textbf{Moon} & \textbf{Peak $r$} & \textbf{Exposure} & \textbf{Binning} \\
+\midrule
+0.10--0.20 & Bright & 19.3 & 35 min & 2$\times$ \\
+0.20--0.30 & Grey & 20.6 & 95 min & 2$\times$ \\
+0.30--0.35 & Grey/Dark & 21.3 & 45--160 min & 4$\times$ \\
+0.35--0.40 & Dark & 21.9 & 180 min & 4$\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{-2pt}
+IFU advantages: $\sim$1 min overhead (vs.\ $\sim$10 min for slit), no slit losses, host galaxy ``for free.''
+
+\textbf{Integration with RubinAlerts.} The existing pipeline produces nightly \texttt{candidates.csv} with merit-scored SNe~Ia. The orchestration layer will:
+\begin{itemize}[nosep, leftmargin=1.5em]
+    \item Filter to $z = 0.1$--$0.4$, $r = 18$--$21.5$, elliptical hosts preferred
+    \item Map merit scores to LLAMAS priorities
+    \item Generate queue-ready observing plans with WD standards (Boyd et al.\ 2026)
+\end{itemize}
+
+\textbf{Implementation Timeline.}
+Phase 1 (Wk 1--2): Normalizer, LLAMAS planner, CLI.
+Phase 2 (Wk 3): Time accounting, prioritizer.
+Phase 3 (Wk 4): RubinAlerts integration.
+Phase 4 (Wk 5+): WD standards, reporting.
+
+\textbf{Open Questions.}
+(1) LLAMAS-specific constraints to confirm with Rob Simcoe;
+(2) Time charging: on schedule or observation?
+(3) Multi-night lookahead vs.\ nightly optimization?
+
+\textbf{Resources.} Full design doc: \texttt{docs/design/spectroscopic-orchestration.md}
+
+\end{document}

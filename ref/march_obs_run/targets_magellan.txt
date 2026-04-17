@@ -1,0 +1,26 @@
+Name of Requester	Instrument Requested:	Name of Target (IAUID or ZTFID/ANTARES ID if not available):	Brief description of target (e.g., "interacting SNIc near peak"):	R.A. (J2000 degrees):	Dec. (J2000 degrees):	YSE-PZ (or Alerce/ANTARES if not available) link:	Current Apparent Brightness and Filter
+Yize	MMT/Binospec	2025ajmz	likely precursor of IIn	179.1257741	+55.1150713	https://alerce.online/object/ZTF25acjbjpa	20 in r
+Kaylee de Soto	FAST	2026evy	bright SN IIb	151.222253	-0.058045	https://orcusgate.org/source/ZTF26aajowek	17.8, g-band
+Kaylee de Soto	FAST	2026ejy	bright SN II; good for v_phot estimation	242.501148	0.70574	https://orcusgate.org/source/ZTF26aaiedvz	17.1, g-band
+Kaylee de Soto	FAST	2026fdy	bright SN-like, possibly nuclear?	196.507972	-15.837478	https://orcusgate.org/source/ZTF26aakjamd	16.9, r-band
+Kaylee de Soto	FAST	ZTF26aalcpif	really bright and fast (can't tell if bogus)	171.580992	8.780728	https://orcusgate.org/source/ZTF26aalcpif	14.7, r-band
+Kaylee de Soto	FAST	2026euy	bright ~15-day SN II-like	107.867647	31.187235	https://orcusgate.org/source/ZTF26aajilre	18.3, r-band
+Kaylee de Soto	MMT/Binospec	2026ll	HIGH PRIORITY; greatly host-offset but AGN-like variability?	159.733429	8.449783	https://orcusgate.org/source/ZTF26aaadlaa	19.4, r-band
+Kaylee de Soto	MMT/Binospec	ZTF26aakqgyq	VERY early SN-like	183.125973	12.752796	https://orcusgate.org/source/ZTF26aakqgyq	19.9, g-band
+Kaylee de Soto	Magellan/LDSS3	170028486051233796	nearby Rubin SN	58.017831	-50.55077	https://orcusgate.org/source/170028486051233796	20.8, i-band
+Kaylee de Soto	Magellan/LDSS3	2026enk	day ~20 SN II (high prio)	167.199601	-6.769045	https://orcusgate.org/source/ZTF26aaibaza	~18.5 r-band
+Kaylee de Soto	MMT/Binospec	2026evy	SN IIb	151.222253	-0.058045	https://orcusgate.org/source/ZTF26aajowek	17.6, r-band
+Kaylee de Soto	MMT/Binospec	2026ejy	beautiful 20-day SN II (high prio)	242.501148	0.70574	https://orcusgate.org/source/ZTF26aaiedvz	17.0, r-band
+Kaylee de Soto	MMT/Binospec	2026fas	~10 days post-explosion	119.090086	2.457124	https://orcusgate.org/source/ZTF26aajvsis	19.0, r-band
+Kaylee de Soto	MMT/Binospec	2025acgf	bright SN II nickel tail (low prio)	247.269876	2.50908	https://orcusgate.org/source/ZTF25acchxhv	18.5 r-band
+Kaylee de Soto	Magellan/LDSS3	170046089928376424	bright Rubin SN-like	150.280556	2.746586	https://antares.noirlab.edu/loci/ANT2026jqummjfcthzr	~21.0 in all bands
+Kaylee de Soto	Magellan/LDSS3	2026eyb	suppressed i-flux; high SLSN probability	160.407408	3.546986	https://orcusgate.org/source/ZTF26aajryzn	19.2 g-band
+Kaylee de Soto	Magellan/LDSS3	2026exc	double-peaked (sign of CSM interaction)	156.194435	14.976015	https://orcusgate.org/source/ZTF26aajnayv	18.86, r-band
+Kaylee de Soto	MMT/Binospec	2026ezq	slow-ish rise, at peak	186.1547	19.6141	https://ziggy.ucolick.org/yse/transient_detail/2026ezq	19.5, R-band
+Kaylee de Soto	MMT/Binospec	ZTF26aakiunc	SN-like at peak	191.769872	19.735659	https://antares.noirlab.edu/loci/ANT2026ekrdf6ho31o4	19.77, R-band
+Kaylee de Soto	MMT/Binospec	2026fcn	low prio, SN-like, off-center	108.884599	28.538903	https://ziggy.ucolick.org/yse/transient_detail/2026fcn/	20.3, g-band
+Kaylee de Soto	MMT/Binospec	2026fer	low prio (may be nuclear)	116.419617	36.691634	https://ziggy.ucolick.org/yse/transient_detail/2026fer/	19.9, r-band
+Yize	Magellan/LDSS3	313831458352922664	precursor; Ashley triggered her Gemini program	61.157412	-48.502013	https://lasair.lsst.ac.uk/objects/313831458352922664/	22 in r
+Yize	Magellan/LDSS3	313699514821640259	nice light curve, likely a IIn	51.620551	-28.114117	https://lasair.lsst.ac.uk/objects/313699514821640259/	20.3 in r
+Yize	Magellan/LDSS3	313831458387001371	likely have precursor	58.518765	-48.540161	https://lasair.lsst.ac.uk/objects/313831458387001371/	21.7 in g
+Ashley	MMT/Binospec	AT2026ekf	Maybe superluminous?	187.7077395	8.2739289	https://antares.noirlab.edu/loci/ANT2026c70rfgyrque6	19.5

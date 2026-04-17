@@ -1,0 +1,11 @@
+#  Target     UT          Observation     Comments
+5 LTT2415 before 00:04 spec: 2x30s  12.2 mag star
+4 313831458352922664 00:09 - 01:38 spec: 4x1200s
+6 313963406691402058 01:43 - 04:00 spec: 6x1200s
+9 2026exc 04:05 - 04:38 spec: 2x900s
+13 2026fud 04:43 - 05:16 spec: 2x900s
+16 2026ftj 05:21 - 06:28 spec: 3x1200s
+15 2026ftl 06:33 - 07:16 spec: 2x1200s
+12 2024ggi 07:21 - 08:04 spec: 2x1200s
+19 2025iek 08:09 - 09:16 spec: 3x1200s
+18 LTT6248 09:21 - 09:25 spec: 2x30s  11.8 mag star

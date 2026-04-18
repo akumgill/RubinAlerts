@@ -2,16 +2,24 @@
 
 ## Project Overview
 
-Automated SN Ia candidate identification pipeline for Rubin LSST Deep Drilling Fields. Two main subsystems:
+Automated SN Ia candidate identification and spectroscopic follow-up system for Rubin LSST Deep Drilling Fields. Two subsystems:
 
 1. **Alert Pipeline** (`run_tonight.py`): Aggregates alerts from 5 brokers (Fink, ANTARES, ALeRCE, ATLAS, TNS), fits light curves, computes merit scores, generates Magellan observing plans.
-2. **LLAMAS Orchestrator** (`orchestrator/`): Spectroscopic scheduling for the MAGNETS collaboration — converts ranked target lists into LLAMAS observing plans with greedy scheduling, exposure estimation, and standard star interleaving.
+2. **LLAMAS Orchestrator** (`orchestrator/`): Spectroscopic scheduling for the MAGNETS collaboration — converts ranked candidates into LLAMAS observing plans with multi-program time accounting, composite prioritization, and standard star interleaving.
+
+Full architecture doc: `docs/design/architecture.md`
 
 ## Environment
 
 - **Conda env:** `RubinAlerts` (Python 3.12)
 - **Activate:** `conda activate RubinAlerts`
-- **Key dependencies:** astropy, pandas, numpy, sncosmo, antares-client, psycopg2-binary, requests, matplotlib
+- **Key dependencies:** astropy, pandas, numpy, sncosmo, antares-client, psycopg2-binary, requests, matplotlib, pyyaml
+
+## Git Remotes
+
+- `origin` — `stubbslab/RubinAlerts` (Chris's upstream, read-only for us)
+- `fork` — `akumgill/RubinAlerts` (Akum's fork, push here)
+- **Always push to `fork`**, not `origin`
 
 ## Running
 
@@ -19,8 +27,20 @@ Automated SN Ia candidate identification pipeline for Rubin LSST Deep Drilling F
 # Alert pipeline
 python run_tonight.py 61101 --min-prob 0.3 --days-back 30
 
-# LLAMAS orchestrator
-python -m orchestrator --date 2026-10-15 --targets ref/test_targets.csv --moon grey --output-dir /tmp/test/
+# LLAMAS orchestrator — basic plan
+python -m orchestrator plan --date 2026-10-15 --targets targets.csv --moon grey --output-dir output/
+
+# LLAMAS orchestrator — full nightly with time accounting
+python -m orchestrator run-nightly --date 2026-10-15 \
+    --candidates candidates.csv --allocations ref/allocations_example.yaml \
+    --moon grey --output-dir output/
+
+# Post-night reconciliation
+python -m orchestrator reconcile --allocations ref/allocations_example.yaml \
+    --program MAGNETS-Stubbs --actual-hours 3.5 --moon grey --date 2026-10-15
+
+# Backward compat (no subcommand = plan)
+python -m orchestrator --date 2026-10-15 --targets ref/test_targets.csv --moon grey
 ```
 
 ## Code Conventions
@@ -41,22 +61,16 @@ python -m orchestrator --date 2026-10-15 --targets ref/test_targets.csv --moon g
 
 ## Key Architecture Decisions
 
-- **LLAMAS only** — the orchestrator is for LLAMAS on Magellan/Baade exclusively. LDSS3 materials in `ref/` are reference only.
-- **Greedy scheduling** — score = `(5 - priority) * 100 - airmass * 10`, targets scheduled in priority/airmass order within observability windows.
-- **Exposure estimation cascade:** redshift table (proposal Table 1) -> magnitude scaling (mag 20 = 45 min, 2.5x per mag) -> fallback (45 min).
+- **LLAMAS only** — orchestrator is for LLAMAS on Magellan/Baade exclusively. LDSS3 materials in `ref/` are reference only.
+- **Multi-program time accounting** — allocations.yaml defines per-PI budgets across dark/grey/bright moon phases. Charge-on-schedule with post-night reconciliation.
+- **Composite priority scoring** — science weight × budget factor × phase weight + observability + keyword signals. Phase weight (`w_time`) from alert pipeline boosts near-peak targets.
+- **Greedy scheduling** — `score = composite_priority - airmass × 10`. Falls back to `(5 - priority) × 100 - airmass × 10` without prioritizer.
+- **Exposure estimation cascade**: redshift table (proposal Table 1) → magnitude scaling (mag 20 = 45 min, 2.5x/mag) → fallback (45 min).
 - **1-minute IFU overhead** (not 10 min like slit instruments).
-
-## Testing
-
-```bash
-# Orchestrator on test targets
-python -m orchestrator --date 2026-10-15 --targets ref/test_targets.csv --moon grey --output-dir /tmp/test/ --verbose
-
-# Broker import check
-python -c "from broker_clients.atlas_client import AtlasClient; c = AtlasClient(); print(c.verify_credentials())"
-```
+- **Multiplicative merit** — alert pipeline merit = w_time × w_mag × w_prob × w_host × w_ext × w_broker. Must score well on ALL factors.
 
 ## Output Locations
 
 - Alert pipeline: `nights/ut{YYYYMMDD}/`
 - Orchestrator: `--output-dir` flag, files named `LLAMAS_{date}_{timeline,catalog,summary}.txt`
+- Time accounting: `time_accounting.json` in output dir

@@ -6,6 +6,60 @@ Automated SN Ia candidate identification pipeline for Rubin LSST Deep Drilling F
 
 ---
 
+## 2026-04-18 — Phases 2-4: Time Accounting, Prioritizer, Integration
+
+### Phase 2: Time Accounting & Prioritizer
+
+Built multi-program time accounting for the MAGNETS queue:
+
+- **`accounting.py`** — `TimeAccountant` class: loads allocations from YAML, charges time per program per moon phase (D/G/B), supports post-night reconciliation. Persists state to `time_accounting.json` with full charge log for audit.
+- **`prioritizer.py`** — Composite scoring: `science_weight × budget_factor × phase_weight + observability + keyword_adj`. Phase weight uses `w_time` from alert pipeline (Gaussian decay from peak) — near-peak targets automatically prioritized.
+- **`allocations_example.yaml`** — Stubbs 30h (5D+20G+5B), Villar 16h (4D+8G+4B).
+
+Budget factor tiers: 1.0 if >5h remaining, 0.5 if 0-5h, 0.1 if exhausted.
+
+### Phase 3: RubinAlerts Integration
+
+- **`run_nightly.py`** — End-to-end: `candidates.csv` → estimate exposures → calculate twilight → rank targets → schedule → charge time → write outputs.
+- **CLI subcommands**: `plan` (original), `run-nightly` (with time accounting), `reconcile` (post-night adjustment). Backward compatible — no subcommand falls through to `plan`.
+- `normalize.py` now propagates `default_program` and `phase_weight` (w_time) from candidates.csv.
+
+### Phase 4: Reporting
+
+- **`reporting.py`** — Nightly time report (per-program charges, budget status) and season progress report (cumulative usage, burn rate, projected exhaustion).
+- `write_summary()` now includes Time Budget section when accountant provided.
+
+### Validation
+
+Tested full pipeline on Yize's targets:
+- `run-nightly`: 2 targets scheduled, 4.7h charged to MAGNETS-Stubbs grey budget
+- `reconcile`: Weather lost 1.2h → returned to budget (26.5h remaining)
+- Backward compat: `--date --targets` without subcommand still works
+- Season report shows burn rate (3.5h/night) and projected nights remaining
+
+### Architecture Document
+
+Created `docs/design/architecture.md` — comprehensive system architecture covering both the alert pipeline and LLAMAS orchestrator, suitable for design review.
+
+### Files Added/Changed
+
+```
+orchestrator/accounting.py       — NEW: Multi-program time accounting
+orchestrator/prioritizer.py      — NEW: Composite priority scoring
+orchestrator/run_nightly.py      — NEW: End-to-end nightly orchestration
+orchestrator/reporting.py        — NEW: Time and season reports
+ref/allocations_example.yaml     — NEW: Example MAGNETS allocations
+docs/design/architecture.md      — NEW: Full system architecture doc
+orchestrator/models.py           — CHANGED: program, phase_weight, ProgramAllocation
+orchestrator/planner.py          — CHANGED: prioritizer_scores + accountant integration
+orchestrator/cli.py              — CHANGED: Subcommands (plan, run-nightly, reconcile)
+orchestrator/normalize.py        — CHANGED: default_program, w_time propagation
+orchestrator/output.py           — CHANGED: Budget section in summary
+CLAUDE.md                        — CHANGED: Updated with full command reference
+```
+
+---
+
 ## 2026-04-17 — Orchestrator Phase 1 Complete & Broker Audit
 
 ### Phase 1 Implementation
@@ -631,6 +685,10 @@ python run_tonight.py 61101 --min-prob 0.3 --days-back 30
 - [x] Validated on DDF targets (99% efficiency) and Yize's real targets
 - [x] All 5 broker clients verified working (Fink, ANTARES, ALeRCE, ATLAS, TNS)
 - [x] ATLAS retry/backoff and token re-auth
+- [x] Phase 2: Multi-program time accounting + composite prioritizer
+- [x] Phase 3: RubinAlerts integration (candidates.csv → LLAMAS plan with budgets)
+- [x] Phase 4: Nightly time reports + season progress reporting
+- [x] Architecture document for design review (`docs/design/architecture.md`)
 
 ### Remaining — Alert Pipeline
 
@@ -641,9 +699,10 @@ python run_tonight.py 61101 --min-prob 0.3 --days-back 30
 
 ### Remaining — Spectroscopic Orchestration (MAGNETS)
 
-- [ ] Phase 2: Time accounting (track 30hr across D/G/B)
-- [ ] Phase 3: RubinAlerts integration (candidates.csv → LLAMAS plan)
-- [ ] Phase 4: WD standards (Boyd et al. 2026), reporting
+- [ ] Integration test with real alert pipeline candidates.csv
+- [ ] Boyd et al. 2026 WD standard catalog (if available)
+- [ ] Google Sheet ingester for manual target requests
+- [ ] Multi-night look-ahead optimization
 
 ### Known Issues
 

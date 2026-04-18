@@ -112,7 +112,7 @@ def write_catalog(plan: ObsPlan, path: str) -> None:
     logger.info("Wrote catalog: %s (%d entries)", path, idx - 1)
 
 
-def write_summary(plan: ObsPlan, path: str) -> None:
+def write_summary(plan: ObsPlan, path: str, accountant=None) -> None:
     """Write a human-readable summary of the observing plan."""
     lines = []
 
@@ -183,6 +183,21 @@ def write_summary(plan: ObsPlan, path: str) -> None:
             mag_str = f"mag={t.mag:.1f}" if math.isfinite(t.mag) else "mag=?"
             lines.append(f"  {t.name:<18} P{t.priority} {mag_str}")
         lines.append("")
+
+    # Time accounting (if available)
+    if accountant is not None:
+        summary = accountant.summary()
+        if summary:
+            lines.append("Time Budget:")
+            lines.append(f"  {'Program':<20} {'Used':>6} {'Alloc':>6} {'Remain':>6} {'Factor':>6}")
+            for prog, info in summary.items():
+                used = sum(info['used'].values())
+                alloc = sum(info['allocated'].values())
+                lines.append(
+                    f"  {prog:<20} {used:>5.1f}h {alloc:>5.1f}h "
+                    f"{info['total_remaining']:>5.1f}h {info['budget_factor']:>5.1f}"
+                )
+            lines.append("")
 
     lines.append("=" * 70)
 

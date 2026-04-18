@@ -30,7 +30,9 @@ class Target:
     moon_constraint: str = 'any'
     notes: str = ''
     source: str = ''
+    program: str = 'default'
     merit_score: float = float('nan')
+    phase_weight: float = float('nan')  # w_time from alert pipeline: exp(-dt²/2τ²)
 
     # Planner-populated fields
     transit_time: Optional[Time] = field(default=None, repr=False)
@@ -71,6 +73,30 @@ class ScheduledEntry:
     exp_str: str = ''
     n_exp: int = 1
     exp_sec: int = 0
+    program: str = ''
+
+
+@dataclass
+class ProgramAllocation:
+    """Time allocation for a single observing program."""
+
+    program: str = ''
+    pi: str = ''
+    semester: str = ''
+    allocated_hours: dict = field(default_factory=lambda: {
+        'dark': 0.0, 'grey': 0.0, 'bright': 0.0,
+    })
+    used_hours: dict = field(default_factory=lambda: {
+        'dark': 0.0, 'grey': 0.0, 'bright': 0.0,
+    })
+
+    @property
+    def remaining_hours(self) -> float:
+        """Total remaining hours across all moon phases."""
+        return sum(
+            self.allocated_hours.get(p, 0.0) - self.used_hours.get(p, 0.0)
+            for p in ('dark', 'grey', 'bright')
+        )
 
 
 @dataclass

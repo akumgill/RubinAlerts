@@ -329,7 +329,9 @@ def select_standards(standards_path: str, evening: Time, morning: Time,
 def create_schedule(targets: List[Target], evening: Time, morning: Time,
                     moon_phase: str = 'grey',
                     standards_path: str = None,
-                    config: LLAMASConfig = None) -> ObsPlan:
+                    config: LLAMASConfig = None,
+                    prioritizer_scores: dict = None,
+                    accountant=None) -> ObsPlan:
     """Create the complete observing plan for a night.
 
     Parameters
@@ -343,6 +345,11 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
     standards_path : str, optional
         Path to standards catalog. Defaults to ref/LDSS_ObsPlan_Generator/standards.txt.
     config : LLAMASConfig, optional
+    prioritizer_scores : dict, optional
+        {target.name: composite_score} from prioritizer.rank_targets().
+        If provided, replaces the default priority-based scoring.
+    accountant : TimeAccountant, optional
+        If provided, charges scheduled time to each target's program.
 
     Returns
     -------
@@ -401,8 +408,11 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             if am > config.max_airmass:
                 continue
 
-            # Score: priority dominates, airmass is tiebreaker
-            score = (5 - t.priority) * 100 - am * 10
+            # Score: use prioritizer if available, else priority-based
+            if prioritizer_scores and t.name in prioritizer_scores:
+                score = prioritizer_scores[t.name] - am * 10
+            else:
+                score = (5 - t.priority) * 100 - am * 10
             if score > best_score:
                 best_score = score
                 best = t
@@ -455,6 +465,7 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                 exp_str=f"{n_exp}x{exp_sec}s",
                 n_exp=n_exp,
                 exp_sec=exp_sec,
+                program=best.program,
             )
             scheduled_entries.append(entry)
             scheduled_names.add(best.name)
@@ -502,10 +513,17 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
     # 4. Collect unscheduled as backup
     backup = [t for t in eligible if t.name not in scheduled_names]
 
-    # 5. Select standard stars
+    # 5. Charge time if accountant provided
+    if accountant is not None:
+        date_str = str(evening.iso[:10])
+        for entry in scheduled_entries:
+            hours = (entry.end - entry.start).to(u.hour).value
+            accountant.charge(entry.program, hours, moon_phase, date=date_str)
+
+    # 6. Select standard stars
     std_start, std_end = select_standards(standards_path, evening, morning, config)
 
-    # 6. Build and return ObsPlan
+    # 7. Build and return ObsPlan
     plan = ObsPlan(
         date=str(evening.iso[:10]),
         evening_twilight=evening,

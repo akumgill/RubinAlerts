@@ -1,0 +1,21 @@
+# MAGNETS 2026B semester allocations
+# Each program tracks time separately across moon phases.
+# Used by: python -m orchestrator run-nightly --allocations allocations.yaml
+
+semester: "2026B"
+default_program: "MAGNETS-Stubbs"
+
+programs:
+  - program: "MAGNETS-Stubbs"
+    pi: "Stubbs"
+    allocated_hours:
+      dark: 5.0
+      grey: 20.0
+      bright: 5.0
+
+  - program: "MAGNETS-Villar"
+    pi: "Villar"
+    allocated_hours:
+      dark: 4.0
+      grey: 8.0
+      bright: 4.0

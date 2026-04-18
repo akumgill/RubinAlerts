@@ -161,11 +161,21 @@ def load_targets_csv(path: str) -> list:
     return targets
 
 
-def load_from_rubinalerts(path: str, max_targets: int = 30) -> list:
+def load_from_rubinalerts(path: str, max_targets: int = 30,
+                          default_program: str = 'default') -> list:
     """Load targets from the RubinAlerts pipeline candidates.csv.
 
     Maps merit_score to priority via quartiles:
     top quartile = P1, second = P2, third = P3, rest = P4.
+
+    Parameters
+    ----------
+    path : str
+        Path to candidates.csv from the alert pipeline.
+    max_targets : int
+        Maximum number of targets to return.
+    default_program : str
+        Program to assign targets to (from allocations.yaml default_program).
 
     Returns
     -------
@@ -229,6 +239,11 @@ def load_from_rubinalerts(path: str, max_targets: int = 30) -> list:
         elif 'mag' in df.columns and pd.notna(row.get('mag')):
             mag_val, mag_filt = parse_magnitude(str(row['mag']))
 
+        # Phase weight from alert pipeline (w_time = exp(-dt²/2τ²))
+        phase_w = float('nan')
+        if 'w_time' in df.columns and pd.notna(row.get('w_time')):
+            phase_w = float(row['w_time'])
+
         t = Target(
             name=str(row[name_col]).strip(),
             ra_deg=float(row['ra']),
@@ -239,6 +254,8 @@ def load_from_rubinalerts(path: str, max_targets: int = 30) -> list:
             redshift=float(row['redshift']) if 'redshift' in df.columns and pd.notna(row.get('redshift')) else float('nan'),
             merit_score=float(row[merit_col]) if merit_col in df.columns else float('nan'),
             source='rubinalerts',
+            program=default_program,
+            phase_weight=phase_w,
         )
         targets.append(t)
 

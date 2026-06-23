@@ -169,7 +169,9 @@ an observer's notes; the net adjustment is clamped so keywords reorder within or
 adjacent tiers but never leapfrog a full priority tier. A separate \texttt{override} (a.k.a.\
 \texttt{mandatory}) tag is a hard, non-negotiable request: such a target bypasses normal
 ranking and the Moon-phase eligibility filter, and is \emph{reserved} a slot before the
-greedy fill (see \S\ref{sec:sched}). It still cannot defy physics --- a mandatory target that
+greedy fill (see \S\ref{sec:sched}). Must-see authority is granted only to the night's
+designated \emph{primary} program (\S\ref{sec:sched}); a non-primary program's override is
+downgraded to normal prioritization. It still cannot defy physics --- a mandatory target that
 never clears the airmass limit tonight is reported as unschedulable rather than silently
 dropped.
 
@@ -204,10 +206,14 @@ is guarded by rank-based assignment. Absolute, cross-night-calibrated thresholds
 natural future refinement once merit statistics across many nights are available.
 
 \section{Scheduling}\label{sec:sched}
-Targets flagged \texttt{mandatory} (\S\ref{sec:phase}) are placed first in a reservation
-pass --- each is given its best (lowest-airmass) slot within its observable window --- and the
-greedy fill then works around those reserved blocks. For the remaining targets, the greedy
-scheduler steps through the night, at each slot selecting the observable target maximizing
+Each night has a designated \emph{primary} program, looked up by date from a small nights
+CSV (\texttt{date, primary\_program}). Only the primary's must-see (\texttt{mandatory})
+targets are honored as guarantees; any other program's override is logged and demoted to
+normal prioritization. Honored must-see targets are placed first in a reservation pass ---
+each is given its best (lowest-airmass) slot within its observable window, and is kept even
+when that window is short --- and the greedy fill then works around those reserved blocks.
+For the remaining targets, the greedy scheduler steps through the night, at each slot
+selecting the observable target maximizing
 \begin{equation}
 \text{score} - 10\times\text{airmass} - \texttt{SLEW\_PENALTY}\times\theta_{\rm slew},
 \end{equation}

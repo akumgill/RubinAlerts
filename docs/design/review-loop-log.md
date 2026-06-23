@@ -89,4 +89,37 @@ Validated all findings against code. Notable pushback / corrections:
 
 Hard rule: **no test may hit a live broker/DB/API** — mock/stub everything.
 
+---
+
+## Stage 3: Engineer — execution record (all chunks complete)
+
+Test suite grew 0 → **74 tests**, all green, fully offline (mocked brokers/DBs, temp-file
+JSON). Commits on `design-review-loop`:
+
+| Commit | Chunk | Resolves | Summary |
+|--------|-------|----------|---------|
+| `20c1dad` | A | — | pytest scaffold + fixtures (no live services) |
+| `882e222` | B | R1, R6 | fold moon penalty into ranking merit (single source of truth); coverage-aware `w_broker` so southern single-broker DDFs aren't geographically penalized |
+| `f53dfb2` | C | R5, R7, R13 | consolidated broker-liveness status (report + `broker_status.json` sidecar); ML-only `mean_ia_prob` (ANTARES proxy split out); angular-separation dedup |
+| `9013d3c` | D | R3, R4, R11 | unified state-file path (`_default_state_path`, no reconcile double-charge); charge science-time only (`ScheduledEntry.charged_minutes`/`padding_minutes`); phase-aware fractional `budget_factor` |
+| `215b12d` | E | R2, R8, R9, R14, R18 | documented/normalized composite score (named constants, phase clamped [0,1]); `(score, breakdown)` returned + persisted (`score_breakdown.json`, summary table); slew penalty; scoring-mode stamp; <4-target P-label guard + relative-P caveat |
+| `efa3e36` | F | R10, R12 | interpolate redshift exposure table (no cliffs); cadence-based mid-night standard insertion |
+| `bd8fdb5` | G | R15, R16, R17 | Baade docstring; config-ize 900s split + 10s rounding; honor manual-target `program`/`phase_weight`/`peak_mjd` columns (soft default + warning); architecture.md updates |
+| `24a410a` | W11 core | new (PI req) | `orchestrator/target_ledger.py`: coordinate-keyed cross-night integration ledger + completeness factor folded into the score |
+| `7057aca` | W11 wiring | new (PI req) | wire ledger into run-nightly (schedule only *remaining* time, exclude satisfied targets), planner charge, and CLI (`--target-ledger`, `reconcile-target`, `ledger`) |
+
+**Architect pushback honored** (not implemented, by design): unify exposure models (R12 —
+forms were identical); absolute merit thresholds (R8 — deferred, merit not cross-night
+calibrated); hard-require program / build Sheet ingester (R15 — out of scope); full path
+optimization & single scoring function (R9/R18 — over-engineering for clustered DDFs).
+
+**Verification:** `pytest` 74 passed; `python -m orchestrator --help` shows the new
+subcommands; `run_tonight` imports clean. **No single-night regression** — every new
+parameter defaults to today's behavior when no ledger/breakdown exists.
+
+**Notes / optional follow-ups:** broker-liveness not yet surfaced through
+`supernova_monitor.run_full_pipeline` (only the `run_tonight.py` path); ledger summary
+shows latest-night required only; standards remain unbilled to science budgets (matches
+prior start/end behavior). Production cross-broker dedup radius left at 1.0″ (tests use 1.5″).
+
 

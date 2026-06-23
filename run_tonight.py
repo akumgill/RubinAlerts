@@ -15,6 +15,7 @@ Creates a night directory (e.g., nights/ut20260301/) containing:
 
 import argparse
 import logging
+import json
 import os
 import sys
 from datetime import datetime
@@ -379,6 +380,53 @@ def fetch_fink_candidates(fink, min_sn_score=0.3, n_fetch=500):
     return good
 
 
+def format_broker_status_lines(broker_status, prefix=''):
+    """Return a list of human-readable lines describing per-broker liveness.
+
+    A broker that was queried but did not respond (raised / fell back) is a
+    silent-failure warning: an empty sky from a down broker must never look
+    like "no SNe tonight".
+    """
+    lines = []
+    lines.append(f'{prefix}Broker Status')
+    lines.append(f'{prefix}{"Broker":16s}  {"Queried":>7s}  {"Resp":>5s}  '
+                 f'{"NReturned":>9s}  Error')
+    lines.append(f'{prefix}{"-" * 16}  {"-" * 7}  {"-" * 5}  {"-" * 9}  {"-" * 20}')
+    if not broker_status:
+        lines.append(f'{prefix}(no broker status recorded)')
+        return lines
+    for broker in sorted(broker_status):
+        st = broker_status[broker] or {}
+        q = 'yes' if st.get('queried') else 'no'
+        r = 'yes' if st.get('responded') else 'NO'
+        n = st.get('n_returned', 0)
+        err = st.get('error') or ''
+        lines.append(f'{prefix}{broker:16s}  {q:>7s}  {r:>5s}  {n:>9d}  {err}')
+    return lines
+
+
+def log_broker_status(broker_status):
+    """Log the broker-liveness block, warning on any queried-but-unresponsive."""
+    for line in format_broker_status_lines(broker_status):
+        logger.info(line)
+    down = [b for b, s in (broker_status or {}).items()
+            if s and s.get('queried') and not s.get('responded')]
+    if down:
+        logger.warning("Brokers queried but did not respond: %s "
+                       "(empty results may be a silent failure, not an empty sky)",
+                       ', '.join(sorted(down)))
+
+
+def write_broker_status(broker_status, night_dir):
+    """Write a broker_status.json sidecar into the night output directory."""
+    os.makedirs(night_dir, exist_ok=True)
+    path = os.path.join(night_dir, 'broker_status.json')
+    with open(path, 'w') as f:
+        json.dump(broker_status or {}, f, indent=2, sort_keys=True)
+    logger.info("Broker status: %s", path)
+    return path
+
+
 def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
                                 fink_only=False):
     """Query all brokers for SN candidates, merge, deduplicate, screen variables.
@@ -389,9 +437,13 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
       - ALeRCE-LSST (if available)
       - ANTARES (if available)
 
-    Returns a merged, deduplicated DataFrame with columns:
-      diaObjectId, ra, dec, ddf_field, sn_score, brokers_detected,
-      num_brokers, mean_ia_prob, known_variable, ...
+    Returns a 2-tuple ``(candidates, broker_status)``:
+      - candidates: merged, deduplicated DataFrame with columns
+        diaObjectId, ra, dec, ddf_field, sn_score, brokers_detected,
+        num_brokers, mean_ia_prob, known_variable, ...
+      - broker_status: per-broker liveness dict, keyed by broker name, each
+        ``{queried, responded, n_returned, error}``. Lets a silent broker
+        outage be distinguished from a genuinely empty sky.
     """
     # --- Query Fink (if available) ---
     if fink is not None:
@@ -400,17 +452,43 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
         logger.info("Fink API unavailable — skipping Fink candidate discovery")
         fink_df = pd.DataFrame()
 
+    # The non-Fink brokers we *intend* to query in multi-broker mode. Used to
+    # build a fallback broker-status block if the multi-broker path fails so a
+    # silent broker outage is never mistaken for an empty sky (critical during
+    # the Rubin offline window when ZTF-fed brokers are the primary source).
+    _OTHER_BROKERS = ('ANTARES', 'ALeRCE-ZTF', 'ALeRCE-LSST')
+
+    def _fink_only_status(fink_n, reason=None):
+        status = {
+            'Fink': {
+                'queried': True,
+                'responded': fink is not None,
+                'n_returned': int(fink_n),
+                'error': None if fink is not None else 'Fink client unavailable',
+            }
+        }
+        for b in _OTHER_BROKERS:
+            status[b] = {
+                'queried': True,
+                'responded': False,
+                'n_returned': 0,
+                'error': reason or 'not queried (Fink-only mode)',
+            }
+        return status
+
     if fink_only or not HAS_MONITOR:
         if not HAS_MONITOR and not fink_only:
             logger.warning("SupernovaMonitor not available; using Fink only")
         # Fink-only path: just assign fields and return
+        reason = ('SupernovaMonitor not available' if not HAS_MONITOR
+                  else 'not queried (Fink-only mode)')
         if len(fink_df) == 0:
-            return pd.DataFrame()
+            return pd.DataFrame(), _fink_only_status(0, reason)
         fink_df['brokers_detected'] = 'Fink'
         fink_df['num_brokers'] = 1
         fink_df['mean_ia_prob'] = fink_df['sn_score']
         fink_df['known_variable'] = False
-        return fink_df
+        return fink_df, _fink_only_status(len(fink_df), reason)
 
     # --- Query other brokers via SupernovaMonitor ---
     logger.info("Querying ANTARES + ALeRCE brokers...")
@@ -423,20 +501,33 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
             limit=n_fetch,
             ddf_fields=DDF_FIELDS,
         )
+        broker_status = dict(getattr(monitor, '_last_broker_status', {}) or {})
     except Exception as e:
+        # Multi-broker path blew up wholesale: record every non-Fink broker as
+        # queried-but-unresponsive so the failure is visible in the report.
         logger.warning("Multi-broker query failed: %s. Using Fink only.", e)
+        status = _fink_only_status(len(fink_df), reason=str(e))
+        status['Fink']['responded'] = fink is not None
         if len(fink_df) == 0:
-            return pd.DataFrame()
+            return pd.DataFrame(), status
         fink_df['brokers_detected'] = 'Fink'
         fink_df['num_brokers'] = 1
         fink_df['mean_ia_prob'] = fink_df['sn_score']
         fink_df['known_variable'] = False
-        return fink_df
+        return fink_df, status
 
     # Log per-broker counts
     for broker_name, bdf in other_brokers.items():
         n = len(bdf) if bdf is not None else 0
         logger.info("  %s: %d candidates", broker_name, n)
+
+    # --- Record Fink's own liveness (queried outside query_all_brokers) ---
+    broker_status['Fink'] = {
+        'queried': True,
+        'responded': fink is not None,
+        'n_returned': int(len(fink_df)),
+        'error': None if fink is not None else 'Fink client unavailable',
+    }
 
     # --- Add Fink to the broker dict ---
     if len(fink_df) > 0:
@@ -448,7 +539,7 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
 
     if len(merged) == 0:
         logger.warning("No candidates after merge")
-        return pd.DataFrame()
+        return pd.DataFrame(), broker_status
 
     logger.info("Merged across brokers: %d unique candidates", len(merged))
 
@@ -536,7 +627,7 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
                 len(screened),
                 ', '.join(sorted(set(screened.get('brokers_detected', pd.Series(['Fink'])).dropna()))))
 
-    return screened
+    return screened, broker_status
 
 
 ATLAS_BRIGHT_MAG_CUT = 20.0  # Only fetch ATLAS for candidates brighter than this
@@ -1317,7 +1408,8 @@ def plot_observing_sequence_skymap(sequence_df, obs_date, ax=None):
 
 
 def generate_pdf_report(summary_df, fit_results, plot_paths,
-                        pdf_path, mjd_now, obs_date, observing_sequence=None):
+                        pdf_path, mjd_now, obs_date, observing_sequence=None,
+                        broker_status=None):
     """Generate multi-page PDF report with summary and light curves."""
     from matplotlib.backends.backend_pdf import PdfPages
 
@@ -1350,6 +1442,16 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
                  f'{high_merit} high-merit (>0.1)')
         ax.text(0.5, 0.20, stats,
                 ha='center', va='center', fontsize=10, color='dimgray')
+
+        # Broker-liveness block — surfaces silent broker outages on the report.
+        if broker_status:
+            status_lines = format_broker_status_lines(broker_status)
+            down = [b for b, s in broker_status.items()
+                    if s and s.get('queried') and not s.get('responded')]
+            color = 'firebrick' if down else 'dimgray'
+            ax.text(0.5, 0.12, '\n'.join(status_lines),
+                    ha='center', va='top', fontsize=7, color=color,
+                    fontfamily='monospace')
 
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
@@ -1648,12 +1750,14 @@ W_absmag — Absolute Magnitude: Gaussian at M_B = −19.3, σ = 0.7
                 2 + n_diag_pages + n_plot_pages)  # title + table + diagnostics + lightcurves
 
 
-def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path):
+def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path,
+                                broker_status=None):
     """Generate a human-readable observing schedule ordered by priority.
 
     Uses exposure time estimates if available, otherwise assumes 30 min.
     Lists targets in priority order with coordinates, magnitude, merit,
-    optimal observing time, and estimated exposure. Includes merit breakdown.
+    optimal observing time, and estimated exposure. Includes merit breakdown
+    and a per-broker liveness block.
     """
     if len(plan_df) == 0:
         return
@@ -1677,6 +1781,12 @@ def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path):
     lines.append(f'# MJD {mjd_now:.1f} | {len(df)} targets | ~{total_hours:.1f} hours total')
     lines.append(f'# Sorted by priority: time-critical > setting soon > merit')
     lines.append('#')
+
+    # Broker-liveness block — distinguishes a down broker from an empty sky.
+    if broker_status is not None:
+        for line in format_broker_status_lines(broker_status, prefix='# '):
+            lines.append(line)
+        lines.append('#')
     lines.append(f'# {"#":>3s}  {"Object":20s}  {"RA":>11s}  {"Dec":>10s}  '
                  f'{"PkMag":>6s}  {"dt":>6s}  {"Merit":>6s}  '
                  f'{"OptUT":>5s}  {"Exp":>5s}  {"DDF":>8s}')
@@ -1875,13 +1985,21 @@ def main():
         logger.info("Mode: All brokers (Fink + ANTARES + ALeRCE-ZTF + ALeRCE-LSST)")
     else:
         logger.info("Mode: Non-Fink brokers only (ANTARES + ALeRCE-ZTF + ALeRCE-LSST)")
-    candidates = fetch_all_broker_candidates(
+    candidates, broker_status = fetch_all_broker_candidates(
         fink if fink_available else None,
         min_prob=args.min_prob,
         days_back=args.days_back,
         n_fetch=args.max_candidates,
         fink_only=args.fink_only,
     )
+
+    # Emit broker-liveness sidecar early so it survives even an early exit.
+    try:
+        write_broker_status(broker_status, night_dir)
+    except Exception as e:
+        logger.warning("Could not write broker_status.json: %s", e)
+    log_broker_status(broker_status)
+
     if len(candidates) == 0:
         logger.error("No candidates found")
         sys.exit(1)
@@ -2113,13 +2231,15 @@ def main():
 
     # Human-readable schedule
     sched_path = os.path.join(night_dir, 'observing_schedule.txt')
-    generate_observing_schedule(plan, mjd_now, obs_date, sched_path)
+    generate_observing_schedule(plan, mjd_now, obs_date, sched_path,
+                                broker_status=broker_status)
 
     # PDF report
     pdf_path = os.path.join(night_dir, f'report_{ut_stamp}.pdf')
     generate_pdf_report(summary, fit_results, plot_paths,
                         pdf_path, mjd_now, obs_date,
-                        observing_sequence=observing_sequence)
+                        observing_sequence=observing_sequence,
+                        broker_status=broker_status)
 
     # --- Done ---
     logger.info("=" * 70)

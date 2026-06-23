@@ -6,6 +6,9 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
+import astropy.units as u
+from astropy.coordinates import SkyCoord
+
 from utils.coordinates import CoordinateUtils
 from utils.extinction import get_extinction_batch
 from cache.alert_cache import AlertCache
@@ -126,23 +129,26 @@ class AlertAggregator:
 
         unique_alerts = []
         processed_indices = set()
-        tol_deg = self.match_tolerance / 3600
+        # True angular-separation match radius. A RA/Dec box test (|Δra|<tol AND
+        # |Δdec|<tol) lacks a cos(dec) term, so its effective radius shrinks
+        # toward the poles — worst in the southern DDFs where broker coverage is
+        # already thin (R13). Use SkyCoord.separation() against a real radius.
+        tol_arcsec = self.match_tolerance * u.arcsec
+
+        # Build a SkyCoord array once for vectorized separation queries.
+        all_coords = SkyCoord(ra=df['ra'].to_numpy() * u.deg,
+                              dec=df['dec'].to_numpy() * u.deg)
 
         # Build ZTF ID lookup for secondary matching
         has_ztf_id = 'ztf_object_id' in df.columns
 
-        for idx, alert in df.iterrows():
+        for pos, (idx, alert) in enumerate(df.iterrows()):
             if idx in processed_indices:
                 continue
 
-            ra = alert['ra']
-            dec = alert['dec']
-
-            # Match by coordinates
-            matches_mask = (
-                (np.abs(df['ra'] - ra) < tol_deg) &
-                (np.abs(df['dec'] - dec) < tol_deg)
-            )
+            # Match by true angular separation (handles cos-dec correctly).
+            sep = all_coords[pos].separation(all_coords)
+            matches_mask = pd.Series(sep <= tol_arcsec, index=df.index)
 
             # Also match by shared ZTF object ID
             if has_ztf_id:
@@ -197,9 +203,18 @@ class AlertAggregator:
                 continue
             alert = broker_alerts.iloc[0]
 
-            # Type Ia probability (now guaranteed to exist after normalization)
+            # Type Ia probability (now guaranteed to exist after normalization).
+            # ANTARES has no trained P(Ia) classifier — its value is the
+            # heuristic proxy (_compute_antares_proxy_prob). Keep that proxy in
+            # its OWN column so it is preserved for transparency but EXCLUDED
+            # from mean_ia_prob, which must pool only ML-derived probabilities
+            # (averaging an uncalibrated heuristic with a trained ML score is
+            # indefensible — R7). ANTARES still contributes to num_brokers.
             if pd.notna(alert.get('sn_ia_prob')):
-                merged[f'classification_{broker}_ia_prob'] = float(alert['sn_ia_prob'])
+                if broker == 'ANTARES':
+                    merged['antares_proxy_prob'] = float(alert['sn_ia_prob'])
+                else:
+                    merged[f'classification_{broker}_ia_prob'] = float(alert['sn_ia_prob'])
 
             # Other SN type probabilities (from ALeRCE enrichment)
             for key_suffix, col_names in [
@@ -266,6 +281,11 @@ class AlertAggregator:
         for _, row in df.iterrows():
             probs = []
             for col in df.columns:
+                # Pool only ML-derived P(Ia) columns (classification_<ML>_ia_prob).
+                # Exclude the ANTARES heuristic proxy (antares_proxy_prob) and the
+                # aggregate columns themselves (R7).
+                if 'proxy' in col:
+                    continue
                 if '_ia_prob' in col and 'mean_' not in col and 'std_' not in col and 'min_' not in col and 'max_' not in col:
                     val = row.get(col)
                     if pd.notna(val):

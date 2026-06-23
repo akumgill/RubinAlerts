@@ -49,6 +49,7 @@ class SupernovaMonitor:
         self.atlas_client = AtlasClient()
         self._lc_cache = {}  # in-memory light curve cache: (broker, oid) -> DataFrame
         self._rsp_lc_cache = {}  # RSP light curves: object_id -> DataFrame
+        self._last_broker_status = {}  # per-broker liveness from last query_all_brokers
 
         # RSP TAP client for host galaxy properties (DP1/DR1 static catalogs)
         self.rsp_client = None
@@ -123,6 +124,10 @@ class SupernovaMonitor:
         logger.info(f"Querying {len(self.brokers)} brokers for SN Ia candidates")
 
         results = {}
+        # Per-broker liveness status so a silent failure (broker down) is
+        # distinguishable from a genuinely empty sky. Recorded for every broker
+        # regardless of outcome and exposed via self._last_broker_status.
+        broker_status: Dict[str, Dict] = {}
 
         for broker_name, client in self.brokers.items():
             logger.info(f"Querying {broker_name}...")
@@ -140,6 +145,14 @@ class SupernovaMonitor:
 
                 alerts = client.query_alerts(**kwargs)
 
+                n_returned = int(len(alerts)) if alerts is not None else 0
+                broker_status[broker_name] = {
+                    'queried': True,
+                    'responded': True,
+                    'n_returned': n_returned,
+                    'error': None,
+                }
+
                 if alerts is not None and len(alerts) > 0:
                     results[broker_name] = alerts
                     logger.info(f"Retrieved {len(alerts)} alerts from {broker_name}")
@@ -147,7 +160,20 @@ class SupernovaMonitor:
                     logger.warning(f"No alerts from {broker_name}")
 
             except Exception as e:
+                # A broker raising must never crash the run — record a status
+                # entry (responded=False) instead.
                 logger.error(f"Error querying {broker_name}: {e}")
+                broker_status[broker_name] = {
+                    'queried': True,
+                    'responded': False,
+                    'n_returned': 0,
+                    'error': str(e),
+                }
+
+        # Expose status for callers (run_tonight, reports). Kept as an attribute
+        # rather than changing the return type to preserve backward compatibility
+        # for existing callers of query_all_brokers().
+        self._last_broker_status = broker_status
 
         return results
 

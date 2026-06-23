@@ -149,6 +149,7 @@ def cmd_run_nightly(args):
         standards_path=args.standards,
         from_rubinalerts=not args.csv_format,
         target_ledger_path=ledger_path,
+        nights_path=args.nights,
     )
 
     if plan.completed:
@@ -323,6 +324,12 @@ def main():
                                 help='Allocations YAML file')
     nightly_parser.add_argument('--csv-format', action='store_true',
                                 help='Treat input as manual CSV (not RubinAlerts format)')
+    nightly_parser.add_argument('--nights', default=None,
+                                help='Observing-nights CSV (date,primary_program). '
+                                     'Only the night primary\'s must-see (override) '
+                                     'targets are guaranteed; everyone else uses '
+                                     'normal prioritization. If omitted, all '
+                                     'must-see targets are honored.')
     nightly_parser.add_argument('--target-ledger', default=None,
                                 help='Per-target integration ledger JSON. '
                                      'Defaults to <output-dir>/target_ledger.json. '

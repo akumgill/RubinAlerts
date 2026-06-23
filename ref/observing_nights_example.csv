@@ -1,0 +1,8 @@
+# Observing-night primaries for the 2026B MAGNETS run. One row per night.
+# The primary's must-see (override) targets are guaranteed; everything else uses normal prioritization.
+# TEMPLATE: fill in with the actual scheduled nights and PIs for the run.
+date,primary_program,primary_observer
+2026-08-10,MAGNETS-Villar,Yize Dong
+2026-08-13,MAGNETS-Villar,Yize Dong
+2026-12-15,MAGNETS-Stubbs,Chris Stubbs
+2027-01-12,MAGNETS-Stubbs,Chris Stubbs

@@ -141,9 +141,25 @@ def _find_window(coord: SkyCoord, evening: Time, morning: Time,
 # Observability
 # ---------------------------------------------------------------------------
 
+def _is_honored_mustsee(t: Target, primary_program: Optional[str]) -> bool:
+    """True if ``t`` is a must-see (mandatory) target whose guarantee holds
+    tonight under the night-primary policy.
+
+    A mandatory target is HONORED when there is no designated primary
+    (``primary_program is None`` — backward-compatible: all must-see honored) or
+    when its program matches tonight's primary. Non-primary must-see targets are
+    NOT honored: they are demoted to normal targets (the gating itself lives in
+    ``create_schedule``; this helper just identifies the honored ones so the
+    short-window drop can exempt them)."""
+    if not getattr(t, 'mandatory', False):
+        return False
+    return primary_program is None or t.program == primary_program
+
+
 def compute_observability(targets: List[Target], evening: Time,
                           morning: Time,
-                          config: LLAMASConfig = None) -> List[Target]:
+                          config: LLAMASConfig = None,
+                          primary_program: Optional[str] = None) -> List[Target]:
     """Populate observability windows and filter unobservable targets.
 
     Parameters
@@ -153,6 +169,11 @@ def compute_observability(targets: List[Target], evening: Time,
     evening, morning : Time
         Twilight boundaries.
     config : LLAMASConfig, optional
+    primary_program : str, optional
+        Tonight's designated primary program (from the nights CSV). HONORED
+        must-see targets (mandatory AND allowed by the primary rule) are exempt
+        from the short-window drop below so their guarantee actually holds — see
+        ``_is_honored_mustsee``. None (the default) honors all must-see targets.
 
     Returns
     -------
@@ -168,6 +189,10 @@ def compute_observability(targets: List[Target], evening: Time,
             t.coord, evening, morning, config.location, config.max_airmass
         )
         if transit is None:
+            # No window at all (never reaches the airmass limit). Even an
+            # HONORED must-see target cannot be scheduled here — it will land in
+            # unschedulable_mandatory + warn in create_schedule. Drop it so it
+            # is not carried forward as observable.
             logger.debug("Not observable: %s", t.name)
             continue
 
@@ -177,15 +202,24 @@ def compute_observability(targets: List[Target], evening: Time,
         t.window_end = we
         t.window_hours = (we - ws).to(u.hour).value
 
-        # Check window is long enough for exposure + overhead
+        # Check window is long enough for exposure + overhead. EXEMPT honored
+        # must-see targets: a guaranteed target with a short-but-nonzero window
+        # must still reach the reservation pass (its guarantee outranks the
+        # normal minimum-window cutoff), so we keep it even when the window is
+        # shorter than a full exposure+overhead block.
         needed = t.exposure_minutes + config.overhead_minutes
         if not math.isfinite(needed):
             needed = config.fallback_exposure_minutes + config.overhead_minutes
         window_min = t.window_hours * 60.0
         if window_min < needed:
-            logger.debug("Window too short for %s (%.0f < %.0f min)",
-                         t.name, window_min, needed)
-            continue
+            if _is_honored_mustsee(t, primary_program):
+                logger.info("Window too short for must-see %s (%.0f < %.0f "
+                            "min) — kept (guaranteed)", t.name, window_min,
+                            needed)
+            else:
+                logger.debug("Window too short for %s (%.0f < %.0f min)",
+                             t.name, window_min, needed)
+                continue
 
         observable.append(t)
 
@@ -378,7 +412,8 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                     config: LLAMASConfig = None,
                     prioritizer_scores: dict = None,
                     accountant=None,
-                    ledger=None) -> ObsPlan:
+                    ledger=None,
+                    primary_program: Optional[str] = None) -> ObsPlan:
     """Create the complete observing plan for a night.
 
     Parameters
@@ -401,6 +436,13 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
         If provided, charges the SAME science time (charged_minutes) to each
         target's per-target integration ledger (W11), so cumulative integration
         accrues across nights.
+    primary_program : str, optional
+        Tonight's designated PRIMARY program (from the nights CSV). Only the
+        primary's must-see (mandatory) targets are guaranteed scheduling via the
+        reservation pass; a mandatory target belonging to a NON-primary program
+        is demoted to a normal target (still competes in the greedy fill). When
+        None (no nights file supplied) ALL mandatory targets are honored —
+        backward-compatible behavior.
 
     Returns
     -------
@@ -411,14 +453,34 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
     if standards_path is None:
         standards_path = str(DEFAULT_STANDARDS_PATH)
 
-    # 1. Filter targets by moon phase compatibility. MANDATORY (PI-override)
-    # targets BYPASS this filter — the override is non-negotiable on policy —
-    # but NOT the physics (a target with no observable window tonight still
-    # cannot be scheduled; that is handled in the reservation pass below).
+    # Night-primary policy: a mandatory target is HONORED (guaranteed via the
+    # reservation pass) only when there is no designated primary tonight
+    # (backward-compatible) or its program matches the primary. Non-primary
+    # must-see targets are DEMOTED — they go through the moon filter + greedy
+    # fill like any normal target.
+    def _honored(t):
+        if not getattr(t, 'mandatory', False):
+            return False
+        return primary_program is None or t.program == primary_program
+
+    # Warn once for each demoted (ignored) must-see target.
+    for t in targets:
+        if getattr(t, 'mandatory', False) and not _honored(t):
+            logger.warning(
+                "must-see ignored for %s: program %s is not tonight's primary "
+                "(%s) — demoted to normal prioritization",
+                t.name, t.program, primary_program)
+
+    # 1. Filter targets by moon phase compatibility. HONORED must-see
+    # (PI-override) targets BYPASS this filter — the override is non-negotiable
+    # on policy — but NOT the physics (a target with no observable window
+    # tonight still cannot be scheduled; that is handled in the reservation pass
+    # below). Demoted (non-primary) must-see targets fall through to the normal
+    # moon-filter path here.
     eligible = []
     for t in targets:
-        if getattr(t, 'mandatory', False):
-            continue  # mandatory targets are reserved separately (step 2)
+        if _honored(t):
+            continue  # honored must-see targets are reserved separately (step 2)
         mc = t.moon_constraint.lower()
         if moon_phase == 'bright' and mc not in ('bright', 'any'):
             continue
@@ -471,7 +533,10 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
     # be scheduled — it is recorded in unschedulable_mandatory and warned about
     # rather than silently dropped. Conflicting mandatory targets are placed in
     # transit order; one that can no longer fit is likewise recorded.
-    mandatory_targets = [t for t in targets if getattr(t, 'mandatory', False)]
+    # Only HONORED must-see targets are reserved here (gated by the night
+    # primary). Demoted ones already joined ``eligible`` above and compete in
+    # the greedy fill.
+    mandatory_targets = [t for t in targets if _honored(t)]
     mandatory_targets.sort(
         key=lambda t: t.transit_time.mjd if t.transit_time else float('inf'))
     for t in mandatory_targets:
@@ -492,6 +557,15 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
         # the observable window and the night.
         win_start = max(t.window_start, evening)
         win_end = min(t.window_end, morning)
+        # Short-window guarantee: when the observable window is shorter than a
+        # full exposure+overhead block, cap the reserved block to the available
+        # window rather than dropping the target. An honored must-see with ANY
+        # nonzero window is reserved for whatever time it has (the partial
+        # integration accrues on the ledger across nights); only a target with
+        # no window at all (handled above) stays unschedulable.
+        avail = (win_end - win_start).to(u.minute)
+        if avail > 0 * u.minute and dur > avail:
+            dur = avail
         transit = t.transit_time if t.transit_time is not None else win_start
         start = transit - dur / 2
         if start < win_start:

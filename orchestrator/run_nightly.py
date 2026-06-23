@@ -14,7 +14,8 @@ from astropy.time import Time
 from .accounting import TimeAccountant
 from .config import LLAMAS_CONFIG, LLAMASConfig
 from .models import ObsPlan
-from .normalize import load_from_rubinalerts, load_targets_csv, estimate_llamas_exposure
+from .normalize import (load_from_rubinalerts, load_targets_csv,
+                        estimate_llamas_exposure, load_primary_program)
 from .output import write_timeline, write_catalog, write_summary
 from .planner import calculate_twilight, compute_observability, create_schedule
 from .prioritizer import rank_targets
@@ -117,7 +118,8 @@ def run_nightly(date: str,
                 standards_path: str = None,
                 from_rubinalerts: bool = True,
                 config: LLAMASConfig = None,
-                target_ledger_path: str = None) -> ObsPlan:
+                target_ledger_path: str = None,
+                nights_path: str = None) -> ObsPlan:
     """Full nightly run: load candidates, apply budgets, generate plan.
 
     Parameters
@@ -142,6 +144,11 @@ def run_nightly(date: str,
         ``<output_dir>/target_ledger.json``. Tracks cumulative integration per
         target across nights so already-sufficient targets are excluded and
         partially-observed ones are scheduled only for their remaining time.
+    nights_path : str, optional
+        Path to the observing-nights CSV (date, primary_program). When given,
+        only tonight's primary program's must-see (override) targets are
+        guaranteed scheduling; everyone else's go through normal prioritization.
+        When None, all must-see targets are honored (backward-compatible).
 
     Returns
     -------
@@ -149,6 +156,17 @@ def run_nightly(date: str,
     """
     if config is None:
         config = LLAMAS_CONFIG
+
+    # Resolve tonight's primary program (gates the must-see guarantee). None
+    # when no nights file is supplied or it lists no row for tonight.
+    primary_program = None
+    if nights_path:
+        primary_program = load_primary_program(nights_path, date)
+    if primary_program is None:
+        logger.info("No primary program set for %s; all must-see targets "
+                    "honored", date)
+    else:
+        logger.info("Tonight's primary program: %s", primary_program)
 
     # 1. Initialize time accounting and the per-target integration ledger.
     state_path = str(Path(output_dir) / 'time_accounting.json')
@@ -248,7 +266,8 @@ def run_nightly(date: str,
     evening, morning = calculate_twilight(date, config=config)
 
     # 5. Compute observability (only over the pending, not-yet-satisfied set)
-    observable = compute_observability(pending, evening, morning, config=config)
+    observable = compute_observability(pending, evening, morning, config=config,
+                                       primary_program=primary_program)
     if not observable:
         logger.error("No targets observable on %s", date)
         plan = ObsPlan(date=date, moon_phase=moon_phase,
@@ -275,6 +294,7 @@ def run_nightly(date: str,
         prioritizer_scores=scores,
         accountant=accountant,
         ledger=ledger,
+        primary_program=primary_program,
     )
     plan.completed = completed
     plan.multi_group_alerts = multi_group_alerts

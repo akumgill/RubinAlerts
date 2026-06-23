@@ -3,6 +3,8 @@
 import logging
 import re
 import math
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -191,6 +193,58 @@ def phase_weight_from_peak(peak_mjd: float, night_mjd: float,
         return float('nan')
     delta_t = night_mjd - peak_mjd
     return math.exp(-delta_t ** 2 / (2.0 * tau_days ** 2))
+
+
+def load_primary_program(nights_path: str, date: str) -> Optional[str]:
+    """Look up the designated PRIMARY program for an observing night.
+
+    Reads a small CSV with columns ``date, primary_program`` (and an optional
+    human-readable ``primary_observer`` column, ignored by the logic). The row
+    whose ``date`` equals ``date`` (string match on ISO ``YYYY-MM-DD``) gives
+    tonight's primary program. Only that primary's must-see (override) targets
+    are guaranteed scheduling; everyone else's targets — and the primary's
+    *unmarked* targets — go through normal prioritization.
+
+    Tolerates ``#`` comment lines and surrounding whitespace in cells.
+
+    Parameters
+    ----------
+    nights_path : str
+        Path to the observing-nights CSV.
+    date : str
+        Observing date YYYY-MM-DD to match.
+
+    Returns
+    -------
+    Optional[str]
+        The ``primary_program`` for ``date``, or None if the file is absent or
+        has no row for that date (logged).
+    """
+    if not Path(nights_path).exists():
+        logger.warning("Observing-nights file not found: %s "
+                       "(no primary program — all must-see targets honored)",
+                       nights_path)
+        return None
+
+    df = pd.read_csv(nights_path, comment='#', skipinitialspace=True)
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    if 'date' not in df.columns or 'primary_program' not in df.columns:
+        logger.warning("Observing-nights file %s missing date/primary_program "
+                       "columns; ignoring", nights_path)
+        return None
+
+    target_date = str(date).strip()
+    for _, row in df.iterrows():
+        if str(row['date']).strip() == target_date:
+            primary = str(row['primary_program']).strip()
+            if primary:
+                logger.info("Primary program for %s: %s", target_date, primary)
+                return primary
+
+    logger.warning("No primary program listed for %s in %s "
+                   "(all must-see targets honored)", target_date, nights_path)
+    return None
 
 
 def load_targets_csv(path: str, night_mjd: float = float('nan'),

@@ -2062,7 +2062,7 @@ def main():
         logger.info("Querying NED for host galaxy redshifts (with caching)...")
         # Use batch function which handles caching
         from cache.alert_cache import AlertCache
-        ned_cache = AlertCache(db_path='./cache/data/alert_cache.db')
+        ned_cache = AlertCache()
         ned_df = query_ned_batch(candidates[['diaObjectId', 'ra', 'dec']].copy(),
                                   cache=ned_cache, radius_arcsec=18.0)
         # Convert to dict format for compatibility

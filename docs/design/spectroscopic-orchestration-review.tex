@@ -7,10 +7,10 @@
 \usepackage{xcolor}
 \usepackage{listings}
 \usepackage{amsmath}
+\usepackage{amssymb}
 \usepackage{enumitem}
-\usepackage{float}  % For [H] placement specifier
+\usepackage{float}
 
-% Code listing style
 \lstset{
     basicstyle=\ttfamily\small,
     breaklines=true,
@@ -21,412 +21,309 @@
     stringstyle=\color{red!50!black},
 }
 
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+
 \title{Spectroscopic Follow-up Orchestration Layer\\[0.5em]
-\large Design Document for MAGNETS Collaboration Review}
+\large Design \& Implementation Review for the MAGNETS Collaboration}
 \author{Akum Gill\\
 \small Harvard University\\
-\small Collaborators: Chris Stubbs, Ashley Villar's group (Yize Dong)}
-\date{April 2026 \\ \small Draft for Review}
+\small Collaborators: Chris Stubbs, Ashley Villar's group (Yize Dong), Conor Ransome}
+\date{Revised June 2026 \\ \small Reflects the post-review implementation}
 
 \begin{document}
 
 \maketitle
 
 \begin{abstract}
-This document describes the design and implementation of an orchestration layer for automated spectroscopic follow-up of transients discovered by the RubinAlerts pipeline. The system connects target requests to automated observing plan generation for LLAMAS on Magellan/Baade, providing composite prioritization and multi-program time accounting for the MAGNETS collaboration.
+This document describes the design and current implementation of the orchestration
+layer for automated spectroscopic follow-up of transients discovered by the RubinAlerts
+pipeline, targeting LLAMAS on Magellan/Baade for the MAGNETS collaboration. It supersedes
+the April 2026 draft and incorporates a full design review (18 findings across ingestion,
+merit scoring, prioritization, scheduling, time accounting, and transparency) together with
+two subsequently-added capabilities: a cross-night \emph{per-target integration ledger}
+and \emph{per-program light-curve phase preferences}. The guiding constraints throughout
+are the PI mandates: \textbf{no wasted time on sky} and \textbf{transparent, defensible
+prioritization}. The system is exercised by 96 offline unit tests (no live broker/database
+calls).
 \end{abstract}
 
 \tableofcontents
 \newpage
 
-%===============================================================================
 \section{Overview}
+The orchestrator converts ranked candidates into a LLAMAS observing plan with multi-program
+time accounting. It ingests targets from two streams:
+\begin{enumerate}[nosep]
+  \item \textbf{Alert-driven} --- the RubinAlerts pipeline's \texttt{candidates.csv}
+  (merit-ranked SN candidates aggregated across brokers); and
+  \item \textbf{Manual} --- a CSV of PI-entered targets (the eventual Google-Sheet front
+  end is future work; see \S\ref{sec:future}).
+\end{enumerate}
+The system is \textbf{LLAMAS-only} (Magellan/Baade; LDSS3 materials in \texttt{ref/} are
+reference only). The pipeline of modules is:
+\begin{center}
+\texttt{normalize} $\rightarrow$ \texttt{prioritizer} $\rightarrow$ \texttt{planner}
+$\rightarrow$ \texttt{accounting} + \texttt{target\_ledger} $\rightarrow$ \texttt{output}/\texttt{reporting}
+\end{center}
 
-This infrastructure supports the MAGNETS collaboration (Magellan partner institutions pooling time for Rubin transient follow-up) and implements the ``collaborative infrastructure needed to execute this blended program'' (Stubbs 2026B proposal).
-
-\subsection{System Context}
-
-The orchestration layer sits between:
-\begin{itemize}
-    \item \textbf{Upstream}: RubinAlerts pipeline candidates, manual target requests
-    \item \textbf{Downstream}: LLAMAS observing plans, time accounting records
-\end{itemize}
-
-\subsection{MAGNETS Collaboration Context}
-
-From the Stubbs 2026B proposal (propid 2835):
-\begin{quote}
-``MAGNETS, a collaboration between several Magellan partner institutions, is a brand new effort motivated by the start of LSST alerts in March of this year... Our collaboration's plan is to pool our awarded observing time and develop an internal queue schedule to address a wide range of science goals.''
-\end{quote}
-
-\textbf{Key requirements from proposal:}
-\begin{itemize}
-    \item Queue-based observational strategy
-    \item Time apportioned in proportion to TAC awards
-    \item Multiple science cases: SNe Ia cosmology (Stubbs), core collapse (Villar), exotic transients
-    \item Student projects declared and protected
-\end{itemize}
-
-\textbf{Instrument:} LLAMAS Integral Field Spectrograph (Magellan/Baade)
-
-%===============================================================================
-\section{Requirements}
-
-\subsection{Functional Requirements}
-
-\begin{table}[H]
-\centering
-\begin{tabular}{@{}llc@{}}
+\section{Alert ingestion and liveness}
+\subsection{Brokers}
+Candidates are aggregated from independent brokers, each with different classifiers, then
+cross-matched. ZTF data enters only via ALeRCE-ZTF and ANTARES; there is no standalone ZTF
+client.
+\begin{center}
+\begin{tabular}{@{}llp{6.7cm}@{}}
 \toprule
-ID & Requirement & Priority \\
+Broker & Survey & Role \\
 \midrule
-F1 & Ingest target requests from CSV and RubinAlerts & Must \\
-F2 & Normalize heterogeneous inputs to common schema & Must \\
-F3 & Score/rank targets by composite priority & Must \\
-F4 & Track time allocations per program/PI & Must \\
-F5 & Generate observing plans for LLAMAS & Must \\
-F6 & Handle backup target lists & Should \\
-F7 & Integrate with RubinAlerts merit-scored candidates & Should \\
-F8 & Support white dwarf spectrophotometric standards & Should \\
-F9 & Moon phase-aware scheduling (dark/grey/bright) & Should \\
-F10 & Google Sheet integration for manual requests & Planned \\
+Fink & Rubin LSST & Primary LSST discovery + SN classification \\
+ANTARES & ZTF + Rubin & Galaxy-centric cone search; P(Ia) is a heuristic \emph{proxy} (not ML) \\
+ALeRCE-ZTF & ZTF & BHRF forced-photometry classifier \\
+ALeRCE-LSST & Rubin LSST & Stamp classifier (cone-search API ignores coordinates; queried globally then filtered locally) \\
+ATLAS & --- & Forced-photometry \emph{enrichment} for bright ($<20$ mag) candidates \\
+TNS & --- & Cross-match / duplicate \& spectroscopic-confirmation check \\
+Rubin RSP/TAP & Rubin LSST & Host-galaxy properties, authoritative photometry \\
 \bottomrule
 \end{tabular}
-\caption{Functional requirements}
-\end{table}
+\end{center}
 
-\subsection{Non-Functional Requirements}
+\subsection{Coverage and the Rubin downtime window}
+The southern Deep Drilling Fields (ELAIS-S1, EDFS\_a/b, $\delta \lesssim -32^\circ$) lie
+below ZTF/ANTARES/ALeRCE-DB coverage and are therefore \textbf{single-broker by
+construction}. This matters operationally: \textbf{Rubin LSST is offline 2026-08-09 through
+the end of August 2026}, during which the ZTF-fed brokers are the \emph{primary} alert
+source and the southern DDFs lose discovery coverage entirely.
 
-\begin{table}[H]
-\centering
+\subsection{Liveness reporting (review finding R5)}
+Brokers previously swallowed errors and returned empty results, so a silent outage was
+indistinguishable from a quiet sky --- unacceptable during the Rubin downtime. The
+aggregator now records, per broker, a status record
+\verb|{queried, responded, n_returned, error}|, written to a \texttt{broker\_status.json}
+sidecar and rendered as a ``Broker Status'' block in the run report. A broker raising an
+exception is recorded as queried-but-unresponsive rather than crashing the run.
+
+\subsection{Cross-matching (R13)}
+Cross-broker de-duplication uses true angular separation
+(\texttt{SkyCoord.separation}) against a fixed radius, replacing the previous RA/Dec box
+test whose effective radius shrank with declination (worst in the southern fields).
+
+\section{Merit scoring (alert pipeline)}
+The alert pipeline ranks candidates by a \emph{multiplicative} merit, so a candidate must
+score well on \emph{every} axis:
+\begin{equation}
+\mathrm{Merit} = w_{\rm time}\, w_{\rm mag}\, w_{\rm prob}\, w_{\rm host}\,
+w_{\rm ext}\, w_{\rm broker}\, w_{\rm moon}\, (w_{\rm salt}\, w_{\rm absmag}).
+\end{equation}
+\begin{itemize}[nosep]
+  \item $w_{\rm time} = \exp(-\Delta t^2 / 2\tau^2)$, $\tau = 10$\,d --- peaks at maximum light.
+  \item $w_{\rm mag} = \exp(-((m-m_{\rm opt})/\sigma_m)^2)$, $m_{\rm opt}\approx20.5$ (Magellan S/N sweet spot).
+  \item $w_{\rm prob}$ --- \textbf{ML-derived P(Ia) only (R7)}. The uncalibrated ANTARES
+  heuristic proxy is kept in a separate \texttt{antares\_proxy\_prob} column and excluded
+  from the pooled probability; ANTARES contributes to detection/coverage, not to P(Ia).
+  \item $w_{\rm host}, w_{\rm ext}$ --- host-morphology and Galactic-extinction factors.
+  \item $w_{\rm broker}$ --- \textbf{coverage-aware (R6)}:
+  $1 + 0.3\,\mathrm{clip}\!\big(\tfrac{n-1}{n_{\max}-1},0,1\big)$ where $n_{\max}$ is the
+  number of brokers that \emph{could} have seen the field given its declination. A
+  single-broker southern field is no longer penalized relative to a single-broker
+  equatorial field; full multi-broker coverage still earns up to $+30\%$.
+  \item $w_{\rm moon}$ --- \textbf{now folded into the ranking merit (R1)}. Previously the
+  moon penalty was computed during observability filtering but never multiplied into the
+  ranked merit, while the report \emph{claimed} it had been applied. Merit is now recomputed
+  with the real moon penalty as a single source of truth, and \texttt{candidates.csv}
+  (the orchestrator's input) carries the moon-aware merit.
+\end{itemize}
+
+\section{Prioritization (orchestrator)}
+\subsection{Composite score (R2, R14)}
+Each target receives a composite score that is a \emph{multiplicative science core} plus
+two \emph{additive nudges}:
+\begin{align}
+\texttt{science\_term} &= \texttt{SCIENCE\_SCALE}\times s \times b \times p \times c \\
+\texttt{observability\_term} &= \texttt{OBSERVABILITY\_BONUS}\times o \\
+\texttt{keyword\_term} &= \texttt{KEYWORD\_SCALE}\times k \\
+\texttt{total} &= \texttt{science\_term} + \texttt{observability\_term} + \texttt{keyword\_term}
+\end{align}
+with \texttt{SCIENCE\_SCALE}$=100$, \texttt{OBSERVABILITY\_BONUS}$=20$,
+\texttt{KEYWORD\_SCALE}$=50$. These constants, previously undocumented magic numbers, now
+carry rationale in code: the science core ($s,b,p,c\in[0,1]$) is the dominant axis (a P1 at
+peak on a healthy budget $\approx100$; a P4 $\approx20$), while observability and keyword
+nudges reorder within or across adjacent tiers but cannot by themselves leapfrog a full
+priority tier. The phase factor is clamped to $[0,1]$ so a malformed weight can never blow
+past the science core. Every target's component \textbf{breakdown is persisted}
+(\texttt{score\_breakdown.json}) and printed in the summary, so a PI can reconstruct any
+ranking by hand --- where:
+\begin{center}
 \begin{tabular}{@{}ll@{}}
 \toprule
-ID & Requirement \\
-\midrule
-NF1 & Run nightly without manual intervention \\
-NF2 & Produce human-readable audit trail \\
-NF3 & Graceful degradation if external APIs fail \\
-NF4 & Compatible with existing SkyPortal data flow \\
+$s$ science & P1--P4 $\rightarrow$ 1.0/0.7/0.4/0.2 \\
+$b$ budget & phase-aware factor 1.0/0.5/0.1 (\S\ref{sec:accounting}) \\
+$p$ phase & per-program phase preference (\S\ref{sec:phase}) \\
+$c$ completeness & per-target integration ledger factor (\S\ref{sec:ledger}) \\
+$o$ observability & fraction of night above the airmass limit \\
+$k$ keyword adj. & signed boosts/demotions from target notes \\
 \bottomrule
 \end{tabular}
-\caption{Non-functional requirements}
-\end{table}
+\end{center}
 
-%===============================================================================
-\section{Architecture}
+\subsection{Per-program light-curve phase preference}\label{sec:phase}
+\textbf{Motivation.} Different programs want a SN at different phases. Cosmology /
+standardization science favors \emph{peak} (best S/N, the canonical SALT epoch, and where
+luminosity-correlating spectral indicators are measured). Progenitor, circumstellar-material
+(``flash''), early-excess, and fast/exotic-transient science favor the \emph{rise} (outer
+ejecta, narrow CSM lines that are gone by peak, and transients that evolve too fast to wait).
+A single peak-centered weight cannot serve both.
 
-\subsection{Data Flow}
+\textbf{Implementation.} The phase factor is now computed relative to a per-program
+preferred epoch:
+\begin{equation}
+p = \exp\!\Big(-\frac{(\Delta t - \Delta t_{\rm pref})^2}{2\tau^2}\Big),\qquad
+\Delta t_{\rm pref} = \begin{cases} 0 & \text{preference } \texttt{peak} \\ -7\,\text{d} & \text{preference } \texttt{rising} \end{cases}
+\end{equation}
+with $\tau=10$\,d. Each \texttt{ProgramAllocation} carries a \texttt{phase\_preference}
+(\texttt{peak} default; e.g.\ Stubbs/Ia $=$ \texttt{peak}, Villar/exotic $=$ \texttt{rising}
+in the example allocations). This requires a \emph{signed} $\Delta t$ (days from peak;
+$<0$ rising), threaded from the \texttt{delta\_t} column of \texttt{candidates.csv} or from
+\texttt{peak\_mjd} for manual targets. The offset $\Delta t_{\rm pref} = -7$\,d is a tunable
+config value; its exact choice is a science-policy decision for the collaboration. Note an
+alert-sourced target without a \texttt{delta\_t} value falls back to the legacy symmetric
+weight (peak-meaningful only), since the sign is unrecoverable from $w_{\rm time}$ alone.
 
-\begin{figure}[H]
-\centering
-\begin{verbatim}
-    candidates.csv (from RubinAlerts)
-           |
-           v
-    +------------------+
-    |  normalize.py    |  Load targets, parse coords, estimate exposures
-    +--------+---------+
-             |
-             v
-    +------------------+
-    |  prioritizer.py  |  Composite scoring: science x budget x phase
-    +--------+---------+      + observability + keywords
-             |
-             v
-    +------------------+
-    |  planner.py      |  Greedy scheduling, standard star selection
-    +--------+---------+
-             |
-             v
-    +------------------+
-    |  accounting.py   |  Charge time, persist state
-    +--------+---------+
-             |
-             v
-       Output files:
-       - LLAMAS_{date}_timeline.txt
-       - LLAMAS_{date}_catalog.txt
-       - LLAMAS_{date}_summary.txt
-       - time_accounting.json
-\end{verbatim}
-\caption{LLAMAS orchestrator data flow}
-\end{figure}
+\subsection{Priority labels (R8)}
+Merit maps to P1--P4 by \emph{tonight's quartiles}; these are \textbf{within-night relative}
+labels, not absolute science classes (a ``P1'' on a quiet night may be weaker than a ``P4''
+on a rich one). The summary header states this caveat, and the $<4$-target degenerate case
+is guarded by rank-based assignment. Absolute, cross-night-calibrated thresholds were
+deliberately deferred until merit statistics across nights exist.
 
-\subsection{Module Responsibilities}
+\section{Scheduling}
+A greedy scheduler steps through the night, at each slot selecting the observable target
+maximizing
+\begin{equation}
+\text{score} - 10\times\text{airmass} - \texttt{SLEW\_PENALTY}\times\theta_{\rm slew},
+\end{equation}
+where $\theta_{\rm slew}$ is the angular distance from the previously scheduled target
+(\texttt{SLEW\_PENALTY}$=0.5$). The slew term (R9) is a modest tie-breaker --- the IFU's
+1-minute overhead model assumes negligible slew, which is reasonable for clustered DDF
+targets but needed a guard against large cross-sky jumps. The scoring mode
+(\texttt{prioritizer} vs.\ \texttt{fallback/priority-only}) is stamped into the summary
+header (R18). Standard stars are placed at start and end \emph{and} interleaved at a
+configurable mid-night cadence (\texttt{standard\_interleave\_hours}$=3.5$; R10) for
+spectrophotometric calibration over a long night. Exposures are split into sub-exposures of
+at most \texttt{max\_single\_exposure\_sec}$=900$\,s for cosmic-ray mitigation (R16,
+now config-driven).
 
-\begin{table}[H]
-\centering
-\small
-\begin{tabular}{@{}lp{10cm}@{}}
-\toprule
-Module & Purpose \\
-\midrule
-\texttt{config.py} & LLAMASConfig: LCO site ($-29.01^\circ$, $-70.69^\circ$, 2380m), 1-min IFU overhead, airmass limit 1.6, exposure table from proposal \\
-\texttt{models.py} & Target, ScheduledEntry, ProgramAllocation, ObsPlan dataclasses \\
-\texttt{normalize.py} & Load CSV/RubinAlerts targets, parse coordinates, estimate exposures \\
-\texttt{planner.py} & Twilight calculation, observability windows, greedy scheduling, standard star selection \\
-\texttt{prioritizer.py} & Composite scoring: science $\times$ budget $\times$ phase $\times$ observability + keywords \\
-\texttt{accounting.py} & TimeAccountant: per-program budgets (D/G/B), charge/reconcile, JSON persistence \\
-\texttt{output.py} & Timeline, Magellan TCS catalog, human-readable summary writers \\
-\texttt{reporting.py} & Nightly time reports, season progress with burn rate projections \\
-\bottomrule
-\end{tabular}
-\caption{Module responsibilities}
-\end{table}
-
-%===============================================================================
-\section{Component Details}
-
-\subsection{Target Normalization}
-
-Converts heterogeneous inputs to canonical schema:
-
-\begin{lstlisting}[language=Python]
-@dataclass
-class Target:
-    name: str
-    ra_deg: float
-    dec_deg: float
-    coord: SkyCoord  # Computed from ra_deg, dec_deg
-
-    mag: float
-    mag_filter: str  # 'r', 'g', 'i', etc.
-    redshift: float  # For exposure estimation
-
-    priority: int  # 1 (highest) to 4 (lowest)
-    program: str   # For time accounting
-
-    exposure_minutes: float
-    n_exposures: int
-
-    merit_score: float  # From RubinAlerts (optional)
-    phase_weight: float # w_time from alert pipeline
-\end{lstlisting}
-
-\subsubsection{Merit-to-Priority Mapping}
-
-When loading from RubinAlerts candidates, merit scores are converted to priorities via quartile mapping:
-\begin{itemize}
-    \item Top 25\% $\rightarrow$ P1
-    \item 25--50\% $\rightarrow$ P2
-    \item 50--75\% $\rightarrow$ P3
-    \item Bottom 25\% $\rightarrow$ P4
+\section{Time accounting}\label{sec:accounting}
+Per-program budgets are defined per moon phase (dark/grey/bright) in \texttt{allocations.yaml}.
+Time is \textbf{charged on schedule} and trued-up post-night by \texttt{reconcile}.
+Key review fixes:
+\begin{itemize}[nosep]
+  \item \textbf{State-path consistency (R3).} \texttt{run-nightly} and \texttt{reconcile}
+  now derive the state file from the same \texttt{output\_dir/time\_accounting.json}
+  convention (helper \texttt{\_default\_state\_path}); previously \texttt{reconcile} defaulted
+  to a different path, loaded empty state, and silently double-charged.
+  \item \textbf{Science-time charging (R4).} Charges \texttt{charged\_minutes} (exposure $+$
+  overhead) rather than the padded wall-clock window; gap-fill / end-of-night stretch is
+  tracked as \texttt{padding\_minutes} for transparency but never billed.
+  \item \textbf{Phase-aware budget factor (R11).} The 1.0/0.5/0.1 budget factor uses
+  remaining hours \emph{in the relevant moon phase} as a fraction of that phase's allocation
+  ($>50\%\rightarrow1.0$, $>0\rightarrow0.5$, exhausted $\rightarrow0.1$), instead of a
+  global hour cliff.
 \end{itemize}
 
-\subsection{Composite Priority Scoring}
+\section{Per-target integration ledger}\label{sec:ledger}
+A cross-night ledger (\texttt{target\_ledger.json}, stored beside the accounting state)
+answers a question the per-program budgets cannot: \emph{does this target already have enough
+integration time that we should stop re-observing it?} Without it, five consecutive nights
+could keep re-scheduling the same high-merit object.
 
-The prioritizer computes a composite score combining multiple factors:
-
-\begin{equation}
-\text{score} = (\text{science} \times 100 \times \text{budget} \times \text{phase}) + (\text{observability} \times 20) + (\text{keywords} \times 50)
-\end{equation}
-
-\textbf{Components:}
-\begin{itemize}
-    \item \textbf{science\_weight}: From explicit priority (P1=1.0, P2=0.7, P3=0.4, P4=0.2)
-    \item \textbf{budget\_factor}: 1.0 if $>$5h remaining, 0.5 if 0--5h, 0.1 if exhausted
-    \item \textbf{phase\_weight}: $w_\text{time}$ from alert pipeline merit function
-    \item \textbf{observability}: window\_hours / night\_hours (0--1)
-    \item \textbf{keyword\_adjustment}: ``HIGH PRIORITY'' +0.3, ``backup'' $-$0.3, etc.
+\subsection{Identity, completeness, and remaining-time scheduling}
+Targets are keyed by sky coordinate (matched within $2''$ angular separation, so a name
+change between nights --- e.g.\ an internal alert ID later upgraded to a TNS/IAU name --- is
+still recognized as the same object; names are tracked as aliases with the TNS name
+preferred as canonical). For each target:
+\begin{itemize}[nosep]
+  \item \texttt{completeness\_fraction} $=$ cumulative science seconds $/$ required seconds,
+  where the required exposure is \emph{recomputed every night} from the current
+  magnitude/redshift --- so a fading SN correctly needs more time.
+  \item A target is \textbf{satisfied} (excluded from scheduling) at fraction $\ge0.95$ or
+  when the remaining time is below a worthwhile $15$-minute block.
+  \item The completeness factor folded into the score is
+  $\max(0.15,\,1-\text{fraction})$, dropping to $0$ when fully done. The $0.15$ floor
+  prevents the opposite failure mode --- a target getting one short exposure and then being
+  dropped forever --- while the taper prevents endless re-picking.
+  \item A partially-observed target is scheduled for only its \emph{remaining} needed time.
 \end{itemize}
 
-The phase weight from the alert pipeline is:
-\begin{equation}
-w_\text{time} = \exp\left(-\frac{\Delta t^2}{2\tau^2}\right), \quad \tau = 10 \text{ days}
-\end{equation}
+\subsection{Phase-split integration count}
+The cumulative count is \textbf{split by phase bucket} derived from the observed $\Delta t$:
+\texttt{rising} ($\Delta t < -5$\,d), \texttt{peak} ($|\Delta t|\le5$\,d), \texttt{declining}
+($\Delta t > 5$\,d), or \texttt{all} when $\Delta t$ is unknown
+(\texttt{phase\_bucket\_window\_days}$=5$). Completeness is judged against the bucket the SN
+is in \emph{that night}, so a target that is ``done at peak'' can still be scheduled for
+needed rising-phase time, and vice versa. The ledger JSON format migrates old scalar records
+into the \texttt{all} bucket automatically.
 
-This automatically boosts targets near peak brightness.
+\subsection{Multi-group alert}
+When a single sky object is associated with more than one program --- whether from two
+same-position requests on one night or from a program already recorded against that object on
+a prior night --- the system emits an alert: a \texttt{logger.warning}, a
+``Multi-group Targets'' section in the summary, and a \texttt{multi\_group\_alerts.json}
+sidecar with schema \texttt{\{name, ra\_deg, dec\_deg, programs, phase\_preferences,
+observed\_phase, same\_phase\}}. The \texttt{same\_phase} flag tells PIs whether the
+groups want the object at the same phase (one observation may serve both) or different phases
+(coordination / separate observations needed). Conflict \emph{arbitration} is intentionally
+left to the PIs for now (see \S\ref{sec:future}).
 
-\subsection{Time Accounting}
+\section{Exposure estimation}
+The orchestrator estimates LLAMAS exposure via a cascade: a redshift$\rightarrow$time table
+from the proposal (now \textbf{linearly interpolated} to remove the previous hard cliffs,
+R12, clamped outside the tabulated range), falling back to magnitude scaling
+(mag 20 $\approx$ 45\,min, $2.5\times$ per magnitude), then a 45-minute default. The IFU
+overhead is $\sim$1\,min (vs.\ $\sim$10\,min for slit instruments). The orchestrator
+deliberately omits moon/airmass scaling here (the proposal table is the reference); this is a
+documented divergence from the alert-pipeline estimator, not an inconsistency.
 
-Multi-program budgets tracked per moon phase:
-
-\begin{lstlisting}
-# allocations.yaml
-semester: "2026B"
-default_program: "MAGNETS-Stubbs"
-programs:
-  - program: "MAGNETS-Stubbs"
-    pi: "Stubbs"
-    allocated_hours:
-      dark: 5.0
-      grey: 20.0
-      bright: 5.0
-  - program: "MAGNETS-Villar"
-    pi: "Villar"
-    allocated_hours:
-      dark: 4.0
-      grey: 8.0
-      bright: 4.0
-\end{lstlisting}
-
-\textbf{Charge-on-schedule}: Time is debited when the plan is generated. Post-night reconciliation adjusts for weather losses or target changes. Persistent JSON state maintains a full charge log for audit.
-
-\subsection{Greedy Scheduling Algorithm}
-
-The scheduler uses a greedy algorithm adapted from Alex's LDSS3 script:
-
-\begin{equation}
-\text{schedule\_score} = \text{composite\_priority} - \text{airmass} \times 10
-\end{equation}
-
-At each time step, the scheduler selects the observable target with the highest score. Falls back to $(5 - \text{priority}) \times 100 - \text{airmass} \times 10$ when no prioritizer is active (backward compatibility with \texttt{plan} command).
-
-\subsection{Exposure Time Estimation}
-
-Three-tier cascade from Stubbs 2026B proposal Table 1:
-
-\begin{table}[H]
-\centering
-\begin{tabular}{@{}llll@{}}
-\toprule
-Strategy & Input Required & Example & Fallback \\
-\midrule
-Redshift table & $z$ known & $z=0.25 \rightarrow 95$ min (grey) & --- \\
-Magnitude scaling & mag known & mag 20 $\rightarrow$ 45 min, 2.5$\times$/mag & If no $z$ \\
-Default & neither & 45 min & If no mag \\
-\bottomrule
-\end{tabular}
-\caption{Exposure estimation cascade}
-\end{table}
-
-\textbf{Moon phase scheduling} (from proposal Table 1):
-
-\begin{table}[H]
-\centering
-\begin{tabular}{@{}ccccc@{}}
-\toprule
-Redshift & Moon & Peak $r$ & Exposure & Binning \\
-\midrule
-0.10--0.20 & Bright & 19.3 & 35 min & 2$\times$ \\
-0.20--0.30 & Grey & 20.6 & 95 min & 2$\times$ \\
-0.30--0.35 & Grey/Dark & 21.3 & 45--160 min & 4$\times$ \\
-0.35--0.40 & Dark & 21.9 & 180 min & 4$\times$ \\
-\bottomrule
-\end{tabular}
-\caption{Exposure times by redshift and moon phase (Stubbs 2026B proposal)}
-\end{table}
-
-%===============================================================================
-\section{CLI Interface}
-
+\section{CLI and outputs}
 \begin{lstlisting}[language=bash]
-# Basic plan from CSV
-python -m orchestrator plan --date 2026-10-15 \
-    --targets targets.csv --moon grey --output-dir output/
-
-# Full nightly run with time accounting
-python -m orchestrator run-nightly --date 2026-10-15 \
-    --candidates candidates.csv \
-    --allocations allocations.yaml \
-    --moon grey --output-dir output/
-
-# Post-night reconciliation
-python -m orchestrator reconcile \
-    --allocations allocations.yaml \
-    --program MAGNETS-Stubbs \
-    --actual-hours 3.5 --moon grey --date 2026-10-15
-
-# Backward compatibility (no subcommand = plan)
-python -m orchestrator --date 2026-10-15 --targets targets.csv --moon grey
+python -m orchestrator plan          --date ... --targets t.csv --moon grey
+python -m orchestrator run-nightly   --date ... --candidates c.csv \
+        --allocations a.yaml --moon grey --output-dir out/ \
+        [--target-ledger out/target_ledger.json]
+python -m orchestrator reconcile        --program P --actual-hours 3.5 ...
+python -m orchestrator reconcile-target --name "SN 2026abc" --actual-minutes 90 \
+        [--phase peak] --date ...
+python -m orchestrator ledger        --target-ledger out/target_ledger.json \
+        [--show-satisfied]
 \end{lstlisting}
+Transparency artifacts written per run: the timeline, TCS catalog, and summary; plus
+\texttt{score\_breakdown.json} (per-target score components), \texttt{time\_accounting.json}
+(budget audit), \texttt{target\_ledger.json} (per-phase integration), \texttt{broker\_status.json}
+(ingestion liveness), and \texttt{multi\_group\_alerts.json}.
 
-%===============================================================================
-\section{Output Artifacts}
+\section{Testing}
+The system has 96 unit tests (\texttt{tests/}). A hard rule: \textbf{no test contacts a live
+broker, database, or API} --- brokers are stubbed and all state uses temp-file JSON.
+Coverage spans merit (moon folding, coverage-aware broker bonus), ingestion (liveness status,
+ML-only probability, angular-separation dedup), accounting (state path, science-time
+charging, phase-aware budget factor), prioritization (normalized score, breakdown invariant,
+slew penalty, small-list guard), exposure interpolation, standards insertion, the integration
+ledger (completeness, phase splitting, migration), phase preferences, and multi-group alerts.
 
-\begin{table}[H]
-\centering
-\begin{tabular}{@{}ll@{}}
-\toprule
-File & Contents \\
-\midrule
-\texttt{LLAMAS\_\{date\}\_timeline.txt} & UT observing sequence with times \\
-\texttt{LLAMAS\_\{date\}\_catalog.txt} & Magellan TCS 16-field catalog format \\
-\texttt{LLAMAS\_\{date\}\_summary.txt} & Human-readable plan with budget tracking \\
-\texttt{time\_accounting.json} & Persistent time charges and audit log \\
-\texttt{season\_report.txt} & Progress summary with burn rate projections \\
-\bottomrule
-\end{tabular}
-\caption{Output artifacts}
-\end{table}
-
-%===============================================================================
-\section{Key Design Decisions}
-
-\begin{enumerate}
-    \item \textbf{LLAMAS only} --- Orchestrator is for LLAMAS on Magellan/Baade exclusively. LDSS3 materials are reference only.
-
-    \item \textbf{1-minute IFU overhead} --- LLAMAS's integral field unit eliminates slit alignment, giving $\sim$10$\times$ better overhead than slit spectrographs.
-
-    \item \textbf{Composite priority with phase awareness} --- Targets near peak brightness are automatically boosted via the phase weight from the alert pipeline.
-
-    \item \textbf{Charge-on-schedule with reconciliation} --- Simple, prevents over-scheduling. Post-night reconciliation handles weather and target changes.
-
-    \item \textbf{Greedy scheduling} --- Fast ($O(N \log N)$), near-optimal for single-night scheduling.
-
-    \item \textbf{Quartile-based priority mapping} --- Automatic P1--P4 assignment from merit scores ensures fair distribution across priority levels.
+\section{Open questions and future work}\label{sec:future}
+\begin{enumerate}[nosep]
+  \item \textbf{Manual-request front end.} A Google-Sheet ingester (gspread + service
+  account) is planned so PIs can enqueue targets directly; the CSV path is the current stand-in.
+  \item \textbf{Phase-preference tuning.} The \texttt{rising} offset ($-7$\,d), $\tau$, and
+  the phase-bucket window ($5$\,d) are science-policy values to be set with Chris and
+  Ashley's group; per-program offsets (not just \texttt{peak}/\texttt{rising}) are a natural
+  extension.
+  \item \textbf{Multi-group conflict arbitration.} Today we alert; a future option is to
+  model an object wanted at two phases as two distinct requests, each with its own ledger
+  bucket and required time.
+  \item \textbf{Absolute priority thresholds.} Replace within-night quartile P-labels with
+  absolute merit thresholds once cross-night merit statistics are available.
+  \item \textbf{Multi-night look-ahead} scheduling, and surfacing broker liveness through the
+  \texttt{supernova\_monitor} pipeline path (currently only the \texttt{run\_tonight} path).
 \end{enumerate}
-
-%===============================================================================
-\section{Planned Features}
-
-\subsection{Google Sheet Integration}
-
-Allow PIs to manually enqueue targets not sourced from alerts:
-
-\begin{lstlisting}[language=Python]
-import gspread
-from google.oauth2.service_account import Credentials
-
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-
-def fetch_sheet(sheet_id: str, range_name: str) -> list[dict]:
-    creds = Credentials.from_service_account_file(
-        'credentials.json', scopes=SCOPES)
-    client = gspread.authorize(creds)
-    sheet = client.open_by_key(sheet_id)
-    worksheet = sheet.worksheet(range_name)
-    return worksheet.get_all_records()
-\end{lstlisting}
-
-\textbf{Use case}: PIs want to follow up interesting targets discovered through other channels (other surveys, ToO triggers, collaboration requests).
-
-%===============================================================================
-\section{Open Questions for Review}
-
-\begin{enumerate}
-    \item \textbf{Time accounting granularity}: Currently charge-on-schedule with post-night reconciliation. Is this sufficient, or do we need more sophisticated tracking?
-
-    \item \textbf{Priority conflicts}: How should we handle when multiple programs request the same target? Currently first-come-first-served based on plan generation order.
-
-    \item \textbf{Backup target policy}: Should backups count against time budget when scheduled? Currently they do.
-
-    \item \textbf{Multi-night planning}: Should we look ahead to optimize across nights? Currently single-night greedy.
-
-    \item \textbf{Keyword vocabulary}: Current keywords include ``HIGH PRIORITY'', ``classification needed'', ``rising'', ``near peak'', ``backup'', ``low prio'', ``if time''. Are these sufficient?
-
-    \item \textbf{Priority weight tuning}: Current weights (science$\times$100, observability$\times$20, keywords$\times$50) were chosen heuristically. Should these be configurable or tuned?
-\end{enumerate}
-
-%===============================================================================
-\section{References}
-
-\subsection{Local Files}
-\begin{itemize}
-    \item Alex's LDSS3 script: \texttt{ref/LDSS\_ObsPlan\_Generator/generate\_obsplan.py}
-    \item Stubbs 2026B proposal: \texttt{ref/cstubbs2026B (2) (1).pdf}
-    \item RubinAlerts pipeline: \texttt{run\_tonight.py}, \texttt{core/magellan\_planning.py}
-\end{itemize}
-
-\subsection{Proposal Details (Stubbs 2026B, propid 2835)}
-\begin{itemize}
-    \item Semester: 2026B (Jul 7 -- Jan 16)
-    \item Instrument: LLAMAS Integral Field Spectrograph
-    \item Telescope: Magellan Baade
-    \item Nights: 0.5D + 2.0G + 0.5B (30 hours total)
-    \item Targets: 29 (SNe Ia in DDFs + WD standards)
-    \item Magnitude range: $18.0 \leq r \leq 21.5$
-    \item Redshift range: $0.1 < z < 0.4$
-\end{itemize}
 
 \end{document}

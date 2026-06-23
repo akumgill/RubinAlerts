@@ -122,4 +122,24 @@ parameter defaults to today's behavior when no ledger/breakdown exists.
 shows latest-night required only; standards remain unbilled to science budgets (matches
 prior start/end behavior). Production cross-broker dedup radius left at 1.0″ (tests use 1.5″).
 
+---
+
+## Follow-on features (post-loop, PI-requested 2026-06-23)
+
+Chris's point: the most valuable phase to observe a SN depends on the program's science
+(cosmology/standardization → peak; progenitor/CSM/exotic → rise). Built as two commits
+(suite 74 → **96 tests**, all offline):
+
+| Commit | Feature |
+|--------|---------|
+| `996abbc` | **Per-program phase preference** — `ProgramAllocation.phase_preference` (`peak`/`rising`); phase factor `exp(-((Δt−Δt_pref)²)/2τ²)`, Δt_pref peak=0 / rising=−7 d, τ=10 d. Signed `Δt` threaded from candidates.csv `delta_t` and manual `peak_mjd`. `get_phase_preference()`; example allocations updated (Stubbs=peak, Villar=rising). |
+| `bcef109` | **Phase-split ledger + multi-group alert** — ledger cumulative split by observed-phase bucket (rising/peak/declining/all, ±5 d window); completeness judged per tonight's bucket so "done at peak" ≠ done on the rise. Old scalar ledgers auto-migrate. Multi-group alert (`multi_group_alerts.json` + summary + warning, with `same_phase` flag) when one object is wanted by >1 program. CLI `ledger` shows per-phase; `reconcile-target --phase`. |
+
+**Doc regeneration:** `docs/design/spectroscopic-orchestration-review.tex/.pdf` rebuilt from
+scratch (the Apr-2026 draft was made with a much earlier model) to reflect the current
+system — all R-fixes, W11 ledger, and these phase features. Compiles clean (8 pp).
+
+**Tunable / science-policy (decide with Chris + Ashley's group):** rising offset (−7 d), τ,
+phase-bucket window (±5 d); multi-group conflict *arbitration* deferred (currently alerts only).
+
 

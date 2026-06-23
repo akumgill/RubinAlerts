@@ -327,6 +327,14 @@ ledger (completeness, phase splitting, migration), phase preferences, and multi-
 
 \section{Open questions and future work}\label{sec:future}
 \begin{enumerate}[nosep]
+  \item \textbf{Alert-target ownership / charging \emph{(for collaboration discussion)}.}
+  Time is charged to each target's program, but alert-discovered candidates need an assigned
+  owner. This depends on the operating model: \textbf{(a)} the tool is a shared scheduler that
+  every group feeds its own targets into, and the alert stream simply serves as the
+  Stubbs-group SN~Ia source (alert candidates $\rightarrow$ the Ia program); or \textbf{(b)}
+  multiple groups also draw targets from the alert stream, which would call for a shared
+  alert budget or classification-based routing. The code currently assigns alert candidates
+  to a single configurable default program; the policy is deferred to the collaboration.
   \item \textbf{Manual-request front end.} A Google-Sheet ingester (gspread + service
   account) is planned so PIs can enqueue targets directly; the CSV path is the current
   stand-in. See \S\ref{sec:sheet} for the interface spec.

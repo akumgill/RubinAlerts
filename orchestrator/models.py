@@ -125,6 +125,10 @@ class ObsPlan:
 
     standards_start: Optional[dict] = None
     standards_end: Optional[dict] = None
+    # Mid-night standards inserted on a fixed cadence for long nights (R10).
+    # Each dict mirrors standards_start/end plus a 'time' key (astropy Time)
+    # marking when in the night it should be observed. Empty for short nights.
+    standards_mid: List[dict] = field(default_factory=list)
 
     # Which scoring path produced the ranking (R18): 'prioritizer' when
     # composite scores were supplied, else 'fallback/priority-only'.

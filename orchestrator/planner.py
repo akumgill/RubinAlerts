@@ -240,9 +240,55 @@ def _parse_standards(filename: str) -> list:
     return standards
 
 
+def _best_standard_at(suitable: list, obs_time: Time, config: LLAMASConfig,
+                      exclude: set = None) -> Tuple[Optional[dict], Optional[float]]:
+    """Pick the highest-scoring suitable standard observable at ``obs_time``.
+
+    Scoring favours low airmass and proximity to the ideal V magnitude.
+    Returns (std, airmass) or (None, None) if none is observable.
+    """
+    exclude = exclude or set()
+    best = None
+    best_score = -np.inf
+    best_am = None
+    for std in suitable:
+        if std['name'] in exclude:
+            continue
+        am = _get_airmass(std['coord'], obs_time, config.location)
+        if am > config.std_max_airmass or am < 1.0:
+            continue
+        mag_penalty = abs(std['vmag'] - config.std_ideal_vmag)
+        score = -am * 10 - mag_penalty * 2
+        if score > best_score:
+            best_score = score
+            best = std
+            best_am = am
+    return best, best_am
+
+
+def _std_dict(std: dict, am: float, time: Optional[Time] = None) -> dict:
+    """Build the output dict for a chosen standard."""
+    d = {
+        'name': std['name'], 'ra': std['ra'], 'dec': std['dec'],
+        'vmag': std['vmag'], 'airmass': am,
+        'spec_type': std.get('spec_type', ''),
+    }
+    if time is not None:
+        d['time'] = time
+    return d
+
+
 def select_standards(standards_path: str, evening: Time, morning: Time,
-                     config: LLAMASConfig = None) -> Tuple[Optional[dict], Optional[dict]]:
-    """Select standard stars for start and end of night.
+                     config: LLAMASConfig = None
+                     ) -> Tuple[Optional[dict], Optional[dict], List[dict]]:
+    """Select standard stars for start, end, and (long nights) mid-night.
+
+    In addition to the start/end pair, periodic mid-night standards are
+    inserted when the night is longer than ``config.standard_interleave_hours``
+    (R10) — the design spec calls for 2-3 interleaved standards/night for
+    spectrophotometric calibration. The number of mid standards is bounded by
+    the night length divided by the cadence, so it stays at the spec's 2-3
+    total rather than dozens.
 
     Parameters
     ----------
@@ -254,63 +300,34 @@ def select_standards(standards_path: str, evening: Time, morning: Time,
 
     Returns
     -------
-    (start_std, end_std) : tuple of dict or None
-        Each dict has: name, ra, dec, vmag, airmass, coord, spec_type.
+    (start_std, end_std, mid_stds) : tuple
+        start_std/end_std are dict or None; mid_stds is a (possibly empty)
+        list of dicts. Each dict has: name, ra, dec, vmag, airmass, spec_type
+        (mid dicts also carry 'time').
     """
     if config is None:
         config = LLAMAS_CONFIG
 
     if not Path(standards_path).exists():
         logger.warning("Standards file not found: %s", standards_path)
-        return None, None
+        return None, None, []
 
     all_stds = _parse_standards(standards_path)
     suitable = [s for s in all_stds
                 if config.std_min_vmag <= s['vmag'] <= config.std_max_vmag]
 
-    def _score(std, obs_time):
-        am = _get_airmass(std['coord'], obs_time, config.location)
-        if am > config.std_max_airmass or am < 1.0:
-            return None, am
-        mag_penalty = abs(std['vmag'] - config.std_ideal_vmag)
-        score = -am * 10 - mag_penalty * 2
-        return score, am
-
     # Start standard: ~15 min before evening twilight
-    start_time = evening - 15 * u.minute
-    best_start = None
-    best_start_score = -np.inf
-    best_start_am = None
+    best_start, best_start_am = _best_standard_at(
+        suitable, evening - 15 * u.minute, config)
 
-    for std in suitable:
-        score, am = _score(std, start_time)
-        if score is not None and score > best_start_score:
-            best_start_score = score
-            best_start = std
-            best_start_am = am
-
-    # End standard: ~15 min after morning twilight
-    end_time = morning + 15 * u.minute
-    best_end = None
-    best_end_score = -np.inf
-    best_end_am = None
-
-    for std in suitable:
-        if best_start and std['name'] == best_start['name']:
-            continue
-        score, am = _score(std, end_time)
-        if score is not None and score > best_end_score:
-            best_end_score = score
-            best_end = std
-            best_end_am = am
+    # End standard: ~15 min after morning twilight (avoid reusing start)
+    exclude_end = {best_start['name']} if best_start else set()
+    best_end, best_end_am = _best_standard_at(
+        suitable, morning + 15 * u.minute, config, exclude=exclude_end)
 
     start_dict = None
     if best_start:
-        start_dict = {
-            'name': best_start['name'], 'ra': best_start['ra'],
-            'dec': best_start['dec'], 'vmag': best_start['vmag'],
-            'airmass': best_start_am, 'spec_type': best_start.get('spec_type', ''),
-        }
+        start_dict = _std_dict(best_start, best_start_am)
         logger.info("Start standard: %s (V=%.2f, AM=%.2f)",
                      best_start['name'], best_start['vmag'], best_start_am)
     else:
@@ -318,17 +335,36 @@ def select_standards(standards_path: str, evening: Time, morning: Time,
 
     end_dict = None
     if best_end:
-        end_dict = {
-            'name': best_end['name'], 'ra': best_end['ra'],
-            'dec': best_end['dec'], 'vmag': best_end['vmag'],
-            'airmass': best_end_am, 'spec_type': best_end.get('spec_type', ''),
-        }
+        end_dict = _std_dict(best_end, best_end_am)
         logger.info("End standard: %s (V=%.2f, AM=%.2f)",
                      best_end['name'], best_end['vmag'], best_end_am)
     else:
         logger.warning("No suitable end standard found")
 
-    return start_dict, end_dict
+    # Mid-night standards on a fixed cadence (R10). Skip entirely if the night
+    # is no longer than one cadence interval — the start/end pair suffices.
+    mid_dicts = []
+    night_hours = (morning - evening).to(u.hour).value
+    cadence = config.standard_interleave_hours
+    if cadence > 0 and night_hours > cadence:
+        # Number of mid points = interior cadence boundaries. e.g. an 8h night
+        # at a 3.5h cadence -> boundaries at 3.5h, 7.0h -> 2 mids.
+        n_mid = max(1, int(math.floor(night_hours / cadence)) - 1)
+        for k in range(1, n_mid + 1):
+            obs_time = evening + (k * cadence) * u.hour
+            if obs_time >= morning:
+                break
+            best_mid, best_mid_am = _best_standard_at(
+                suitable, obs_time, config)
+            if best_mid is None:
+                logger.debug("No suitable mid standard at %s", obs_time.iso[11:16])
+                continue
+            mid_dicts.append(_std_dict(best_mid, best_mid_am, time=obs_time))
+            logger.info("Mid standard: %s (V=%.2f, AM=%.2f) @ %s",
+                        best_mid['name'], best_mid['vmag'], best_mid_am,
+                        obs_time.iso[11:16])
+
+    return start_dict, end_dict, mid_dicts
 
 
 # ---------------------------------------------------------------------------
@@ -566,8 +602,12 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             hours = charged_min / 60.0
             accountant.charge(entry.program, hours, moon_phase, date=date_str)
 
-    # 6. Select standard stars
-    std_start, std_end = select_standards(standards_path, evening, morning, config)
+    # 6. Select standard stars (start, end, and mid-night on long nights).
+    # Standards are calibration overhead: like the existing start/end ones,
+    # they are recorded on the plan but NOT billed to any science PROGRAM
+    # budget via the accountant. Mid standards follow the same convention.
+    std_start, std_end, std_mid = select_standards(
+        standards_path, evening, morning, config)
 
     # 7. Build and return ObsPlan
     # Record which scoring path ran (R18) and gather per-target breakdowns
@@ -589,6 +629,7 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
         backup=backup,
         standards_start=std_start,
         standards_end=std_end,
+        standards_mid=std_mid,
         scoring_mode=scoring_mode,
         score_breakdowns=score_breakdowns,
     )

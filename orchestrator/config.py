@@ -28,6 +28,12 @@ class LLAMASConfig:
     std_max_vmag: float = 12.0
     std_ideal_vmag: float = 10.5
     std_max_airmass: float = 1.5
+    # Cadence for mid-night standard insertion. In addition to the start/end
+    # standards, insert one standard roughly every this many hours of night
+    # so a long (6+ hr) night carries 2-3 standards for spectrophotometric
+    # calibration (design spec: interleave=true, observe_per_night=2-3).
+    # Nights shorter than this cadence get only the start/end pair.
+    standard_interleave_hours: float = 3.5
 
     # Twilight
     twilight_sun_alt: float = -18.0      # astronomical twilight

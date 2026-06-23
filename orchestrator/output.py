@@ -38,8 +38,29 @@ def write_timeline(plan: ObsPlan, path: str) -> None:
         )
         idx += 1
 
-    # Science targets
+    # Science targets, with mid-night standards interleaved by time so the
+    # calibration cadence is visible in the timeline.
+    mids = sorted(plan.standards_mid or [],
+                  key=lambda s: s['time'].mjd if s.get('time') is not None else 0)
+    mid_i = 0
+
+    def _emit_mid_before(t):
+        """Emit any mid-night standard whose target time precedes ``t``."""
+        nonlocal mid_i, idx
+        while mid_i < len(mids) and mids[mid_i].get('time') is not None and \
+                t is not None and mids[mid_i]['time'].mjd <= t.mjd:
+            s = mids[mid_i]
+            catalog_idx[s['name']] = idx
+            ts = s['time'].datetime.strftime('%H:%M')
+            lines.append(
+                f"{idx} {s['name']} near {ts} "
+                f"spec: 2x30s V={s['vmag']:.2f} standard"
+            )
+            idx += 1
+            mid_i += 1
+
     for entry in plan.scheduled:
+        _emit_mid_before(entry.start)
         catalog_idx[entry.target.name] = idx
         start_str = entry.start.datetime.strftime('%H:%M') if entry.start else '??:??'
         end_str = entry.end.datetime.strftime('%H:%M') if entry.end else '??:??'
@@ -51,6 +72,9 @@ def write_timeline(plan: ObsPlan, path: str) -> None:
             f"spec: {entry.exp_str} {comment}"
         )
         idx += 1
+
+    # Any remaining mid standards (times after the last science target)
+    _emit_mid_before(plan.morning_twilight)
 
     # Standard at end
     if plan.standards_end:
@@ -163,6 +187,10 @@ def write_summary(plan: ObsPlan, path: str, accountant=None) -> None:
     if plan.standards_start:
         s = plan.standards_start
         lines.append(f"Start standard:    {s['name']} (V={s['vmag']:.2f}, AM={s['airmass']:.2f})")
+    for s in (plan.standards_mid or []):
+        ts = s['time'].iso[11:16] if s.get('time') is not None else '??:??'
+        lines.append(f"Mid standard:      {s['name']} (V={s['vmag']:.2f}, "
+                     f"AM={s['airmass']:.2f}) @ {ts} UT")
     if plan.standards_end:
         s = plan.standards_end
         lines.append(f"End standard:      {s['name']} (V={s['vmag']:.2f}, AM={s['airmass']:.2f})")

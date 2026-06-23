@@ -72,9 +72,23 @@ def estimate_llamas_exposure(redshift: float, mag: float, moon: str = 'grey',
     """Estimate LLAMAS exposure time from target properties.
 
     Strategy:
-    1. If redshift is finite, use proposal Table 1 lookup.
+    1. If redshift is finite, interpolate proposal Table 1 (z -> minutes).
     2. Else if mag is finite, scale from reference (mag=20 -> 45 min).
     3. Else return fallback.
+
+    The redshift branch LINEARLY INTERPOLATES between the discrete
+    (z, minutes) rows of ``config.exposure_table`` instead of stepping
+    between them. A bare lookup put a ~85-min cliff between adjacent rows
+    (e.g. z=0.30 -> 95 min, z=0.301 -> 100 min); interpolation removes that.
+    Below the lowest tabulated z the first row's value is used; above the
+    highest, the last row's value is clamped (no runaway extrapolation).
+
+    NOTE: this orchestrator exposure is intentionally PROPOSAL-TABLE driven
+    and deliberately OMITS explicit moon/airmass scaling — those factors are
+    baked into the proposal's per-z budgets (and airmass is handled by the
+    observability/scheduling stage). This is the real divergence from the
+    alert-pipeline estimate (core.magellan_planning), which models moon and
+    airmass explicitly; it is documented here on purpose, not a bug to unify.
 
     Returns
     -------
@@ -83,15 +97,24 @@ def estimate_llamas_exposure(redshift: float, mag: float, moon: str = 'grey',
     if config is None:
         config = LLAMAS_CONFIG
 
-    # Strategy 1: redshift-based lookup from proposal Table 1
+    # Strategy 1: redshift-based interpolation of proposal Table 1.
     if math.isfinite(redshift):
-        for max_z, exp_min, constraint in config.exposure_table:
+        table = sorted(config.exposure_table, key=lambda row: row[0])
+        zs = [row[0] for row in table]
+        mins = [row[1] for row in table]
+        # numpy.interp clamps to the endpoints outside [zs[0], zs[-1]].
+        exp_min = float(np.interp(redshift, zs, mins))
+        # Moon constraint is a discrete label, so interpolation is meaningless:
+        # use the constraint of the first row whose z-ceiling covers this
+        # redshift (clamping to the last row beyond the table).
+        constraint = table[-1][2]
+        for max_z, _, c in table:
             if redshift <= max_z:
-                logger.debug("z=%.3f -> %d min (%s)", redshift, exp_min, constraint)
-                return float(exp_min), constraint
-        # Beyond table range: use last entry
-        _, exp_min, constraint = config.exposure_table[-1]
-        return float(exp_min), constraint
+                constraint = c
+                break
+        logger.debug("z=%.3f -> %.1f min (%s, interpolated)",
+                     redshift, exp_min, constraint)
+        return exp_min, constraint
 
     # Strategy 2: magnitude-based scaling
     if math.isfinite(mag):

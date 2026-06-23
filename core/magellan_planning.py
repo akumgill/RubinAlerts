@@ -109,9 +109,43 @@ MOON_PARAMS = {
 }
 
 
+def _coverage_aware_broker_bonus(num_brokers, max_possible_brokers,
+                                 max_bonus=0.3):
+    """Multi-broker agreement bonus scaled by achievable sky coverage.
+
+    Southern DDFs (dec <= -32) can only ever be reported by LSST-fed brokers,
+    so judging them on raw broker count penalises them geographically. Instead
+    we scale the bonus by the fraction of *achievable* brokers that detected
+    the object: full coverage earns the full bonus, a single-broker detection
+    earns no bonus regardless of region. This makes a single-broker southern
+    field tie with a single-broker equatorial field.
+
+    w_broker = 1 + max_bonus * clip((num_brokers - 1) / (max_possible - 1), 0, 1)
+
+    When max_possible <= 1 (only one broker can ever see it), the factor is
+    neutral (1.0).
+    """
+    num = np.asarray(num_brokers, dtype=float)
+    if max_possible_brokers is None:
+        max_poss = np.full_like(num, np.nan)
+    else:
+        max_poss = np.asarray(max_possible_brokers, dtype=float)
+
+    # Coverage fraction in [0, 1]; neutral (0 bonus) where max_possible <= 1.
+    denom = max_poss - 1.0
+    with np.errstate(invalid='ignore', divide='ignore'):
+        frac = (num - 1.0) / denom
+    frac = np.where(denom > 0, np.clip(frac, 0.0, 1.0), 0.0)
+
+    w_broker = 1.0 + max_bonus * frac
+    w_broker = np.where(np.isfinite(num), w_broker, 1.0)
+    return w_broker
+
+
 def compute_merit(delta_t, peak_mag,
                   ia_prob=None, host_morphology=None,
                   extinction_ebv=None, num_brokers=None,
+                  max_possible_brokers=None,
                   moon_penalty=None,
                   salt_chi2_dof=None, absolute_mag=None,
                   tau=10.0, mag_optimal=20.5,
@@ -125,7 +159,7 @@ def compute_merit(delta_t, peak_mag,
     W_p = ia_prob                               Classifier probability (0-1)
     W_h = morphology weight                     Host galaxy type weight
     W_ext = exp(-E(B-V) / 0.15)                Extinction penalty
-    W_broker = 1.0 + 0.1*(num_brokers - 1)     Multi-broker bonus
+    W_broker = 1 + 0.3*coverage_fraction       Coverage-aware multi-broker bonus
     W_moon = moon_penalty                       Moon proximity penalty (0-1)
     W_salt = SALT2 chi2/dof quality            Good template fit bonus (0.5-1.2)
     W_absmag = absolute mag consistency        SN Ia M_B ~ -19.3 (0.5-1.0)
@@ -150,6 +184,12 @@ def compute_merit(delta_t, peak_mag,
     num_brokers : int or array-like, optional
         Number of brokers that detected this object. More = higher confidence.
         If None, this factor is omitted (equivalent to 1.0).
+    max_possible_brokers : int or array-like, optional
+        Maximum number of brokers that could ever detect this object given its
+        declination (see core.ddf_fields.max_possible_brokers). The bonus is
+        scaled by (num_brokers - 1) / (max_possible_brokers - 1) so southern,
+        LSST-only fields are not geographically penalised. If None, the bonus
+        is neutral (1.0) for any broker count.
     moon_penalty : float or array-like, optional
         Moon proximity/phase penalty factor (0-1). 1.0 = no penalty.
         If None, this factor is omitted (equivalent to 1.0).
@@ -206,12 +246,10 @@ def compute_merit(delta_t, peak_mag,
         w_ext = np.where(np.isfinite(extinction_ebv), w_ext, 1.0)
         merit = merit * w_ext
 
-    # Multi-broker agreement bonus
+    # Multi-broker agreement bonus, scaled by achievable sky coverage so that
+    # single-broker southern (LSST-only) fields are not penalised vs equatorial.
     if num_brokers is not None:
-        num_brokers = np.asarray(num_brokers, dtype=float)
-        # 1 broker = 1.0, 2 brokers = 1.1, 3 brokers = 1.2
-        w_broker = 1.0 + 0.1 * np.clip(num_brokers - 1, 0, 3)
-        w_broker = np.where(np.isfinite(num_brokers), w_broker, 1.0)
+        w_broker = _coverage_aware_broker_bonus(num_brokers, max_possible_brokers)
         merit = merit * w_broker
 
     # Moon penalty (pre-computed from phase and separation)
@@ -255,6 +293,7 @@ def compute_merit(delta_t, peak_mag,
 def compute_merit_breakdown(delta_t, peak_mag,
                             ia_prob=None, host_morphology=None,
                             extinction_ebv=None, num_brokers=None,
+                            max_possible_brokers=None,
                             moon_penalty=None,
                             salt_chi2_dof=None, absolute_mag=None,
                             tau=10.0, mag_optimal=20.5,
@@ -316,9 +355,9 @@ def compute_merit_breakdown(delta_t, peak_mag,
         w_ext = np.where(np.isfinite(extinction_ebv), w_ext, 1.0)
 
     if num_brokers is not None:
-        num_brokers = np.asarray(num_brokers, dtype=float)
-        w_broker = 1.0 + 0.1 * np.clip(num_brokers - 1, 0, 3)
-        w_broker = np.where(np.isfinite(num_brokers), w_broker, 1.0)
+        # Coverage-aware: scale by achievable brokers at this declination so
+        # single-broker southern (LSST-only) fields tie with equatorial ones.
+        w_broker = _coverage_aware_broker_bonus(num_brokers, max_possible_brokers)
 
     if moon_penalty is not None:
         moon_penalty = np.asarray(moon_penalty, dtype=float)

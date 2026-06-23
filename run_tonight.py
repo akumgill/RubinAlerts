@@ -41,7 +41,7 @@ from core.magellan_planning import (
     write_magellan_catalog, radec_to_sexagesimal, prioritize_targets,
     optimize_observing_sequence,
 )
-from core.ddf_fields import DDF_FIELDS, is_in_ddf
+from core.ddf_fields import DDF_FIELDS, is_in_ddf, max_possible_brokers
 
 # Multi-broker support
 try:
@@ -1014,6 +1014,9 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
         # Get extinction and broker count for merit calculation
         extinction_ebv = cand.get('E_BV', cand.get('ebv', np.nan))
         num_brokers = cand.get('num_brokers', 1)
+        # Coverage-aware broker bonus: southern (dec <= -32) DDFs can only ever
+        # be seen by LSST-fed brokers, so cap the achievable broker count by dec.
+        max_brokers = max_possible_brokers(cand['dec'])
 
         # Get redshift info
         z_info = redshifts.get(did, {})
@@ -1036,8 +1039,10 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
         salt_z = salt.get('z', np.nan) if salt and salt.get('status') == 'ok' else np.nan
         salt_peak_mag_B = salt.get('peak_mag_B', np.nan) if salt and salt.get('status') == 'ok' else np.nan
 
-        # Merit score with all factors (moon penalty computed later in observability filter)
-        # Use breakdown version to get individual component weights
+        # Merit score with all factors. Moon penalty is NOT applied here — it
+        # depends on the observing night and is folded in after
+        # filter_observable_targets() via recompute_merit_with_moon(), which
+        # re-sorts the plan. Use the breakdown to get individual component weights.
         if np.isfinite(delta_t) and np.isfinite(peak_mag):
             prob_arg = ia_prob if np.isfinite(ia_prob) else None
             ext_arg = extinction_ebv if np.isfinite(extinction_ebv) else None
@@ -1049,6 +1054,7 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
                 host_morphology=host_morph,
                 extinction_ebv=ext_arg,
                 num_brokers=num_brokers,
+                max_possible_brokers=max_brokers,
                 salt_chi2_dof=salt_arg,
                 absolute_mag=absmag_arg,
             )
@@ -1059,11 +1065,13 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
             w_host = float(breakdown['w_host'])
             w_ext = float(breakdown['w_ext'])
             w_broker = float(breakdown['w_broker'])
+            w_moon = float(breakdown['w_moon'])
             w_salt = float(breakdown['w_salt'])
             w_absmag = float(breakdown['w_absmag'])
         else:
             merit = np.nan
             w_time = w_mag = w_prob = w_host = w_ext = w_broker = np.nan
+            w_moon = np.nan
             w_salt = w_absmag = np.nan
 
         rows.append({
@@ -1075,6 +1083,7 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
             'early_ia_score': cand.get('early_ia_score', np.nan),
             'brokers_detected': cand.get('brokers_detected', 'Fink'),
             'num_brokers': num_brokers,
+            'max_possible_brokers': max_brokers,
             'mean_ia_prob': cand.get('mean_ia_prob', np.nan),
             'host_morphology': host_morph,
             'nuclear_offset_arcsec': nuclear_offset,
@@ -1118,6 +1127,10 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
             'w_host': w_host,
             'w_ext': w_ext,
             'w_broker': w_broker,
+            # w_moon / moon_penalty start neutral; recompute_merit_with_moon()
+            # overwrites them (and re-sorts merit) once the night's moon is known.
+            'w_moon': w_moon,
+            'moon_penalty': float('nan'),
             'w_salt': w_salt,
             'w_absmag': w_absmag,
             'object_id': did,  # alias for magellan_planning
@@ -1127,6 +1140,73 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
     if len(summary) > 0:
         summary = summary.sort_values('merit', ascending=False, na_position='last')
     return summary
+
+
+def recompute_merit_with_moon(plan_df):
+    """Fold the night's moon penalty into the ranking merit and re-sort.
+
+    build_summary_table() computes merit without a moon penalty (the night is
+    not yet known there). filter_observable_targets() then attaches a per-target
+    ``moon_penalty`` column. This recomputes merit + every ``w_*`` component
+    (including ``w_moon``) using that real penalty, overwrites those columns in
+    place, and re-sorts by the moon-aware merit so the moon actually drives the
+    ranking. The report writer and candidates.csv both read these columns, so
+    there is a single source of truth for merit and its breakdown.
+
+    Parameters
+    ----------
+    plan_df : pd.DataFrame
+        Output of filter_observable_targets(), must carry the columns produced
+        by build_summary_table() plus ``moon_penalty``.
+
+    Returns
+    -------
+    pd.DataFrame — copy with merit / w_* recomputed and re-sorted by merit.
+    """
+    if len(plan_df) == 0 or 'moon_penalty' not in plan_df.columns:
+        return plan_df
+
+    df = plan_df.copy()
+
+    # Ensure the columns we overwrite are float-typed so in-place assignment
+    # of recomputed weights never hits a dtype (int->float) cast error.
+    merit_cols = ['merit', 'w_time', 'w_mag', 'w_prob', 'w_host', 'w_ext',
+                  'w_broker', 'w_moon', 'w_salt', 'w_absmag']
+    for col in merit_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(float)
+
+    def _arg(row, col):
+        val = row.get(col, np.nan)
+        return val if (val is not None and np.isfinite(val)) else None
+
+    for idx, row in df.iterrows():
+        delta_t = row.get('delta_t', np.nan)
+        peak_mag = row.get('peak_mag', np.nan)
+        if not (np.isfinite(delta_t) and np.isfinite(peak_mag)):
+            continue
+
+        moon_pen = row.get('moon_penalty', np.nan)
+        breakdown = compute_merit_breakdown(
+            delta_t, peak_mag,
+            ia_prob=_arg(row, 'sn_score') if (
+                pd.notna(row.get('sn_score')) and float(row.get('sn_score', 0)) > 0
+            ) else _arg(row, 'mean_ia_prob'),
+            host_morphology=row.get('host_morphology', 'unknown'),
+            extinction_ebv=_arg(row, 'E_BV'),
+            num_brokers=row.get('num_brokers', 1),
+            max_possible_brokers=row.get('max_possible_brokers'),
+            moon_penalty=moon_pen if np.isfinite(moon_pen) else None,
+            salt_chi2_dof=_arg(row, 'salt_chi2_dof'),
+            absolute_mag=_arg(row, 'absolute_mag'),
+        )
+        df.at[idx, 'merit'] = float(breakdown['merit'])
+        for key in ('w_time', 'w_mag', 'w_prob', 'w_host', 'w_ext',
+                    'w_broker', 'w_moon', 'w_salt', 'w_absmag'):
+            df.at[idx, key] = float(breakdown[key])
+
+    df = df.sort_values('merit', ascending=False, na_position='last')
+    return df.reset_index(drop=True)
 
 
 def generate_light_curve_plots(fit_results, lc_dir, summary_df):
@@ -1681,7 +1761,9 @@ def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path):
             w_host = f"{row['w_host']:.3f}" if np.isfinite(row.get('w_host', np.nan)) else '--'
             w_ext = f"{row['w_ext']:.3f}" if np.isfinite(row.get('w_ext', np.nan)) else '--'
             w_broker = f"{row['w_broker']:.3f}" if np.isfinite(row.get('w_broker', np.nan)) else '--'
-            w_moon = f"{row.get('moon_penalty', 1.0):.3f}" if np.isfinite(row.get('moon_penalty', np.nan)) else '1.000'
+            # Read w_moon from the SAME breakdown that produced merit (single
+            # source of truth), not from moon_penalty directly.
+            w_moon = f"{row['w_moon']:.3f}" if np.isfinite(row.get('w_moon', np.nan)) else '1.000'
 
             if has_salt_weight:
                 w_salt = f"{row['w_salt']:.3f}" if np.isfinite(row.get('w_salt', np.nan)) else '1.000'
@@ -1972,11 +2054,27 @@ def main():
                 max_airmass=args.max_airmass,
                 min_hours_up=0.5,
             )
+            # Fold the night's moon penalty into the ranking merit (and w_moon)
+            # now that moon_penalty has been computed; this re-sorts by merit.
+            plan = recompute_merit_with_moon(plan)
         except Exception as e:
             logger.warning("Observability calculation failed: %s. Using all targets.", e)
             plan = summary.copy()
     else:
         plan = summary.copy()
+
+    # Propagate the moon-aware merit/breakdown back onto the summary frame so
+    # candidates.csv and the PDF report rank/report identically to the plan.
+    moon_cols = ['merit', 'w_time', 'w_mag', 'w_prob', 'w_host', 'w_ext',
+                 'w_broker', 'w_moon', 'w_salt', 'w_absmag',
+                 'moon_penalty', 'moon_separation', 'moon_illumination']
+    avail_cols = [c for c in moon_cols if c in plan.columns]
+    if avail_cols and 'diaObjectId' in plan.columns:
+        moon_lookup = plan.set_index('diaObjectId')[avail_cols]
+        for col in avail_cols:
+            summary[col] = summary['diaObjectId'].map(moon_lookup[col])
+        summary = summary.sort_values('merit', ascending=False, na_position='last')
+        summary = summary.reset_index(drop=True)
 
     # Prioritize targets by time-criticality, setting time, and merit
     plan = prioritize_targets(plan)

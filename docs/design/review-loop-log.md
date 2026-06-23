@@ -58,3 +58,35 @@ Read-only critique of the whole design. 18 findings; Top-5 must-fix in **bold**.
   Yize/Villar 8/10, 8/13, 8/16 (full), 9/6, 9/7, 10/3 (half); Conor Ransome LLAMAS
   8/4, 11/2, 12/8 + LDSS3 8/7, 9/12, 10/5. (More observers likely TBD.)
 
+### 2026-06-23 — Stage 2: Architect response + plan
+
+Validated all findings against code. Notable pushback / corrections:
+- **R12** corrected: `2.5^dmag` ≡ `10^(0.4·dmag)` (identical) — that sub-claim void. Real
+  issue is the discrete redshift-table cliffs + omitted moon/airmass. "Unify on one
+  exposure model" **rejected** (subsystems have different inputs: z-driven vs mag-driven).
+- **R8** absolute merit thresholds **deferred** (merit not cross-night calibrated) → guard
+  <4-target case + document P-labels are within-night relative.
+- **R15** "require explicit program" / build Sheet ingester **rejected** (breaking /
+  out-of-scope) → honor optional columns with soft default + warning.
+- **R9** full path optimization & **R18** single scoring function **rejected** as
+  over-engineering for clustered DDF targets → modest slew penalty + mode stamp.
+- **R14** merged into R2 (transparency half).
+- **R1** found *worse*: `candidates.csv` (orchestrator's input) carries moon-free merit
+  with no moon_penalty column at all.
+- **R5** promoted to highest ingestion priority given Rubin downtime.
+
+**Sequenced plan (engineer executes top-to-bottom; every test runs offline w/ fixtures):**
+
+| Chunk | Items | Resolves | Commit theme |
+|-------|-------|----------|--------------|
+| A | W0 scaffold pytest + fixtures | — | test scaffold |
+| B | W1 fold moon into merit; W2 coverage-aware w_broker | R1, R6 | merit correctness |
+| C | W3 broker-liveness status; W4 ML-only w_prob + angular-sep dedup | R5, R7, R13 | ingestion safety |
+| D | W5 unify state path; W6 charge science-time + phase-aware budget_factor | R3, R4, R11 | accounting |
+| E | W7 normalized/documented score + breakdown; W8 slew penalty + mode stamp + relative-P guard | R2, R8, R9, R14, R18 | prioritizer/scheduler |
+| F | W9 interpolate exposure table + mid-night standards | R10, R12 | exposure/standards |
+| G | W10 config/doc cleanups + manual-target columns | R15, R16, R17 | chore |
+
+Hard rule: **no test may hit a live broker/DB/API** — mock/stub everything.
+
+

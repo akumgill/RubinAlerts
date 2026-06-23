@@ -153,6 +153,11 @@ class ObsPlan:
     # fallback path ran. Used by write_summary to persist score_breakdown.json
     # and render the per-target breakdown table.
     score_breakdowns: dict = field(default_factory=dict)
+    # Multi-group alerts (W12): objects wanted by >1 distinct MAGNETS program.
+    # Each dict: {name, ra_deg, dec_deg, programs, phase_preferences,
+    # observed_phase, same_phase}. Written to multi_group_alerts.json and
+    # rendered in the summary so coordinating PIs can see the overlap.
+    multi_group_alerts: list = field(default_factory=list)
 
     @property
     def night_duration_hours(self) -> float:

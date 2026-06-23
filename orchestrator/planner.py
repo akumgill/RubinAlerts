@@ -17,6 +17,7 @@ import astropy.units as u
 
 from .config import LLAMAS_CONFIG, LLAMASConfig
 from .models import Target, ScheduledEntry, ObsPlan
+from .target_ledger import phase_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -619,9 +620,13 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                 req_full = getattr(t, 'required_minutes_full', float('nan'))
                 required_seconds = (req_full * 60.0
                                     if math.isfinite(req_full) else float('nan'))
+                # Charge tonight's phase bucket and record the program so
+                # peak/rising integration is tracked separately (W12).
+                bucket = phase_bucket(t.delta_t, config.phase_bucket_window_days)
                 ledger.charge(t, science_seconds=charged_min * 60.0,
                               date=date_str, mag=t.mag, redshift=t.redshift,
-                              required_seconds=required_seconds)
+                              required_seconds=required_seconds,
+                              phase=bucket, program=t.program)
 
     # 6. Select standard stars (start, end, and mid-night on long nights).
     # Standards are calibration overhead: like the existing start/end ones,

@@ -241,7 +241,7 @@ def cmd_reconcile_target(args):
         sys.exit(1)
 
     delta = ledger.reconcile(target, actual_seconds=args.actual_minutes * 60.0,
-                             date=args.date)
+                             date=args.date, phase=args.phase)
     if abs(delta) < 0.1:
         print(f"No adjustment needed for {target.name or 'target'} on {args.date}")
     else:
@@ -278,6 +278,15 @@ def cmd_ledger(args):
                 if info['fraction'] == info['fraction'] else "?")
         print(f"{name:<20} {info['cumulative_min']:>7.0f}m {req:>9} "
               f"{frac:>6} {info['status']:>10}")
+        # Per-phase breakdown (W12) and the programs that charged this target.
+        by_phase = info.get('cumulative_min_by_phase', {})
+        if by_phase:
+            phase_str = ' '.join(f"{ph}={m:.0f}m"
+                                 for ph, m in sorted(by_phase.items()) if m)
+            print(f"  {'phases:':<18} {phase_str}")
+        programs = info.get('programs', [])
+        if programs:
+            print(f"  {'programs:':<18} {', '.join(programs)}")
 
 
 def _add_plan_args(parser):
@@ -361,6 +370,10 @@ def main():
                            help='Target Dec in degrees (with --ra)')
     rt_parser.add_argument('--actual-minutes', type=float, required=True,
                            help='Actual minutes integrated on this target')
+    rt_parser.add_argument('--phase', default=None,
+                           choices=['rising', 'peak', 'declining', 'all'],
+                           help='Phase bucket to true up (default: the '
+                                "undifferentiated 'all' pool)")
     rt_parser.add_argument('--date', required=True,
                            help='Date to reconcile YYYY-MM-DD')
     rt_parser.add_argument('--output-dir', default='output/',

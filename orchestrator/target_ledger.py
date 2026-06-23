@@ -20,6 +20,7 @@ State persists as JSON, mirroring ``TimeAccountant``'s load/_persist pattern.
 
 import json
 import logging
+import math
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,22 +34,65 @@ from .models import Target
 logger = logging.getLogger(__name__)
 
 
+def phase_bucket(delta_t, window: float) -> str:
+    """Light-curve phase bucket for a signed time-from-peak (days).
+
+    Buckets so integration time can be tracked SEPARATELY per phase — a target
+    "done at peak" should not have its still-needed RISING time suppressed.
+
+        NaN / None    -> 'all'        (no timing info; one undifferentiated pool)
+        delta_t < -W  -> 'rising'     (pre-peak, early ejecta)
+        |delta_t| <= W -> 'peak'      (within the SALT epoch window)
+        delta_t > W   -> 'declining'  (post-peak)
+
+    where W = ``window`` (config.phase_bucket_window_days).
+    """
+    if delta_t is None:
+        return 'all'
+    try:
+        dt = float(delta_t)
+    except (TypeError, ValueError):
+        return 'all'
+    if not math.isfinite(dt):
+        return 'all'
+    if dt < -window:
+        return 'rising'
+    if dt > window:
+        return 'declining'
+    return 'peak'
+
+
 @dataclass
 class TargetLedgerEntry:
-    """Cumulative integration record for a single sky position."""
+    """Cumulative integration record for a single sky position.
+
+    Integration is tracked SEPARATELY per phase bucket
+    (``cumulative_seconds_by_phase``) so a target's peak-epoch time and its
+    rising-epoch time do not cross-satisfy. ``cumulative_science_seconds`` is a
+    read accessor summing across buckets, preserving the prior scalar API.
+    """
 
     coord_key: str = ''
     canonical_name: str = ''
     aliases: list = field(default_factory=list)
     ra_deg: float = float('nan')
     dec_deg: float = float('nan')
-    cumulative_science_seconds: float = 0.0
+    # Per-phase cumulative science seconds: {'all'|'rising'|'peak'|'declining'
+    # -> seconds}. Old-format scalars migrate into the 'all' bucket on load.
+    cumulative_seconds_by_phase: dict = field(default_factory=dict)
+    # Distinct programs that have charged this target (for multi-group alerts).
+    programs: list = field(default_factory=list)
     # Per-night required-exposure snapshots: {date, required_s, mag, redshift}.
     required_seconds_history: list = field(default_factory=list)
     # Dates on which any science time was charged.
     nights_observed: list = field(default_factory=list)
-    # Audit trail: {date, seconds, type ('schedule'|'reconcile'), timestamp}.
+    # Audit trail: {date, seconds, phase, program, type, timestamp}.
     charge_log: list = field(default_factory=list)
+
+    @property
+    def cumulative_science_seconds(self) -> float:
+        """Total science seconds across all phase buckets (scalar-API accessor)."""
+        return sum(self.cumulative_seconds_by_phase.values())
 
 
 @dataclass
@@ -93,14 +137,22 @@ class TargetLedger:
             state = json.load(f)
 
         for key, ent in state.get('entries', {}).items():
+            # Per-phase buckets. MIGRATE old-format state: an entry persisted
+            # before phase-splitting carries a scalar cumulative_science_seconds
+            # -> load it into the undifferentiated 'all' bucket.
+            by_phase = dict(ent.get('cumulative_seconds_by_phase', {}))
+            if not by_phase and 'cumulative_science_seconds' in ent:
+                old_scalar = ent.get('cumulative_science_seconds', 0.0) or 0.0
+                if old_scalar:
+                    by_phase = {'all': old_scalar}
             self.entries[key] = TargetLedgerEntry(
                 coord_key=ent.get('coord_key', key),
                 canonical_name=ent.get('canonical_name', ''),
                 aliases=list(ent.get('aliases', [])),
                 ra_deg=ent.get('ra_deg', float('nan')),
                 dec_deg=ent.get('dec_deg', float('nan')),
-                cumulative_science_seconds=ent.get(
-                    'cumulative_science_seconds', 0.0),
+                cumulative_seconds_by_phase=by_phase,
+                programs=list(ent.get('programs', [])),
                 required_seconds_history=list(
                     ent.get('required_seconds_history', [])),
                 nights_observed=list(ent.get('nights_observed', [])),
@@ -194,45 +246,61 @@ class TargetLedger:
     # Completeness queries
     # ------------------------------------------------------------------
 
-    def cumulative_seconds(self, target: Target) -> float:
-        """Cumulative science seconds integrated on this target so far."""
+    def cumulative_seconds(self, target: Target, phase=None) -> float:
+        """Cumulative science seconds integrated on this target so far.
+
+        ``phase`` given -> seconds in that bucket only (0.0 if absent); None ->
+        the SUM across all buckets (the prior scalar behaviour).
+        """
         ent = self._find_entry(target)
-        return ent.cumulative_science_seconds if ent else 0.0
+        if ent is None:
+            return 0.0
+        if phase is None:
+            return ent.cumulative_science_seconds
+        return ent.cumulative_seconds_by_phase.get(phase, 0.0)
 
     def completeness_fraction(self, target: Target,
-                              required_minutes: float) -> float:
-        """Fraction of the required integration already accumulated."""
+                              required_minutes: float, phase=None) -> float:
+        """Fraction of the required integration already accumulated.
+
+        With ``phase`` set, the fraction is judged against that bucket only, so
+        a target satisfied at peak can still be incomplete in the rising bucket.
+        """
         if not required_minutes or required_minutes <= 0:
             return 0.0
-        return self.cumulative_seconds(target) / (required_minutes * 60.0)
+        return self.cumulative_seconds(target, phase) / (required_minutes * 60.0)
 
     def remaining_minutes(self, target: Target,
-                          required_minutes: float) -> float:
-        """Integration minutes still needed (>= 0)."""
+                          required_minutes: float, phase=None) -> float:
+        """Integration minutes still needed (>= 0), optionally per phase."""
         return max(0.0, required_minutes
-                   - self.cumulative_seconds(target) / 60.0)
+                   - self.cumulative_seconds(target, phase) / 60.0)
 
-    def is_satisfied(self, target: Target, required_minutes: float) -> bool:
+    def is_satisfied(self, target: Target, required_minutes: float,
+                     phase=None) -> bool:
         """True if the target has enough integration to skip re-observing.
 
         Satisfied when either the completeness fraction has reached
         ``satisfied_fraction`` OR the remaining time is shorter than a
-        worthwhile observing block (``min_block_minutes``).
+        worthwhile observing block (``min_block_minutes``). With ``phase`` set,
+        the judgement is per-bucket: rising-phase integration does not satisfy
+        the peak bucket and vice versa.
         """
-        frac = self.completeness_fraction(target, required_minutes)
+        frac = self.completeness_fraction(target, required_minutes, phase)
         if frac >= self.satisfied_fraction:
             return True
-        return self.remaining_minutes(target, required_minutes) < self.min_block_minutes
+        return self.remaining_minutes(target, required_minutes, phase) \
+            < self.min_block_minutes
 
     def completeness_factor(self, target: Target,
-                            required_minutes: float) -> float:
+                            required_minutes: float, phase=None) -> float:
         """Multiplicative score factor in (0, 1] from completeness.
 
         Fully done (>=1.0) -> 0.0 (drop to the bottom); nothing done (<=0) ->
         1.0 (full weight); in between -> 1 - fraction, floored at
         ``min_factor`` so a near-done high-priority target is still rankable.
         """
-        frac = self.completeness_fraction(target, required_minutes)
+        frac = self.completeness_fraction(target, required_minutes, phase)
         if frac >= 1.0:
             return 0.0
         if frac <= 0.0:
@@ -245,10 +313,20 @@ class TargetLedger:
 
     def charge(self, target: Target, science_seconds: float, date: str,
                mag: float = float('nan'), redshift: float = float('nan'),
-               required_seconds: float = float('nan')) -> None:
-        """Charge science integration time against a target's ledger entry."""
+               required_seconds: float = float('nan'),
+               phase=None, program=None) -> None:
+        """Charge science integration time against a target's ledger entry.
+
+        ``phase`` selects the bucket (None -> the undifferentiated 'all' pool);
+        ``program`` records which program spent the time (for multi-group
+        alerts).
+        """
         ent = self.get_or_create(target)
-        ent.cumulative_science_seconds += science_seconds
+        bucket = phase or 'all'
+        ent.cumulative_seconds_by_phase[bucket] = \
+            ent.cumulative_seconds_by_phase.get(bucket, 0.0) + science_seconds
+        if program and program not in ent.programs:
+            ent.programs.append(program)
         ent.required_seconds_history.append({
             'date': date,
             'required_s': round(required_seconds, 1)
@@ -261,36 +339,47 @@ class TargetLedger:
         ent.charge_log.append({
             'date': date,
             'seconds': round(science_seconds, 1),
+            'phase': bucket,
+            'program': program,
             'type': 'schedule',
             'timestamp': datetime.now(timezone.utc).isoformat(),
         })
-        logger.info("Charged %.0fs to %s (cumulative %.0fs)",
-                    science_seconds, ent.canonical_name,
+        logger.info("Charged %.0fs to %s [%s] (cumulative %.0fs)",
+                    science_seconds, ent.canonical_name, bucket,
                     ent.cumulative_science_seconds)
         self._persist()
 
     def reconcile(self, target: Target, actual_seconds: float,
-                  date: str) -> float:
+                  date: str, phase=None) -> float:
         """Adjust cumulative so the date's total matches ``actual_seconds``.
 
         Computes the delta versus all prior schedule+reconcile charges for
         that date, applies it, logs a 'reconcile' entry, and persists. Returns
         the delta (0.0 if no change was needed).
+
+        ``phase`` selects which bucket the true-up adjusts (None -> the 'all'
+        bucket, preserving the prior single-pool behaviour). A per-phase
+        reconciliation only compares against prior charges in that same bucket.
         """
         ent = self.get_or_create(target)
+        bucket = phase or 'all'
         prior = sum(e['seconds'] for e in ent.charge_log
                     if e['date'] == date
-                    and e['type'] in ('schedule', 'reconcile'))
+                    and e['type'] in ('schedule', 'reconcile')
+                    and (phase is None or e.get('phase', 'all') == bucket))
         delta = actual_seconds - prior
         if abs(delta) < 0.1:
             logger.info("No target reconciliation needed for %s on %s",
                         ent.canonical_name, date)
             return 0.0
 
-        ent.cumulative_science_seconds += delta
+        ent.cumulative_seconds_by_phase[bucket] = \
+            ent.cumulative_seconds_by_phase.get(bucket, 0.0) + delta
         ent.charge_log.append({
             'date': date,
             'seconds': round(delta, 1),
+            'phase': bucket,
+            'program': None,
             'type': 'reconcile',
             'timestamp': datetime.now(timezone.utc).isoformat(),
         })
@@ -304,7 +393,11 @@ class TargetLedger:
     # ------------------------------------------------------------------
 
     def summary(self) -> dict:
-        """Per-entry summary keyed by canonical name."""
+        """Per-entry summary keyed by canonical name.
+
+        Each entry includes ``cumulative_min_by_phase`` (the per-phase
+        breakdown) and the ``programs`` list that charged the target.
+        """
         result = {}
         for ent in self.entries.values():
             cumulative_min = ent.cumulative_science_seconds / 60.0
@@ -323,11 +416,26 @@ class TargetLedger:
                 status = 'partial'
             else:
                 status = 'pending'
+            by_phase_min = {
+                ph: secs / 60.0
+                for ph, secs in ent.cumulative_seconds_by_phase.items()
+            }
             result[ent.canonical_name] = {
                 'name': ent.canonical_name,
                 'cumulative_min': cumulative_min,
+                'cumulative_min_by_phase': by_phase_min,
+                'programs': list(ent.programs),
                 'required_min': required_min,
                 'fraction': fraction,
                 'status': status,
             }
         return result
+
+    def multi_program_entries(self) -> list:
+        """Ledger entries charged by more than one distinct program.
+
+        These are objects multiple MAGNETS programs have integrated on — useful
+        for flagging shared targets whose phase preferences may conflict.
+        """
+        return [ent for ent in self.entries.values()
+                if len(set(ent.programs)) > 1]

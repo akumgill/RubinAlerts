@@ -137,13 +137,31 @@ def write_catalog(plan: ObsPlan, path: str) -> None:
     logger.info("Wrote catalog: %s (%d entries)", path, idx - 1)
 
 
+def _phase_breakdown_str(ledger, target) -> str:
+    """Render a target's per-phase cumulative integration, e.g.
+    'peak=44m rising=12m'. Empty string if no ledger or no record."""
+    if ledger is None:
+        return ''
+    ent = ledger._find_entry(target)
+    if ent is None or not ent.cumulative_seconds_by_phase:
+        return ''
+    parts = [f"{ph}={secs / 60.0:.0f}m"
+             for ph, secs in sorted(ent.cumulative_seconds_by_phase.items())
+             if secs]
+    return ' '.join(parts)
+
+
 def write_summary(plan: ObsPlan, path: str, accountant=None, ledger=None) -> None:
     """Write a human-readable summary of the observing plan.
 
     When a ``ledger`` (W11 TargetLedger) is supplied, the per-target table gains
-    Cumul (cumulative integration minutes) and Done% (completeness) columns, and
-    a "Completed" section lists targets excluded for having sufficient
-    integration time (``plan.completed``).
+    Cumul (cumulative integration minutes) and Done% (completeness) columns, the
+    per-phase integration breakdown (W12) is shown for scheduled/completed
+    targets, and a "Completed" section lists targets excluded for having
+    sufficient integration time (``plan.completed``).
+
+    Multi-group targets (W12: objects wanted by >1 program) are rendered in a
+    dedicated alert section.
     """
     lines = []
 
@@ -233,7 +251,8 @@ def write_summary(plan: ObsPlan, path: str, accountant=None, ledger=None) -> Non
     lines.append("-" * width)
     lines.append("")
 
-    # Completed targets excluded for sufficient integration (W11).
+    # Completed targets excluded for sufficient integration (W11). With a
+    # ledger, append the per-phase integration breakdown (W12).
     if plan.completed:
         lines.append("Completed (excluded — sufficient integration):")
         for t in plan.completed:
@@ -241,9 +260,25 @@ def write_summary(plan: ObsPlan, path: str, accountant=None, ledger=None) -> Non
                      if math.isfinite(t.cumulative_minutes) else "? min")
             done = (f"{t.completeness_fraction * 100:.0f}%"
                     if math.isfinite(t.completeness_fraction) else "?")
-            lines.append(f"  {t.name:<18} P{t.priority} "
-                         f"cumulative={cumul} done={done}")
+            row = (f"  {t.name:<18} P{t.priority} "
+                   f"cumulative={cumul} done={done}")
+            by_phase = _phase_breakdown_str(ledger, t)
+            if by_phase:
+                row += f"  [{by_phase}]"
+            lines.append(row)
         lines.append("")
+
+    # Per-phase integration breakdown for scheduled targets (W12).
+    if ledger is not None and plan.scheduled:
+        phase_rows = []
+        for entry in plan.scheduled:
+            by_phase = _phase_breakdown_str(ledger, entry.target)
+            if by_phase:
+                phase_rows.append(f"  {entry.target.name:<18} {by_phase}")
+        if phase_rows:
+            lines.append("Per-phase integration (scheduled):")
+            lines.extend(phase_rows)
+            lines.append("")
 
     # Per-target composite-score breakdown (R14): mirror the alert-pipeline
     # merit breakdown so a PI can reconstruct any ranking. Only present when
@@ -270,6 +305,21 @@ def write_summary(plan: ObsPlan, path: str, accountant=None, ledger=None) -> Non
                 f"{bd.get('total', 0.0):>7.1f}"
             )
         lines.append("-" * 78)
+        lines.append("")
+
+    # Multi-group alerts (W12): objects wanted by more than one program.
+    if plan.multi_group_alerts:
+        lines.append("=" * 70)
+        lines.append("MULTI-GROUP TARGETS (wanted by >1 program)")
+        lines.append("=" * 70)
+        for a in plan.multi_group_alerts:
+            phase_note = ('SAME phase preference' if a.get('same_phase')
+                          else 'DIFFERENT phase preferences')
+            lines.append(f"  {a['name']:<18} programs={', '.join(a['programs'])}")
+            prefs = a.get('phase_preferences', {})
+            pref_str = ', '.join(f"{p}->{prefs[p]}" for p in a['programs'])
+            lines.append(f"  {'':<18} {pref_str}  ({phase_note})")
+            lines.append(f"  {'':<18} observed tonight in {a.get('observed_phase', '?')} phase")
         lines.append("")
 
     # Backup targets

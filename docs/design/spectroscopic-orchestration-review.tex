@@ -312,7 +312,8 @@ ledger (completeness, phase splitting, migration), phase preferences, and multi-
 \section{Open questions and future work}\label{sec:future}
 \begin{enumerate}[nosep]
   \item \textbf{Manual-request front end.} A Google-Sheet ingester (gspread + service
-  account) is planned so PIs can enqueue targets directly; the CSV path is the current stand-in.
+  account) is planned so PIs can enqueue targets directly; the CSV path is the current
+  stand-in. See \S\ref{sec:sheet} for the interface spec.
   \item \textbf{Phase-preference tuning.} The \texttt{rising} offset ($-7$\,d), $\tau$, and
   the phase-bucket window ($5$\,d) are science-policy values to be set with Chris and
   Ashley's group; per-program offsets (not just \texttt{peak}/\texttt{rising}) are a natural
@@ -325,5 +326,40 @@ ledger (completeness, phase splitting, migration), phase preferences, and multi-
   \item \textbf{Multi-night look-ahead} scheduling, and surfacing broker liveness through the
   \texttt{supernova\_monitor} pipeline path (currently only the \texttt{run\_tonight} path).
 \end{enumerate}
+
+\section{Planned: Google-Sheet manual-request front end}\label{sec:sheet}
+The intended interface for PI-entered targets (not yet implemented) reads a Google Sheet via
+\texttt{gspread} with a read-only service account; rows map onto the same \texttt{Target}
+schema the manual-CSV path already accepts (with the optional \texttt{program},
+\texttt{phase\_weight}/\texttt{peak\_mjd}, and \texttt{delta\_t} columns described above):
+\begin{lstlisting}[language=Python]
+import gspread
+from google.oauth2.service_account import Credentials
+
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+
+def fetch_sheet(sheet_id: str, range_name: str) -> list[dict]:
+    creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
+    client = gspread.authorize(creds)
+    sheet = client.open_by_key(sheet_id)
+    worksheet = sheet.worksheet(range_name)
+    return worksheet.get_all_records()
+\end{lstlisting}
+An open design question is status feedback --- how to mark targets ``observed'' back in the
+sheet once they are scheduled/satisfied.
+
+\section{References and proposal details}
+\textbf{Proposal (Stubbs 2026B, propid 2835).} Semester 2026B (Jul 7 -- Jan 16); LLAMAS
+Integral Field Spectrograph on Magellan/Baade; 0.5D $+$ 2.0G $+$ 0.5B $=$ 30 hours; 29
+targets (SNe Ia in the DDFs $+$ WD standards); $18.0 \le r \le 21.5$; $0.1 < z < 0.4$;
+queued observing.
+
+\textbf{Key papers.} Adame et al.\ 2025 (DESI evolving dark-energy constraints);
+Boyd et al.\ 2026 (white-dwarf spectrophotometric standards); Ivezi\'c et al.\ 2019 (LSST
+science drivers).
+
+\textbf{Local reference materials.} Alex's LDSS3 ObsPlan generator and Yize's March
+observing-run notebook in \texttt{ref/} (reference only --- the orchestrator is LLAMAS-only);
+the RubinAlerts pipeline (\texttt{run\_tonight.py}, \texttt{core/magellan\_planning.py}).
 
 \end{document}

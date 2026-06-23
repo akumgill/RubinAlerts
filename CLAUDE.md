@@ -102,4 +102,4 @@ When making significant changes to RubinAlerts architecture or methods, update t
 6. Expand keyword documentation in architecture.md (list all 12 keywords)
 
 ### PLANNED FEATURES
-7. **Google Sheet integration** — Allow PIs to manually enqueue targets not sourced from alerts (gspread + service account). Design spec exists in `docs/design/spectroscopic-orchestration.md` §Interface Specifications.
+7. **Google Sheet integration** — Allow PIs to manually enqueue targets not sourced from alerts (gspread + service account). Design spec exists in `docs/design/spectroscopic-orchestration-review.tex` §"Planned: Google-Sheet manual-request front end".

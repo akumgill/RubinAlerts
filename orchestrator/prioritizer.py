@@ -116,7 +116,8 @@ def compute_composite_score(target: Target,
                             evening: Optional[Time] = None,
                             morning: Optional[Time] = None,
                             config: LLAMASConfig = None,
-                            moon_phase: Optional[str] = None
+                            moon_phase: Optional[str] = None,
+                            completeness: float = 1.0
                             ) -> Tuple[float, dict]:
     """Compute composite priority score for scheduling.
 
@@ -126,15 +127,19 @@ def compute_composite_score(target: Target,
     nudges**, so a PI can reconstruct any ranking by hand from the returned
     breakdown:
 
-        science_term       = SCIENCE_SCALE × science × budget × phase
+        science_term       = SCIENCE_SCALE × science × budget × phase × completeness
         observability_term = OBSERVABILITY_BONUS × observability
         keyword_term       = KEYWORD_SCALE × keyword_adj
         total              = science_term + observability_term + keyword_term
 
-    The three core factors (science, budget, phase) all live in [0, 1] (phase
-    is clamped here, observability is clamped, budget/science are sane by
-    construction), so the multiplicative core is bounded at 1.0 and the science
-    term at SCIENCE_SCALE. Observability and keywords are *additive* nudges —
+    The four core factors (science, budget, phase, completeness) all live in
+    [0, 1] (phase is clamped here, observability is clamped, budget/science are
+    sane by construction, completeness comes from the per-target ledger), so
+    the multiplicative core is bounded at 1.0 and the science term at
+    SCIENCE_SCALE. ``completeness`` is the per-target integration ledger factor
+    (W11): 1.0 for a fresh target, → 0.0 as it accumulates enough integration
+    time, so a finished target drops to the bottom of the ranking even if its
+    science priority is high. Observability and keywords are *additive* nudges —
     they reorder within or across adjacent tiers but cannot, by themselves,
     leapfrog the science core (see the constant docstrings above for why the
     scales are 100 / 20 / 50).
@@ -152,14 +157,18 @@ def compute_composite_score(target: Target,
         higher but can never exceed 1.0 (R2).
     keyword_adj : float
         Net boost/demotion from notes keywords (signed).
+    completeness : float
+        Per-target integration completeness factor in [0, 1] from the W11
+        ledger; 1.0 when no ledger is in use (neutral).
 
     Returns
     -------
     (score, breakdown) : tuple of (float, dict)
         ``score`` is the composite total (higher = schedule first).
         ``breakdown`` records every input factor and term:
-        ``science``, ``budget``, ``phase``, ``observability``, ``keyword_adj``,
-        ``science_term``, ``observability_term``, ``keyword_term``, ``total``.
+        ``science``, ``budget``, ``phase``, ``completeness``,
+        ``observability``, ``keyword_adj``, ``science_term``,
+        ``observability_term``, ``keyword_term``, ``total``.
     """
     if config is None:
         config = LLAMAS_CONFIG
@@ -185,11 +194,15 @@ def compute_composite_score(target: Target,
     # Phase factor (clamped to [0, 1] inside _phase_factor)
     phase = _phase_factor(target)
 
+    # Completeness factor (W11): per-target integration ledger weight, clamped
+    # to [0, 1]. 1.0 (neutral) when no ledger is in use.
+    completeness = _clamp01(completeness)
+
     # Keyword adjustment (signed; not clamped — it is a bounded human override)
     kw_adj = _keyword_adjustment(target.notes)
 
     # Composite: multiplicative science core + additive observability/keyword.
-    science_term = SCIENCE_SCALE * science * budget * phase
+    science_term = SCIENCE_SCALE * science * budget * phase * completeness
     observability_term = OBSERVABILITY_BONUS * observability
     keyword_term = KEYWORD_SCALE * kw_adj
     score = science_term + observability_term + keyword_term
@@ -198,6 +211,7 @@ def compute_composite_score(target: Target,
         'science': science,
         'budget': budget,
         'phase': phase,
+        'completeness': completeness,
         'observability': observability,
         'keyword_adj': kw_adj,
         'science_term': science_term,
@@ -213,13 +227,29 @@ def rank_targets(targets: list,
                  evening: Optional[Time] = None,
                  morning: Optional[Time] = None,
                  config: LLAMASConfig = None,
-                 moon_phase: Optional[str] = None) -> Tuple[dict, dict]:
+                 moon_phase: Optional[str] = None,
+                 ledger=None,
+                 required_minutes_by_target: Optional[dict] = None
+                 ) -> Tuple[dict, dict]:
     """Score all targets and return (scores, breakdowns) mappings.
 
     Also stores the composite score in each target's merit_score field and the
     per-component breakdown in each target's score_breakdown field (so the
     summary writer can persist/display it, mirroring the alert-pipeline merit
     breakdown — R14).
+
+    Parameters
+    ----------
+    ledger : TargetLedger, optional
+        Per-target integration ledger (W11). When provided, each target's
+        completeness factor is computed from its cumulative integration vs its
+        full required time and folded into the composite science core. When
+        None, completeness is 1.0 (neutral) and behaviour matches the prior
+        ledger-less scoring exactly.
+    required_minutes_by_target : dict, optional
+        {target.name: full_required_minutes} used with ``ledger`` to compute
+        completeness. Falls back to ``target.required_minutes_full`` / 0 when a
+        target is missing here.
 
     Returns
     -------
@@ -230,9 +260,18 @@ def rank_targets(targets: list,
     """
     scores = {}
     breakdowns = {}
+    required_minutes_by_target = required_minutes_by_target or {}
     for t in targets:
+        completeness = 1.0
+        if ledger is not None:
+            req_min = required_minutes_by_target.get(
+                t.name, getattr(t, 'required_minutes_full', float('nan')))
+            if req_min is None or not math.isfinite(req_min):
+                req_min = 0.0
+            completeness = ledger.completeness_factor(t, req_min)
         s, breakdown = compute_composite_score(
-            t, accountant, evening, morning, config, moon_phase)
+            t, accountant, evening, morning, config, moon_phase,
+            completeness=completeness)
         t.merit_score = s
         t.score_breakdown = breakdown
         scores[t.name] = s
@@ -240,10 +279,12 @@ def rank_targets(targets: list,
 
     ranked = sorted(targets, key=lambda t: t.merit_score, reverse=True)
     for i, t in enumerate(ranked):
-        logger.debug("Rank %2d: %-18s score=%.1f P%d budget=%.1f phase=%.2f",
+        bd = t.score_breakdown or {}
+        logger.debug("Rank %2d: %-18s score=%.1f P%d budget=%.1f phase=%.2f "
+                     "complete=%.2f",
                      i + 1, t.name, t.merit_score, t.priority,
                      accountant.get_budget_factor(t.program, moon_phase)
                      if accountant else 1.0,
-                     _phase_factor(t))
+                     _phase_factor(t), bd.get('completeness', 1.0))
 
     return scores, breakdowns

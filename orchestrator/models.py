@@ -33,6 +33,13 @@ class Target:
     program: str = 'default'
     merit_score: float = float('nan')
     phase_weight: float = float('nan')  # w_time from alert pipeline: exp(-dt²/2τ²)
+    # Per-target integration ledger fields (W11). Populated by run_nightly from
+    # the TargetLedger: cumulative integration so far, completeness fraction
+    # (cumulative / required_full), and the FULL required exposure in minutes
+    # (vs exposure_minutes, which is set to the REMAINING time to observe).
+    cumulative_minutes: float = float('nan')
+    completeness_fraction: float = float('nan')
+    required_minutes_full: float = float('nan')
     # Per-component composite-score breakdown from prioritizer.rank_targets
     # (keys: science, budget, phase, observability, keyword_adj, *_term, total).
     # None until the target has been ranked.
@@ -122,6 +129,9 @@ class ObsPlan:
 
     scheduled: List[ScheduledEntry] = field(default_factory=list)
     backup: List[Target] = field(default_factory=list)
+    # Targets excluded from scheduling because the per-target integration ledger
+    # marks them as already having sufficient cumulative integration (W11).
+    completed: List[Target] = field(default_factory=list)
 
     standards_start: Optional[dict] = None
     standards_end: Optional[dict] = None

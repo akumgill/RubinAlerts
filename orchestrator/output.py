@@ -137,8 +137,14 @@ def write_catalog(plan: ObsPlan, path: str) -> None:
     logger.info("Wrote catalog: %s (%d entries)", path, idx - 1)
 
 
-def write_summary(plan: ObsPlan, path: str, accountant=None) -> None:
-    """Write a human-readable summary of the observing plan."""
+def write_summary(plan: ObsPlan, path: str, accountant=None, ledger=None) -> None:
+    """Write a human-readable summary of the observing plan.
+
+    When a ``ledger`` (W11 TargetLedger) is supplied, the per-target table gains
+    Cumul (cumulative integration minutes) and Done% (completeness) columns, and
+    a "Completed" section lists targets excluded for having sufficient
+    integration time (``plan.completed``).
+    """
     lines = []
 
     lines.append("=" * 70)
@@ -196,22 +202,48 @@ def write_summary(plan: ObsPlan, path: str, accountant=None) -> None:
         lines.append(f"End standard:      {s['name']} (V={s['vmag']:.2f}, AM={s['airmass']:.2f})")
     lines.append("")
 
-    # Scheduled targets detail
-    lines.append("-" * 70)
-    lines.append(f"{'#':<4} {'Target':<18} {'UT Start':>8} {'UT End':>8} "
-                 f"{'Exp':>10} {'AM':>5} {'P':>2}")
-    lines.append("-" * 70)
+    # Scheduled targets detail. With a ledger, append per-target cumulative
+    # integration (Cumul, minutes) and completeness (Done%) columns.
+    show_ledger = ledger is not None
+    width = 90 if show_ledger else 70
+    lines.append("-" * width)
+    header = (f"{'#':<4} {'Target':<18} {'UT Start':>8} {'UT End':>8} "
+              f"{'Exp':>10} {'AM':>5} {'P':>2}")
+    if show_ledger:
+        header += f" {'Cumul':>7} {'Done%':>6}"
+    lines.append(header)
+    lines.append("-" * width)
 
     for i, entry in enumerate(plan.scheduled, 1):
         start_str = entry.start.datetime.strftime('%H:%M') if entry.start else '??:??'
         end_str = entry.end.datetime.strftime('%H:%M') if entry.end else '??:??'
-        lines.append(
+        row = (
             f"{i:<4} {entry.target.name:<18} {start_str:>8} {end_str:>8} "
             f"{entry.exp_str:>10} {entry.airmass:>5.2f} {entry.target.priority:>2}"
         )
+        if show_ledger:
+            t = entry.target
+            cumul = (f"{t.cumulative_minutes:>6.0f}m"
+                     if math.isfinite(t.cumulative_minutes) else f"{'-':>7}")
+            done = (f"{t.completeness_fraction * 100:>5.0f}%"
+                    if math.isfinite(t.completeness_fraction) else f"{'-':>6}")
+            row += f" {cumul} {done}"
+        lines.append(row)
 
-    lines.append("-" * 70)
+    lines.append("-" * width)
     lines.append("")
+
+    # Completed targets excluded for sufficient integration (W11).
+    if plan.completed:
+        lines.append("Completed (excluded — sufficient integration):")
+        for t in plan.completed:
+            cumul = (f"{t.cumulative_minutes:.0f} min"
+                     if math.isfinite(t.cumulative_minutes) else "? min")
+            done = (f"{t.completeness_fraction * 100:.0f}%"
+                    if math.isfinite(t.completeness_fraction) else "?")
+            lines.append(f"  {t.name:<18} P{t.priority} "
+                         f"cumulative={cumul} done={done}")
+        lines.append("")
 
     # Per-target composite-score breakdown (R14): mirror the alert-pipeline
     # merit breakdown so a PI can reconstruct any ranking. Only present when

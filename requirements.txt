@@ -15,3 +15,5 @@ jupyter>=1.0.0
 jupyterlab>=4.0.0
 # Optional: sncosmo for SALT2/SALT3 template light curve fitting
 # pip install sncosmo
+# Testing
+pytest>=8.0.0

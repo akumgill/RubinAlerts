@@ -138,11 +138,11 @@ two \emph{additive nudges}:
 \begin{align}
 \texttt{science\_term} &= \texttt{SCIENCE\_SCALE}\times s \times b \times p \times c \\
 \texttt{observability\_term} &= \texttt{OBSERVABILITY\_BONUS}\times o \\
-\texttt{keyword\_term} &= \texttt{KEYWORD\_SCALE}\times k \\
+\texttt{keyword\_term} &= \texttt{KEYWORD\_BONUS}\times k \\
 \texttt{total} &= \texttt{science\_term} + \texttt{observability\_term} + \texttt{keyword\_term}
 \end{align}
 with \texttt{SCIENCE\_SCALE}$=100$, \texttt{OBSERVABILITY\_BONUS}$=20$,
-\texttt{KEYWORD\_SCALE}$=50$. The scales are chosen so the science core ($s,b,p,c\in[0,1]$)
+\texttt{KEYWORD\_BONUS}$=50$. The scales are chosen so the science core ($s,b,p,c\in[0,1]$)
 is the dominant axis (a P1 at peak on a healthy budget $\approx100$; a P4 $\approx20$), while
 observability and keyword nudges reorder within or across adjacent tiers but cannot by
 themselves leapfrog a full priority tier. The phase factor is clamped to $[0,1]$ so it can
@@ -157,10 +157,21 @@ $b$ budget & phase-aware factor 1.0/0.5/0.1 (\S\ref{sec:accounting}) \\
 $p$ phase & per-program phase preference (\S\ref{sec:phase}) \\
 $c$ completeness & per-target integration ledger factor (\S\ref{sec:ledger}) \\
 $o$ observability & fraction of night above the airmass limit \\
-$k$ keyword adj. & signed boosts/demotions from target notes \\
+$k$ keyword adj. & signed boosts/demotions from a controlled tag vocabulary, clamped \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+The keyword adjustment $k$ is driven by a \emph{controlled vocabulary} of scheduling tags
+(e.g.\ \texttt{urgent}, \texttt{too}, \texttt{near\_peak}, \texttt{backup},
+\texttt{low\_priority}), not free-text parsing, so it cannot mis-fire on incidental words in
+an observer's notes; the net adjustment is clamped so keywords reorder within or across
+adjacent tiers but never leapfrog a full priority tier. A separate \texttt{override} (a.k.a.\
+\texttt{mandatory}) tag is a hard, non-negotiable request: such a target bypasses normal
+ranking and the Moon-phase eligibility filter, and is \emph{reserved} a slot before the
+greedy fill (see \S\ref{sec:sched}). It still cannot defy physics --- a mandatory target that
+never clears the airmass limit tonight is reported as unschedulable rather than silently
+dropped.
 
 \subsection{Per-program light-curve phase preference}\label{sec:phase}
 \textbf{Motivation.} Different programs want a SN at different phases. Cosmology /
@@ -192,9 +203,11 @@ on a rich one). The summary header states this caveat, and the $<4$-target degen
 is guarded by rank-based assignment. Absolute, cross-night-calibrated thresholds are a
 natural future refinement once merit statistics across many nights are available.
 
-\section{Scheduling}
-A greedy scheduler steps through the night, at each slot selecting the observable target
-maximizing
+\section{Scheduling}\label{sec:sched}
+Targets flagged \texttt{mandatory} (\S\ref{sec:phase}) are placed first in a reservation
+pass --- each is given its best (lowest-airmass) slot within its observable window --- and the
+greedy fill then works around those reserved blocks. For the remaining targets, the greedy
+scheduler steps through the night, at each slot selecting the observable target maximizing
 \begin{equation}
 \text{score} - 10\times\text{airmass} - \texttt{SLEW\_PENALTY}\times\theta_{\rm slew},
 \end{equation}
@@ -320,6 +333,14 @@ ledger (completeness, phase splitting, migration), phase preferences, and multi-
   bucket and required time.
   \item \textbf{Absolute priority thresholds.} Replace within-night quartile P-labels with
   absolute merit thresholds once cross-night merit statistics are available.
+  \item \textbf{S/N-based exposure and completeness.} The exposure estimate is currently a
+  static cascade that omits airmass, sky/Moon brightness, and seeing, and the ledger's
+  completeness is measured in integrated \emph{time}. The principled target is a proper
+  exposure-time calculator (with airmass-scaled extinction and sky, Moon brightness, and
+  seeing terms) and, ultimately, completeness judged from the \emph{achieved} signal-to-noise
+  rather than elapsed clock time. The ledger is already forward-compatible: cumulative time
+  can be swapped for cumulative S/N$^2$ (which adds linearly under background-limited
+  conditions) with no change to its structure.
   \item \textbf{Multi-night look-ahead} scheduling, and surfacing broker liveness through the
   \texttt{supernova\_monitor} pipeline path (currently only the \texttt{run\_tonight} path).
 \end{enumerate}

@@ -376,7 +376,8 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                     standards_path: str = None,
                     config: LLAMASConfig = None,
                     prioritizer_scores: dict = None,
-                    accountant=None) -> ObsPlan:
+                    accountant=None,
+                    ledger=None) -> ObsPlan:
     """Create the complete observing plan for a night.
 
     Parameters
@@ -395,6 +396,10 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
         If provided, replaces the default priority-based scoring.
     accountant : TimeAccountant, optional
         If provided, charges scheduled time to each target's program.
+    ledger : TargetLedger, optional
+        If provided, charges the SAME science time (charged_minutes) to each
+        target's per-target integration ledger (W11), so cumulative integration
+        accrues across nights.
 
     Returns
     -------
@@ -593,19 +598,30 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
     # 4. Collect unscheduled as backup
     backup = [t for t in eligible if t.name not in scheduled_names]
 
-    # 5. Charge time if accountant provided
-    if accountant is not None:
+    # 5. Charge time to the program accountant and/or the per-target ledger.
+    # Both bill the SAME science value (charged_minutes = exposure + overhead),
+    # NOT the padded wall-clock window. Padding (gap-fill / end-of-night
+    # stretch) is dead-time avoidance and must not be billed.
+    if accountant is not None or ledger is not None:
         date_str = str(evening.iso[:10])
         for entry in scheduled_entries:
-            # Charge science time (exposure + overhead) only, not the padded
-            # wall-clock window. Padding (gap-fill / end-of-night stretch) is
-            # dead-time avoidance and must not be billed.
             if math.isfinite(entry.charged_minutes):
                 charged_min = entry.charged_minutes
             else:
                 charged_min = (entry.end - entry.start).to(u.minute).value
-            hours = charged_min / 60.0
-            accountant.charge(entry.program, hours, moon_phase, date=date_str)
+
+            if accountant is not None:
+                accountant.charge(entry.program, charged_min / 60.0,
+                                  moon_phase, date=date_str)
+
+            if ledger is not None:
+                t = entry.target
+                req_full = getattr(t, 'required_minutes_full', float('nan'))
+                required_seconds = (req_full * 60.0
+                                    if math.isfinite(req_full) else float('nan'))
+                ledger.charge(t, science_seconds=charged_min * 60.0,
+                              date=date_str, mag=t.mag, redshift=t.redshift,
+                              required_seconds=required_seconds)
 
     # 6. Select standard stars (start, end, and mid-night on long nights).
     # Standards are calibration overhead: like the existing start/end ones,

@@ -29,9 +29,19 @@ def _default_state_path(output_dir: str) -> str:
 
     Single convention shared by ``run-nightly`` and ``reconcile``: the state
     JSON always lives at ``<output_dir>/time_accounting.json``. (W11 places its
-    per-target ledger beside it using this same helper.)
+    per-target ledger beside it using ``_default_ledger_path``.)
     """
     return str(Path(output_dir) / 'time_accounting.json')
+
+
+def _default_ledger_path(output_dir: str) -> str:
+    """Canonical location of the per-target integration ledger (W11).
+
+    Lives beside the time-accounting state file at
+    ``<output_dir>/target_ledger.json`` so a night's per-target cumulative
+    integration persists alongside the per-program budgets.
+    """
+    return str(Path(output_dir) / 'target_ledger.json')
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -128,6 +138,8 @@ def cmd_run_nightly(args):
 
     from .run_nightly import run_nightly
 
+    ledger_path = args.target_ledger or _default_ledger_path(args.output_dir)
+
     plan = run_nightly(
         date=args.date,
         candidates_path=args.candidates,
@@ -136,7 +148,14 @@ def cmd_run_nightly(args):
         output_dir=args.output_dir,
         standards_path=args.standards,
         from_rubinalerts=not args.csv_format,
+        target_ledger_path=ledger_path,
     )
+
+    if plan.completed:
+        print(f"\nCompleted (excluded — sufficient integration): "
+              f"{len(plan.completed)}")
+        for t in plan.completed:
+            print(f"  {t.name} ({t.completeness_fraction * 100:.0f}% done)")
 
     if plan.scheduled:
         _print_plan(plan, args.date, args.moon, args.output_dir)
@@ -187,6 +206,80 @@ def cmd_reconcile(args):
     print(f"  {args.program}: {remaining:.1f}h total remaining")
 
 
+def cmd_reconcile_target(args):
+    """Post-night per-target integration reconciliation (W11).
+
+    Adjust a single target's cumulative integration so the night's total
+    matches the actual minutes integrated. Target is identified by name (any
+    alias) or by --ra/--dec coordinate.
+    """
+    _setup_logging(args.verbose)
+
+    from .target_ledger import TargetLedger
+    from .models import Target
+
+    ledger_path = args.target_ledger or _default_ledger_path(args.output_dir)
+    logger.info("Reconciling target ledger: %s", ledger_path)
+    ledger = TargetLedger.load(ledger_path)
+
+    # Resolve the target. Prefer explicit coordinates; else look up by name.
+    if args.ra is not None and args.dec is not None:
+        target = Target(name=args.name or '', ra_deg=args.ra, dec_deg=args.dec)
+    elif args.name:
+        match = None
+        for ent in ledger.entries.values():
+            if args.name == ent.canonical_name or args.name in ent.aliases:
+                match = ent
+                break
+        if match is None:
+            print(f"No ledger entry found for '{args.name}'")
+            sys.exit(1)
+        target = Target(name=match.canonical_name,
+                        ra_deg=match.ra_deg, dec_deg=match.dec_deg)
+    else:
+        print("Provide --name or both --ra and --dec")
+        sys.exit(1)
+
+    delta = ledger.reconcile(target, actual_seconds=args.actual_minutes * 60.0,
+                             date=args.date)
+    if abs(delta) < 0.1:
+        print(f"No adjustment needed for {target.name or 'target'} on {args.date}")
+    else:
+        direction = "added" if delta > 0 else "removed"
+        print(f"Reconciled {target.name or 'target'} on {args.date}: "
+              f"{direction} {abs(delta) / 60.0:.1f} min")
+    print(f"  cumulative now {ledger.cumulative_seconds(target) / 60.0:.1f} min")
+
+
+def cmd_ledger(args):
+    """Print the per-target integration ledger summary table (W11)."""
+    _setup_logging(args.verbose)
+
+    from .target_ledger import TargetLedger
+
+    ledger_path = args.target_ledger or _default_ledger_path(args.output_dir)
+    ledger = TargetLedger.load(ledger_path)
+
+    summary = ledger.summary()
+    if not summary:
+        print(f"Empty target ledger ({ledger_path})")
+        return
+
+    print(f"\nTarget integration ledger: {ledger_path}")
+    print(f"{'Target':<20} {'Cumul':>8} {'Required':>9} {'Done%':>6} "
+          f"{'Status':>10}")
+    print("-" * 56)
+    for name, info in sorted(summary.items()):
+        if info['status'] == 'satisfied' and not args.show_satisfied:
+            continue
+        req = (f"{info['required_min']:.0f}m"
+               if info['required_min'] == info['required_min'] else "?")
+        frac = (f"{info['fraction'] * 100:.0f}%"
+                if info['fraction'] == info['fraction'] else "?")
+        print(f"{name:<20} {info['cumulative_min']:>7.0f}m {req:>9} "
+              f"{frac:>6} {info['status']:>10}")
+
+
 def _add_plan_args(parser):
     """Add common plan arguments."""
     parser.add_argument('--date', required=True, help='Observing date YYYY-MM-DD')
@@ -221,6 +314,13 @@ def main():
                                 help='Allocations YAML file')
     nightly_parser.add_argument('--csv-format', action='store_true',
                                 help='Treat input as manual CSV (not RubinAlerts format)')
+    nightly_parser.add_argument('--target-ledger', default=None,
+                                help='Per-target integration ledger JSON. '
+                                     'Defaults to <output-dir>/target_ledger.json. '
+                                     'Tracks cumulative integration per target '
+                                     'across nights so satisfied targets are '
+                                     'excluded and partial ones get only their '
+                                     'remaining time.')
 
     # reconcile subcommand
     reconcile_parser = subparsers.add_parser('reconcile',
@@ -249,8 +349,42 @@ def main():
                                   help='Date to reconcile YYYY-MM-DD')
     reconcile_parser.add_argument('-v', '--verbose', action='store_true')
 
+    # reconcile-target subcommand (W11): per-target integration true-up
+    rt_parser = subparsers.add_parser(
+        'reconcile-target',
+        help='Post-night per-target integration reconciliation')
+    rt_parser.add_argument('--name', default=None,
+                           help='Target name or alias (or use --ra/--dec)')
+    rt_parser.add_argument('--ra', type=float, default=None,
+                           help='Target RA in degrees (with --dec)')
+    rt_parser.add_argument('--dec', type=float, default=None,
+                           help='Target Dec in degrees (with --ra)')
+    rt_parser.add_argument('--actual-minutes', type=float, required=True,
+                           help='Actual minutes integrated on this target')
+    rt_parser.add_argument('--date', required=True,
+                           help='Date to reconcile YYYY-MM-DD')
+    rt_parser.add_argument('--output-dir', default='output/',
+                           help='Output directory holding the ledger file')
+    rt_parser.add_argument('--target-ledger', default=None,
+                           help='Explicit ledger path (default: '
+                                '<output-dir>/target_ledger.json)')
+    rt_parser.add_argument('-v', '--verbose', action='store_true')
+
+    # ledger subcommand (W11): print the integration ledger summary
+    ledger_parser = subparsers.add_parser(
+        'ledger', help='Show the per-target integration ledger summary')
+    ledger_parser.add_argument('--output-dir', default='output/',
+                               help='Output directory holding the ledger file')
+    ledger_parser.add_argument('--target-ledger', default=None,
+                               help='Explicit ledger path (default: '
+                                    '<output-dir>/target_ledger.json)')
+    ledger_parser.add_argument('--show-satisfied', action='store_true',
+                               help='Include already-satisfied targets')
+    ledger_parser.add_argument('-v', '--verbose', action='store_true')
+
     # Backward compatibility: if first arg is not a subcommand, assume 'plan'
-    known_commands = {'plan', 'run-nightly', 'reconcile'}
+    known_commands = {'plan', 'run-nightly', 'reconcile',
+                      'reconcile-target', 'ledger'}
     if len(sys.argv) > 1 and sys.argv[1] not in known_commands and sys.argv[1] != '-h' and sys.argv[1] != '--help':
         sys.argv.insert(1, 'plan')
 
@@ -262,6 +396,10 @@ def main():
         cmd_run_nightly(args)
     elif args.command == 'reconcile':
         cmd_reconcile(args)
+    elif args.command == 'reconcile-target':
+        cmd_reconcile_target(args)
+    elif args.command == 'ledger':
+        cmd_ledger(args)
     else:
         parser.print_help()
         sys.exit(1)

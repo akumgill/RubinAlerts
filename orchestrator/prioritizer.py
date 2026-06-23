@@ -70,7 +70,8 @@ def compute_composite_score(target: Target,
                             accountant: Optional[TimeAccountant] = None,
                             evening: Optional[Time] = None,
                             morning: Optional[Time] = None,
-                            config: LLAMASConfig = None) -> float:
+                            config: LLAMASConfig = None,
+                            moon_phase: Optional[str] = None) -> float:
     """Compute composite priority score for scheduling.
 
     Components
@@ -100,7 +101,7 @@ def compute_composite_score(target: Target,
     # Budget factor
     budget = 1.0
     if accountant is not None:
-        budget = accountant.get_budget_factor(target.program)
+        budget = accountant.get_budget_factor(target.program, moon_phase)
 
     # Observability fraction
     observability = 0.5  # default if twilight not provided
@@ -125,7 +126,8 @@ def rank_targets(targets: list,
                  accountant: Optional[TimeAccountant] = None,
                  evening: Optional[Time] = None,
                  morning: Optional[Time] = None,
-                 config: LLAMASConfig = None) -> dict:
+                 config: LLAMASConfig = None,
+                 moon_phase: Optional[str] = None) -> dict:
     """Score all targets and return name → score mapping.
 
     Also stores the composite score in each target's merit_score field.
@@ -137,7 +139,8 @@ def rank_targets(targets: list,
     """
     scores = {}
     for t in targets:
-        s = compute_composite_score(t, accountant, evening, morning, config)
+        s = compute_composite_score(t, accountant, evening, morning, config,
+                                    moon_phase)
         t.merit_score = s
         scores[t.name] = s
 
@@ -145,7 +148,8 @@ def rank_targets(targets: list,
     for i, t in enumerate(ranked):
         logger.debug("Rank %2d: %-18s score=%.1f P%d budget=%.1f phase=%.2f",
                      i + 1, t.name, t.merit_score, t.priority,
-                     accountant.get_budget_factor(t.program) if accountant else 1.0,
+                     accountant.get_budget_factor(t.program, moon_phase)
+                     if accountant else 1.0,
                      _phase_factor(t))
 
     return scores

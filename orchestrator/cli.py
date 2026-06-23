@@ -22,6 +22,16 @@ from .output import write_timeline, write_catalog, write_summary
 logger = logging.getLogger(__name__)
 
 
+def _default_state_path(output_dir: str) -> str:
+    """Canonical location of the time-accounting state file.
+
+    Single convention shared by ``run-nightly`` and ``reconcile``: the state
+    JSON always lives at ``<output_dir>/time_accounting.json``. (W11 places its
+    per-target ledger beside it using this same helper.)
+    """
+    return str(Path(output_dir) / 'time_accounting.json')
+
+
 def _setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
@@ -127,7 +137,7 @@ def cmd_run_nightly(args):
 
         # Print budget summary
         from .accounting import TimeAccountant
-        state_path = str(Path(args.output_dir) / 'time_accounting.json')
+        state_path = _default_state_path(args.output_dir)
         accountant = TimeAccountant.from_yaml(args.allocations, state_path=state_path)
         print("\nTime Budget:")
         for prog, info in accountant.summary().items():
@@ -145,7 +155,14 @@ def cmd_reconcile(args):
 
     from .accounting import TimeAccountant
 
-    accountant = TimeAccountant.from_yaml(args.allocations, state_path=args.state)
+    # Resolve the state file. Default to the same location run-nightly wrote it
+    # to (<output-dir>/time_accounting.json) so reconcile sees the night's
+    # scheduled charges instead of a fresh/empty state (which would make
+    # delta = actual - 0 and double-charge the program).
+    state_path = args.state if args.state else _default_state_path(args.output_dir)
+    logger.info("Reconciling against state file: %s", state_path)
+
+    accountant = TimeAccountant.from_yaml(args.allocations, state_path=state_path)
     delta = accountant.reconcile(
         program=args.program,
         actual_hours=args.actual_hours,
@@ -204,8 +221,17 @@ def main():
                                              help='Post-night time reconciliation')
     reconcile_parser.add_argument('--allocations', required=True,
                                   help='Allocations YAML file')
-    reconcile_parser.add_argument('--state', default='time_accounting.json',
-                                  help='State file path')
+    reconcile_parser.add_argument('--output-dir', default='output/',
+                                  help='Output directory holding the state file '
+                                       '(default: output/). The state file lives at '
+                                       '<output-dir>/time_accounting.json, matching '
+                                       'run-nightly.')
+    reconcile_parser.add_argument('--state', default=None,
+                                  help='Explicit state file path. If omitted, '
+                                       'resolves to <output-dir>/time_accounting.json '
+                                       '(the same file run-nightly wrote). Always '
+                                       'reconcile against the night\'s state, not a '
+                                       'fresh file.')
     reconcile_parser.add_argument('--program', required=True,
                                   help='Program name to reconcile')
     reconcile_parser.add_argument('--actual-hours', type=float, required=True,

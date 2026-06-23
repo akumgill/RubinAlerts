@@ -74,6 +74,14 @@ class ScheduledEntry:
     n_exp: int = 1
     exp_sec: int = 0
     program: str = ''
+    # Science time actually integrated = exposure + overhead, in minutes.
+    # This is what gets billed to the program (and, in W11, to the per-target
+    # ledger) — NOT the wall-clock (end - start), which may be padded by
+    # gap-fill / end-of-night stretch for the visual timeline.
+    charged_minutes: float = float('nan')
+    # Dead-time-avoidance slack folded into the wall-clock window (stretch +
+    # gap-fill). Recorded for transparency; never billed.
+    padding_minutes: float = 0.0
 
 
 @dataclass

@@ -99,7 +99,8 @@ def run_nightly(date: str,
                        evening_twilight=evening, morning_twilight=morning)
 
     # 6. Rank targets with composite scoring
-    scores = rank_targets(observable, accountant, evening, morning, config)
+    scores = rank_targets(observable, accountant, evening, morning, config,
+                          moon_phase=moon_phase)
 
     # 7. Create schedule (charges time automatically via accountant)
     plan = create_schedule(

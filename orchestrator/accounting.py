@@ -173,21 +173,49 @@ class TimeAccountant:
         self._persist()
         return delta
 
-    def get_budget_factor(self, program: str) -> float:
-        """Budget-aware priority multiplier.
+    def get_budget_factor(self, program: str,
+                          moon_phase: Optional[str] = None) -> float:
+        """Phase-aware budget priority multiplier.
+
+        Scores how much of a program's allocation IN THE RELEVANT MOON PHASE is
+        still available, expressed as a fraction of that phase's allocation
+        (not a hard hour threshold). A program flush with dark time but out of
+        grey time scores low on a grey night.
+
+        Parameters
+        ----------
+        program : str
+            Program name.
+        moon_phase : str, optional
+            'dark', 'grey', or 'bright'. If omitted, falls back to the total
+            remaining across all phases vs total allocation.
 
         Returns
         -------
         float
-            1.0 if >5h remaining, 0.5 if 0-5h remaining, 0.1 if exhausted.
+            1.0 if >50% of the phase allocation remains, 0.5 if any remains,
+            0.1 if exhausted (or the phase allocation is 0).
         """
         if program not in self.allocations:
             return 1.0
 
-        remaining = self.allocations[program].remaining_hours
-        if remaining > 5.0:
+        alloc = self.allocations[program]
+        if moon_phase:
+            allocated = alloc.allocated_hours.get(moon_phase, 0.0)
+            remaining = self.get_remaining(program, moon_phase)
+        else:
+            allocated = sum(alloc.allocated_hours.get(p, 0.0)
+                            for p in ('dark', 'grey', 'bright'))
+            remaining = alloc.remaining_hours
+
+        # No allocation in this phase → nothing to spend → treat as exhausted.
+        if allocated <= 0.0:
+            return 0.1
+
+        frac = remaining / allocated
+        if frac > 0.5:
             return 1.0
-        elif remaining > 0.0:
+        elif frac > 0.0:
             return 0.5
         return 0.1
 

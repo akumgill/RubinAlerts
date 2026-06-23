@@ -457,6 +457,14 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             mid = current + dur / 2
             am = _get_airmass(best.coord, mid, config.location)
 
+            # Science time billed to the program: actual integration
+            # (exp_sec x n_exp) + overhead. The wall-clock window (dur) may be
+            # larger because of gap-fill stretch above — that slack is padding,
+            # not science, so we record it separately and never bill it.
+            charged_min = exp_sec * n_exp / 60.0 + config.overhead_minutes
+            wall_min = dur.to(u.minute).value
+            padding_min = max(0.0, wall_min - charged_min)
+
             entry = ScheduledEntry(
                 target=best,
                 start=current,
@@ -466,6 +474,8 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                 n_exp=n_exp,
                 exp_sec=exp_sec,
                 program=best.program,
+                charged_minutes=charged_min,
+                padding_minutes=padding_min,
             )
             scheduled_entries.append(entry)
             scheduled_names.add(best.name)
@@ -506,6 +516,14 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                     if entry.exp_sec < 10:
                         entry.exp_sec = 10
                     entry.exp_str = f"{entry.n_exp}x{entry.exp_sec}s"
+                    # The end-of-night stretch is dead-time avoidance: keep
+                    # charged_minutes at the science value and fold the added
+                    # wall-clock time into padding so the program isn't billed
+                    # for it.
+                    wall_min = (entry.end - entry.start).to(u.minute).value
+                    if math.isfinite(entry.charged_minutes):
+                        entry.padding_minutes = max(
+                            0.0, wall_min - entry.charged_minutes)
 
     # Sort by start time
     scheduled_entries.sort(key=lambda e: e.start.mjd)
@@ -517,7 +535,14 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
     if accountant is not None:
         date_str = str(evening.iso[:10])
         for entry in scheduled_entries:
-            hours = (entry.end - entry.start).to(u.hour).value
+            # Charge science time (exposure + overhead) only, not the padded
+            # wall-clock window. Padding (gap-fill / end-of-night stretch) is
+            # dead-time avoidance and must not be billed.
+            if math.isfinite(entry.charged_minutes):
+                charged_min = entry.charged_minutes
+            else:
+                charged_min = (entry.end - entry.start).to(u.minute).value
+            hours = charged_min / 60.0
             accountant.charge(entry.program, hours, moon_phase, date=date_str)
 
     # 6. Select standard stars

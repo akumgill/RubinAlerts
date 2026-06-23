@@ -411,9 +411,14 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
     if standards_path is None:
         standards_path = str(DEFAULT_STANDARDS_PATH)
 
-    # 1. Filter targets by moon phase compatibility
+    # 1. Filter targets by moon phase compatibility. MANDATORY (PI-override)
+    # targets BYPASS this filter — the override is non-negotiable on policy —
+    # but NOT the physics (a target with no observable window tonight still
+    # cannot be scheduled; that is handled in the reservation pass below).
     eligible = []
     for t in targets:
+        if getattr(t, 'mandatory', False):
+            continue  # mandatory targets are reserved separately (step 2)
         mc = t.moon_constraint.lower()
         if moon_phase == 'bright' and mc not in ('bright', 'any'):
             continue
@@ -421,21 +426,141 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             continue
         # dark night: all targets eligible
         eligible.append(t)
-    logger.info("Moon filter (%s): %d / %d eligible",
+    logger.info("Moon filter (%s): %d / %d eligible (non-mandatory)",
                 moon_phase, len(eligible), len(targets))
 
     # Sort by transit time for deterministic scheduling
     eligible.sort(key=lambda t: t.transit_time.mjd if t.transit_time else 0)
 
-    # 2. Greedy scheduling loop
     scheduled_entries = []
     scheduled_names = set()
+    # Reserved (start, end) wall-clock blocks for mandatory targets; the greedy
+    # loop must not place anything overlapping these.
+    reserved_blocks = []
+    unschedulable_mandatory = []
+
+    def _make_entry(t, start, end):
+        """Build a ScheduledEntry for ``t`` over [start, end] (used by the
+        mandatory reservation pass). Mirrors the greedy loop's exposure split
+        and charging fields so reserved blocks are billed identically."""
+        dur = end - start
+        total_exp_min = dur.to(u.minute).value - config.overhead_minutes
+        total_exp_sec = max(0, int(total_exp_min * 60))
+        n_exp = max(1, math.ceil(total_exp_sec / config.max_single_exposure_sec))
+        exp_sec = int(round(total_exp_sec / n_exp / config.exposure_round_sec)
+                      * config.exposure_round_sec)
+        if exp_sec < 10:
+            exp_sec = 10
+            n_exp = 1
+        mid = start + dur / 2
+        am = _get_airmass(t.coord, mid, config.location)
+        charged_min = exp_sec * n_exp / 60.0 + config.overhead_minutes
+        wall_min = dur.to(u.minute).value
+        return ScheduledEntry(
+            target=t, start=start, end=end, airmass=am,
+            exp_str=f"{n_exp}x{exp_sec}s", n_exp=n_exp, exp_sec=exp_sec,
+            program=t.program, charged_minutes=charged_min,
+            padding_minutes=max(0.0, wall_min - charged_min),
+        )
+
+    # 2. Mandatory reservation pass (PI override). Before the greedy fill, place
+    # each mandatory target at its best (transit / lowest-airmass) slot within
+    # its observable window, in transit-time order, so a non-negotiable target
+    # is guaranteed time even if its composite score is low. A mandatory target
+    # with NO observable window tonight (never reaches the airmass limit) cannot
+    # be scheduled — it is recorded in unschedulable_mandatory and warned about
+    # rather than silently dropped. Conflicting mandatory targets are placed in
+    # transit order; one that can no longer fit is likewise recorded.
+    mandatory_targets = [t for t in targets if getattr(t, 'mandatory', False)]
+    mandatory_targets.sort(
+        key=lambda t: t.transit_time.mjd if t.transit_time else float('inf'))
+    for t in mandatory_targets:
+        # Physics gate: must have an observable window tonight.
+        if t.window_start is None or t.window_end is None:
+            logger.warning(
+                "MANDATORY target %s is NOT observable tonight (never reaches "
+                "the airmass limit) — cannot schedule", t.name)
+            unschedulable_mandatory.append(t)
+            continue
+
+        exp_min = t.exposure_minutes
+        if not math.isfinite(exp_min):
+            exp_min = config.fallback_exposure_minutes
+        dur = (exp_min + config.overhead_minutes) * u.minute
+
+        # Preferred placement: centered on transit (lowest airmass), clamped to
+        # the observable window and the night.
+        win_start = max(t.window_start, evening)
+        win_end = min(t.window_end, morning)
+        transit = t.transit_time if t.transit_time is not None else win_start
+        start = transit - dur / 2
+        if start < win_start:
+            start = win_start
+        if start + dur > win_end:
+            start = win_end - dur
+
+        # Slide forward past any already-reserved block it would overlap.
+        placed = False
+        for _ in range(len(reserved_blocks) + 1):
+            conflict = None
+            for (bs, be) in reserved_blocks:
+                if start < be and start + dur > bs:
+                    conflict = be
+                    break
+            if conflict is None:
+                placed = True
+                break
+            start = conflict  # slide to just after the conflicting block
+
+        if not placed or start < win_start or start + dur > win_end:
+            logger.warning(
+                "MANDATORY target %s cannot fit its observable window tonight "
+                "(conflicts with another reserved block) — not scheduled",
+                t.name)
+            unschedulable_mandatory.append(t)
+            continue
+
+        end = start + dur
+        entry = _make_entry(t, start, end)
+        scheduled_entries.append(entry)
+        scheduled_names.add(t.name)
+        reserved_blocks.append((start, end))
+        logger.info("Reserved MANDATORY target %s at %s-%s",
+                    t.name, start.iso[11:16], end.iso[11:16])
+
+    # 3. Greedy scheduling loop (fills the remaining time with non-mandatory
+    # targets, skipping any reserved mandatory blocks).
     current = evening
     # Coord of the most-recently placed science target; None before the first
     # pick (so the first target incurs no slew penalty).
     prev_coord = None
 
+    def _next_reserved_after(t0):
+        """Start time of the earliest reserved block beginning at/after ``t0``,
+        or None. Used to skip the greedy cursor over mandatory reservations."""
+        starts = [bs for (bs, be) in reserved_blocks if bs >= t0]
+        return min(starts, key=lambda s: s.mjd) if starts else None
+
+    def _overlaps_reserved(start, end):
+        """True if [start, end] overlaps any reserved mandatory block."""
+        for (bs, be) in reserved_blocks:
+            if start < be and end > bs:
+                return True
+        return False
+
     while current < morning:
+        # If the cursor sits inside a reserved mandatory block, jump to its end.
+        bumped = True
+        while bumped:
+            bumped = False
+            for (bs, be) in reserved_blocks:
+                if bs <= current < be:
+                    current = be
+                    bumped = True
+                    break
+        if current >= morning:
+            break
+
         best = None
         best_score = -np.inf
 
@@ -454,6 +579,9 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             if current < t.window_start or current + dur > t.window_end:
                 continue
             if current + dur > morning:
+                continue
+            # Must not collide with a reserved mandatory block.
+            if _overlaps_reserved(current, current + dur):
                 continue
 
             # Check airmass at midpoint
@@ -499,7 +627,14 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                 gap_min = (next_ws - proposed_end).to(u.minute).value
                 if 0 < gap_min <= config.gap_fill_max_minutes:
                     extended_end = next_ws
-                    if extended_end <= best.window_end and extended_end <= morning:
+                    # Do not stretch across a reserved mandatory block.
+                    next_res = _next_reserved_after(proposed_end)
+                    if next_res is not None and next_res < extended_end:
+                        extended_end = next_res
+                    if (extended_end > proposed_end
+                            and extended_end <= best.window_end
+                            and extended_end <= morning
+                            and not _overlaps_reserved(current, extended_end)):
                         mid_ext = current + (extended_end - current) / 2
                         am_ext = _get_airmass(best.coord, mid_ext, config.location)
                         if am_ext <= config.max_airmass:
@@ -546,14 +681,16 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             prev_coord = best.coord  # anchor slew penalty to this pointing
             current = current + dur
         else:
-            # Jump to next available window
-            future = [t for t in eligible
-                      if t.name not in scheduled_names
-                      and t.window_start is not None
-                      and t.window_start > current]
-            if future:
-                next_t = min(future, key=lambda t: t.window_start.mjd)
-                current = next_t.window_start
+            # Jump to the next available window — either an eligible target's
+            # window start or the end of a reserved mandatory block (so the
+            # cursor advances past reservations rather than stalling).
+            candidates = [t.window_start for t in eligible
+                          if t.name not in scheduled_names
+                          and t.window_start is not None
+                          and t.window_start > current]
+            candidates += [be for (bs, be) in reserved_blocks if be > current]
+            if candidates:
+                current = min(candidates, key=lambda s: s.mjd)
             else:
                 break
 
@@ -569,8 +706,12 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             )
             if t.window_end is not None:
                 new_end = min(new_end, t.window_end)
+            # Do not stretch across a reserved mandatory block.
+            next_res = _next_reserved_after(entry.end)
+            if next_res is not None and next_res < new_end:
+                new_end = next_res
             added = (new_end - entry.end).to(u.minute).value
-            if added > 0:
+            if added > 0 and not _overlaps_reserved(entry.start, new_end):
                 new_mid = entry.start + (new_end - entry.start) / 2
                 new_am = _get_airmass(t.coord, new_mid, config.location)
                 if new_am <= config.max_airmass:
@@ -658,6 +799,7 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
         standards_mid=std_mid,
         scoring_mode=scoring_mode,
         score_breakdowns=score_breakdowns,
+        unschedulable_mandatory=unschedulable_mandatory,
     )
 
     logger.info("Schedule: %d targets, %.0f min, %.0f%% efficiency",

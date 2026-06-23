@@ -18,9 +18,9 @@ from orchestrator.prioritizer import compute_composite_score
 DATE = '2026-10-15'
 
 
-def _target(name, ra=150.0, dec=2.0, priority=1, notes=''):
+def _target(name, ra=150.0, dec=2.0, priority=1, notes='', keywords=None):
     return Target(name=name, ra_deg=ra, dec_deg=dec, priority=priority,
-                  notes=notes)
+                  notes=notes, keywords=list(keywords or []))
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +259,7 @@ def test_partially_done_p1_beats_filler_via_floor(tmp_path):
     assert p1_complete == pytest.approx(0.15)
 
     filler = _target('FILLER', ra=10.0, dec=-20.0, priority=4,
-                     notes='backup filler')
+                     keywords=['backup', 'filler'])
     s_p1, _ = compute_composite_score(p1, completeness=p1_complete)
     s_filler, _ = compute_composite_score(filler, completeness=1.0)
     assert s_p1 > s_filler
@@ -271,7 +271,7 @@ def test_partially_done_p1_beats_filler_via_floor(tmp_path):
 
 def test_completeness_one_matches_prior_behavior():
     """compute_composite_score with completeness=1.0 (default) is unchanged."""
-    t = _target('T', priority=2, notes='urgent')
+    t = _target('T', priority=2, keywords=['urgent'])
     s_default, bd_default = compute_composite_score(t)
     s_explicit, bd_explicit = compute_composite_score(t, completeness=1.0)
     assert s_default == s_explicit
@@ -281,7 +281,7 @@ def test_completeness_one_matches_prior_behavior():
 def test_breakdown_invariant_holds_with_completeness():
     """total == science_term + observability_term + keyword_term, even with a
     non-trivial completeness factor folded into the science core."""
-    t = _target('T', priority=1, notes='high priority')
+    t = _target('T', priority=1, keywords=['high_priority'])
     for c in (0.0, 0.15, 0.5, 1.0):
         _, bd = compute_composite_score(t, completeness=c)
         assert bd['total'] == pytest.approx(

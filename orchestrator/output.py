@@ -65,6 +65,8 @@ def write_timeline(plan: ObsPlan, path: str) -> None:
         start_str = entry.start.datetime.strftime('%H:%M') if entry.start else '??:??'
         end_str = entry.end.datetime.strftime('%H:%M') if entry.end else '??:??'
         comment = f"P{entry.target.priority}"
+        if getattr(entry.target, 'mandatory', False):
+            comment += " [MANDATORY]"
         if entry.target.notes:
             comment += f" {entry.target.notes}"
         lines.append(
@@ -235,8 +237,11 @@ def write_summary(plan: ObsPlan, path: str, accountant=None, ledger=None) -> Non
     for i, entry in enumerate(plan.scheduled, 1):
         start_str = entry.start.datetime.strftime('%H:%M') if entry.start else '??:??'
         end_str = entry.end.datetime.strftime('%H:%M') if entry.end else '??:??'
+        name_disp = entry.target.name
+        if getattr(entry.target, 'mandatory', False):
+            name_disp = f"{entry.target.name} [MANDATORY]"
         row = (
-            f"{i:<4} {entry.target.name:<18} {start_str:>8} {end_str:>8} "
+            f"{i:<4} {name_disp:<18} {start_str:>8} {end_str:>8} "
             f"{entry.exp_str:>10} {entry.airmass:>5.2f} {entry.target.priority:>2}"
         )
         if show_ledger:
@@ -250,6 +255,20 @@ def write_summary(plan: ObsPlan, path: str, accountant=None, ledger=None) -> Non
 
     lines.append("-" * width)
     lines.append("")
+
+    # Unschedulable mandatory (PI-override) targets: physically not observable
+    # tonight (never reach the airmass limit), so the override could not be
+    # honored. Surfaced prominently rather than silently dropped.
+    if plan.unschedulable_mandatory:
+        lines.append("!" * width)
+        lines.append("WARNING: Unschedulable mandatory targets "
+                     "(not observable tonight):")
+        for t in plan.unschedulable_mandatory:
+            mag_str = f"mag={t.mag:.1f}" if math.isfinite(t.mag) else "mag=?"
+            lines.append(f"  {t.name:<18} P{t.priority} {mag_str} "
+                         f"(never reaches airmass limit)")
+        lines.append("!" * width)
+        lines.append("")
 
     # Completed targets excluded for sufficient integration (W11). With a
     # ledger, append the per-phase integration breakdown (W12).
@@ -285,11 +304,11 @@ def write_summary(plan: ObsPlan, path: str, accountant=None, ledger=None) -> Non
     # the prioritizer ran (breakdowns attached to the plan).
     if plan.score_breakdowns:
         from .prioritizer import (SCIENCE_SCALE, OBSERVABILITY_BONUS,
-                                  KEYWORD_SCALE)
+                                  KEYWORD_BONUS)
         lines.append("-" * 78)
         lines.append(
             f"Composite score breakdown ({SCIENCE_SCALE:g} x sci x budget x "
-            f"phase + {OBSERVABILITY_BONUS:g} x obs + {KEYWORD_SCALE:g} x kw):")
+            f"phase + {OBSERVABILITY_BONUS:g} x obs + {KEYWORD_BONUS:g} x kw):")
         lines.append(f"{'Target':<18} {'sci':>5} {'budget':>6} {'phase':>5} "
                      f"{'obs':>5} {'kw':>6} {'total':>7}")
         lines.append("-" * 78)

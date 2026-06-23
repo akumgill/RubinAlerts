@@ -12,7 +12,7 @@ from orchestrator.prioritizer import (
     SCIENCE_SCALE,
     SCIENCE_WEIGHTS,
     OBSERVABILITY_BONUS,
-    KEYWORD_SCALE,
+    KEYWORD_BONUS,
 )
 
 
@@ -39,7 +39,7 @@ def test_phase_weight_above_one_clamps():
 def test_breakdown_components_combine_to_score():
     """Each term equals its formula and they sum to the returned score."""
     t = Target(name='T1', ra_deg=150.0, dec_deg=2.0, priority=2,
-               phase_weight=0.8, notes='urgent classification needed')
+               phase_weight=0.8, keywords=['urgent', 'classification_needed'])
     score, bd = compute_composite_score(t)
 
     assert math.isclose(
@@ -47,7 +47,7 @@ def test_breakdown_components_combine_to_score():
         SCIENCE_SCALE * bd['science'] * bd['budget'] * bd['phase'])
     assert math.isclose(
         bd['observability_term'], OBSERVABILITY_BONUS * bd['observability'])
-    assert math.isclose(bd['keyword_term'], KEYWORD_SCALE * bd['keyword_adj'])
+    assert math.isclose(bd['keyword_term'], KEYWORD_BONUS * bd['keyword_adj'])
     assert math.isclose(
         score,
         bd['science_term'] + bd['observability_term'] + bd['keyword_term'])

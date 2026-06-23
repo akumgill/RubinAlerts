@@ -29,7 +29,7 @@ SCIENCE_WEIGHTS = {1: 1.0, 2: 0.7, 3: 0.4, 4: 0.2}
 #
 #   science_term       = SCIENCE_SCALE × science × budget × phase
 #   observability_term = OBSERVABILITY_BONUS × observability
-#   keyword_term       = KEYWORD_SCALE × keyword_adj
+#   keyword_term       = KEYWORD_BONUS × keyword_adj
 #   total              = science_term + observability_term + keyword_term
 #
 # All three core factors (science, budget, phase) live in [0, 1] (phase is
@@ -47,45 +47,70 @@ SCIENCE_SCALE = 100.0
 # tier (which differ by ~30 pts: 100→70→40→20).
 OBSERVABILITY_BONUS = 20.0
 
-# Keyword adjustment is a net signed value (boosts − demotions, typically in
-# roughly [-0.6, +0.6]). Scaled by 50 it becomes a meaningful but bounded human
-# override: an "urgent"/"high priority" note (~+0.3..+0.5) adds ~15-25 pts, and
-# a "backup"/"filler" note subtracts similarly — enough to reorder within a
+# Keyword adjustment is a net signed value (boosts − demotions). It is the sum
+# of the recognized structured tags' weights (see KEYWORD_WEIGHTS), CLAMPED to
+# [-KEYWORD_ADJ_CLAMP, +KEYWORD_ADJ_CLAMP] so stacked tags can never leapfrog a
+# full priority tier. Scaled by KEYWORD_BONUS it becomes a meaningful but
+# bounded human override: an "urgent"/"high_priority" tag (~+0.2..+0.3) adds
+# ~10-15 pts, and the net is capped at ±25 pts — enough to reorder within a
 # tier or nudge across an adjacent one, never to dominate the science core.
-KEYWORD_SCALE = 50.0
+# Renamed from KEYWORD_SCALE so both additive nudges share the _BONUS suffix
+# with OBSERVABILITY_BONUS.
+KEYWORD_BONUS = 50.0
 
-# Keyword adjustments: scan target notes for scheduling signals
-KEYWORD_BOOSTS = {
-    'high priority': 0.3,
+# ---------------------------------------------------------------------------
+# Controlled keyword vocabulary
+# ---------------------------------------------------------------------------
+# Structured, validated scheduling tags. These are matched by EXACT membership
+# against ``Target.keywords`` (a controlled vocabulary populated/validated at
+# ingestion in normalize.py), NOT by substring scanning of the free-text
+# ``notes`` field. Underscored keys avoid the old substring false-fires (e.g.
+# 'too' matching "too faint"). ``notes`` stays a human-readable field and is no
+# longer scored. normalize.py imports this dict to validate tags, so the
+# vocabulary lives here (where scoring is defined) as the single source of
+# truth; there is no import cycle (normalize does not import back into here for
+# anything else, and prioritizer never imports normalize).
+KEYWORD_WEIGHTS = {
+    'high_priority': 0.3,
     'urgent': 0.2,
-    'too': 0.25,        # target of opportunity
-    'classification needed': 0.2,
+    'too': 0.25,                 # target of opportunity
+    'classification_needed': 0.2,
     'rising': 0.15,
-    'near peak': 0.15,
+    'near_peak': 0.15,
     'precursor': 0.1,
-}
-KEYWORD_DEMOTIONS = {
     'backup': -0.3,
     'filler': -0.2,
-    'low priority': -0.3,
-    'if time': -0.2,
+    'low_priority': -0.3,
+    'if_time': -0.2,
 }
 
+# Override ("non-negotiable") tags. These are NOT additive weights — they set
+# Target.mandatory = True at ingestion, forcing the target onto the schedule
+# (see planner.create_schedule). They contribute 0 to the keyword adjustment.
+OVERRIDE_KEYWORDS = {'override', 'mandatory'}
 
-def _keyword_adjustment(notes: str) -> float:
-    """Scan notes for scheduling keywords, return net adjustment."""
-    if not notes:
+# Net keyword adjustment is clamped to this magnitude so keywords can never
+# leapfrog a full priority tier (keyword_term is then bounded to
+# [-KEYWORD_ADJ_CLAMP * KEYWORD_BONUS, +...] == [-25, +25] at the defaults).
+KEYWORD_ADJ_CLAMP = 0.5
+
+
+def _keyword_adjustment(keywords) -> float:
+    """Net signed adjustment from a target's STRUCTURED keyword tags.
+
+    ``keywords`` is the controlled-vocabulary list (Target.keywords). Sums
+    ``KEYWORD_WEIGHTS[k]`` for each recognized tag (exact membership), ignores
+    unknown tags and override tags (which set Target.mandatory, not a weight),
+    then clamps the net to [-KEYWORD_ADJ_CLAMP, +KEYWORD_ADJ_CLAMP].
+    """
+    if not keywords:
         return 0.0
 
-    notes_lower = notes.lower()
     adj = 0.0
-    for kw, boost in KEYWORD_BOOSTS.items():
-        if kw in notes_lower:
-            adj += boost
-    for kw, demote in KEYWORD_DEMOTIONS.items():
-        if kw in notes_lower:
-            adj += demote
-    return adj
+    for kw in keywords:
+        if kw in KEYWORD_WEIGHTS:
+            adj += KEYWORD_WEIGHTS[kw]
+    return max(-KEYWORD_ADJ_CLAMP, min(KEYWORD_ADJ_CLAMP, adj))
 
 
 def _clamp01(x: float) -> float:
@@ -151,7 +176,7 @@ def compute_composite_score(target: Target,
 
         science_term       = SCIENCE_SCALE × science × budget × phase × completeness
         observability_term = OBSERVABILITY_BONUS × observability
-        keyword_term       = KEYWORD_SCALE × keyword_adj
+        keyword_term       = KEYWORD_BONUS × keyword_adj
         total              = science_term + observability_term + keyword_term
 
     The four core factors (science, budget, phase, completeness) all live in
@@ -178,7 +203,8 @@ def compute_composite_score(target: Target,
         Light curve phase weight, clamped to [0, 1] — near-peak targets score
         higher but can never exceed 1.0 (R2).
     keyword_adj : float
-        Net boost/demotion from notes keywords (signed).
+        Net boost/demotion from the target's structured keyword tags (signed,
+        clamped to [-KEYWORD_ADJ_CLAMP, +KEYWORD_ADJ_CLAMP]).
     completeness : float
         Per-target integration completeness factor in [0, 1] from the W11
         ledger; 1.0 when no ledger is in use (neutral).
@@ -225,13 +251,15 @@ def compute_composite_score(target: Target,
     # to [0, 1]. 1.0 (neutral) when no ledger is in use.
     completeness = _clamp01(completeness)
 
-    # Keyword adjustment (signed; not clamped — it is a bounded human override)
-    kw_adj = _keyword_adjustment(target.notes)
+    # Keyword adjustment from STRUCTURED tags (signed; clamped inside
+    # _keyword_adjustment to a bounded human override). Free-text notes are NOT
+    # scored — they stay a human-readable field.
+    kw_adj = _keyword_adjustment(getattr(target, 'keywords', None))
 
     # Composite: multiplicative science core + additive observability/keyword.
     science_term = SCIENCE_SCALE * science * budget * phase * completeness
     observability_term = OBSERVABILITY_BONUS * observability
-    keyword_term = KEYWORD_SCALE * kw_adj
+    keyword_term = KEYWORD_BONUS * kw_adj
     score = science_term + observability_term + keyword_term
 
     breakdown = {

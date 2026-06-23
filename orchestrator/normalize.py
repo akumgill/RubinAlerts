@@ -11,8 +11,50 @@ import astropy.units as u
 
 from .models import Target
 from .config import LLAMAS_CONFIG, LLAMASConfig
+# Controlled keyword vocabulary lives in prioritizer (single source of truth for
+# scoring). No import cycle: prioritizer never imports normalize.
+from .prioritizer import KEYWORD_WEIGHTS, OVERRIDE_KEYWORDS
 
 logger = logging.getLogger(__name__)
+
+
+def parse_keywords(raw, target_name: str = '') -> tuple:
+    """Parse a free-text ``keywords`` cell into structured, validated tags.
+
+    Tokens are split on commas or semicolons, normalized (strip, lowercase,
+    spaces -> underscores), then validated against the controlled vocabulary
+    (KEYWORD_WEIGHTS keys ∪ OVERRIDE_KEYWORDS). Unknown tokens are dropped with
+    a warning. Override tokens ('override'/'mandatory') set the mandatory flag
+    rather than becoming scored tags.
+
+    Returns
+    -------
+    (keywords, mandatory) : tuple of (list of str, bool)
+        ``keywords`` is the recognized NON-override tags; ``mandatory`` is True
+        if any override token was present.
+    """
+    if raw is None:
+        return [], False
+    text = str(raw).strip()
+    if not text:
+        return [], False
+
+    valid = set(KEYWORD_WEIGHTS) | set(OVERRIDE_KEYWORDS)
+    keywords = []
+    mandatory = False
+    for tok in re.split(r'[,;]', text):
+        norm = tok.strip().lower().replace(' ', '_')
+        if not norm:
+            continue
+        if norm in OVERRIDE_KEYWORDS:
+            mandatory = True
+        elif norm in KEYWORD_WEIGHTS:
+            keywords.append(norm)
+        else:
+            logger.warning(
+                "Target %s: dropping unknown keyword %r (not in controlled "
+                "vocabulary)", target_name or '?', norm)
+    return keywords, mandatory
 
 
 def parse_coordinates(ra_str: str, dec_str: str) -> tuple:
@@ -243,6 +285,13 @@ def load_targets_csv(path: str, night_mjd: float = float('nan'),
                 and math.isfinite(night_mjd)):
             delta_t = night_mjd - float(row['peak_mjd'])
 
+        # Optional structured keyword tags (controlled vocabulary). Comma- or
+        # semicolon-separated; unknown tokens dropped with a warning; an
+        # override token sets mandatory. Free-text ``notes`` is unaffected.
+        keywords, mandatory = [], False
+        if 'keywords' in df.columns and pd.notna(row.get('keywords')):
+            keywords, mandatory = parse_keywords(row.get('keywords'), name)
+
         t = Target(
             name=name,
             ra_deg=ra_deg,
@@ -254,6 +303,8 @@ def load_targets_csv(path: str, night_mjd: float = float('nan'),
             exposure_minutes=float(row['exposure']) if 'exposure' in df.columns and pd.notna(row.get('exposure')) else float('nan'),
             moon_constraint=str(row.get('moon', 'any')).strip() if pd.notna(row.get('moon')) else 'any',
             notes=str(row.get('notes', '')).strip() if pd.notna(row.get('notes')) else '',
+            keywords=keywords,
+            mandatory=mandatory,
             source='csv',
             program=program,
             phase_weight=phase_w,
@@ -365,8 +416,17 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
         if 'delta_t' in df.columns and pd.notna(row.get('delta_t')):
             delta_t = float(row['delta_t'])
 
+        name = str(row[name_col]).strip()
+
+        # Optional structured keyword tags (same controlled vocabulary as the
+        # manual CSV path). Unknown tokens dropped with a warning; override
+        # tokens set mandatory.
+        keywords, mandatory = [], False
+        if 'keywords' in df.columns and pd.notna(row.get('keywords')):
+            keywords, mandatory = parse_keywords(row.get('keywords'), name)
+
         t = Target(
-            name=str(row[name_col]).strip(),
+            name=name,
             ra_deg=float(row['ra']),
             dec_deg=float(row['dec']),
             priority=int(row['_priority']),
@@ -374,6 +434,8 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
             mag_filter=mag_filt,
             redshift=float(row['redshift']) if 'redshift' in df.columns and pd.notna(row.get('redshift')) else float('nan'),
             merit_score=float(row[merit_col]) if merit_col in df.columns else float('nan'),
+            keywords=keywords,
+            mandatory=mandatory,
             source='rubinalerts',
             program=default_program,
             phase_weight=phase_w,

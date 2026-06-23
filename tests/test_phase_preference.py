@@ -137,7 +137,7 @@ def test_breakdown_invariant_holds_with_phase_preference():
     """total == science_term + observability_term + keyword_term still holds;
     phase_preference is a label only."""
     t = Target(name='T', ra_deg=150.0, dec_deg=2.0, priority=1,
-               delta_t=-7.0, notes='high priority')
+               delta_t=-7.0, keywords=['high_priority'])
     s, bd = compute_composite_score(t)
     assert 'phase_preference' in bd
     assert bd['total'] == pytest.approx(

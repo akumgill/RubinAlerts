@@ -28,7 +28,16 @@ class Target:
     redshift: float = float('nan')
     exposure_minutes: float = float('nan')
     moon_constraint: str = 'any'
-    notes: str = ''
+    notes: str = ''  # free-text, human-readable; NOT scored
+    # Structured, validated scheduling tags (controlled vocabulary — see
+    # prioritizer.KEYWORD_WEIGHTS). Populated/validated at ingestion
+    # (normalize.py); exact membership drives the keyword adjustment, replacing
+    # the old substring scan of ``notes``.
+    keywords: list = field(default_factory=list)
+    # PI override ("non-negotiable"): set True at ingestion by an 'override' /
+    # 'mandatory' tag. Forces the target onto the schedule (planner reserves it,
+    # bypassing the moon-phase filter but not the physics).
+    mandatory: bool = False
     source: str = ''
     program: str = 'default'
     merit_score: float = float('nan')
@@ -138,6 +147,10 @@ class ObsPlan:
     # Targets excluded from scheduling because the per-target integration ledger
     # marks them as already having sufficient cumulative integration (W11).
     completed: List[Target] = field(default_factory=list)
+    # Mandatory (PI-override) targets that could NOT be scheduled because they
+    # never reach the airmass limit tonight (physics, not policy). Surfaced in
+    # the summary so a non-negotiable target never silently vanishes.
+    unschedulable_mandatory: List[Target] = field(default_factory=list)
 
     standards_start: Optional[dict] = None
     standards_end: Optional[dict] = None

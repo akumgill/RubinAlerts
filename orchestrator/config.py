@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LLAMASConfig:
-    """Configuration for the LLAMAS IFU spectrograph at Magellan/Clay."""
+    """Configuration for the LLAMAS IFU spectrograph at Magellan/Baade."""
 
     # LCO site
     latitude: float = -29.0146
@@ -48,6 +48,14 @@ class LLAMASConfig:
     ])
 
     fallback_exposure_minutes: float = 45.0
+
+    # Sub-exposure splitting. A long integration is broken into N sub-exposures
+    # each no longer than ``max_single_exposure_sec`` to limit cosmic-ray
+    # accumulation per frame (CR mitigation; frames are later co-added).
+    # Per-frame exposure is rounded to a multiple of ``exposure_round_sec`` for
+    # clean, schedulable exposure strings.
+    max_single_exposure_sec: float = 900.0   # 15 min cap per sub-exposure (CR mitigation)
+    exposure_round_sec: float = 10.0         # round per-frame exposure to this granularity
 
     @property
     def location(self) -> EarthLocation:

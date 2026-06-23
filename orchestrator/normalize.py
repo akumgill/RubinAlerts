@@ -129,13 +129,53 @@ def estimate_llamas_exposure(redshift: float, mag: float, moon: str = 'grey',
     return config.fallback_exposure_minutes, 'any'
 
 
-def load_targets_csv(path: str) -> list:
+# Gaussian time-weight scale (days). Matches the alert-pipeline merit
+# w_time = exp(-delta_t² / (2·tau²)) with tau=10 d (core.magellan_planning),
+# so manual targets with a peak_mjd are weighted on the same footing.
+PHASE_WEIGHT_TAU_DAYS = 10.0
+
+
+def phase_weight_from_peak(peak_mjd: float, night_mjd: float,
+                           tau_days: float = PHASE_WEIGHT_TAU_DAYS) -> float:
+    """Gaussian phase weight from time-since-peak, matching the alert pipeline.
+
+    Reuses the same form as core.magellan_planning's w_time
+    (exp(-delta_t² / (2·tau²)), tau=10 d) so a manually-entered peak_mjd
+    scores consistently with alert-sourced targets.
+
+    Returns float('nan') if either input is non-finite.
+    """
+    if not (math.isfinite(peak_mjd) and math.isfinite(night_mjd)):
+        return float('nan')
+    delta_t = night_mjd - peak_mjd
+    return math.exp(-delta_t ** 2 / (2.0 * tau_days ** 2))
+
+
+def load_targets_csv(path: str, night_mjd: float = float('nan'),
+                     default_program: str = 'default') -> list:
     """Load targets from a user-provided CSV file.
 
     Expected columns: name, ra, dec (required); priority, mag, filter,
-    redshift, exposure, moon, notes (optional).
+    redshift, exposure, moon, notes (optional). Optional manual-workflow
+    columns also honored: ``program`` (per-PI accounting), ``phase_weight``
+    (w_time, used directly), and ``peak_mjd`` (converted to a phase weight via
+    :func:`phase_weight_from_peak` when ``night_mjd`` is supplied and
+    phase_weight is absent).
 
     Coordinates can be sexagesimal (HH:MM:SS / +DD:MM:SS) or decimal degrees.
+
+    Parameters
+    ----------
+    path : str
+        Path to the target CSV.
+    night_mjd : float
+        MJD of the observing night, used only to convert a ``peak_mjd`` column
+        into a phase weight. If non-finite (default), peak_mjd is ignored and
+        phase stays neutral (a warning is logged per affected row).
+    default_program : str
+        Program assigned to rows lacking an explicit ``program`` column/value.
+        A warning is logged for each target charged to the default so it is
+        never silently mis-attributed.
 
     Returns
     -------
@@ -165,8 +205,36 @@ def load_targets_csv(path: str) -> list:
         if 'filter' in df.columns and pd.notna(row.get('filter')):
             mag_filt = str(row['filter']).strip()
 
+        name = str(row['name']).strip()
+
+        # Optional program column for per-PI accounting. Absent/blank -> default,
+        # but warn so manual targets are never silently mis-attributed.
+        program = default_program
+        if 'program' in df.columns and pd.notna(row.get('program')) \
+                and str(row['program']).strip():
+            program = str(row['program']).strip()
+        else:
+            logger.warning(
+                "Target %s has no program; charging to default program %r",
+                name, default_program)
+
+        # Optional phase weight. An explicit phase_weight wins; otherwise derive
+        # it from peak_mjd (needs night_mjd). Neither given -> neutral (NaN),
+        # which _phase_factor treats as 1.0 (do NOT fabricate near-peak).
+        phase_w = float('nan')
+        if 'phase_weight' in df.columns and pd.notna(row.get('phase_weight')):
+            phase_w = float(row['phase_weight'])
+        elif 'peak_mjd' in df.columns and pd.notna(row.get('peak_mjd')):
+            peak_mjd = float(row['peak_mjd'])
+            if math.isfinite(night_mjd):
+                phase_w = phase_weight_from_peak(peak_mjd, night_mjd)
+            else:
+                logger.warning(
+                    "Target %s has peak_mjd but no night date was supplied; "
+                    "leaving phase neutral", name)
+
         t = Target(
-            name=str(row['name']).strip(),
+            name=name,
             ra_deg=ra_deg,
             dec_deg=dec_deg,
             priority=int(row.get('priority', 3)) if pd.notna(row.get('priority')) else 3,
@@ -177,6 +245,8 @@ def load_targets_csv(path: str) -> list:
             moon_constraint=str(row.get('moon', 'any')).strip() if pd.notna(row.get('moon')) else 'any',
             notes=str(row.get('notes', '')).strip() if pd.notna(row.get('notes')) else '',
             source='csv',
+            program=program,
+            phase_weight=phase_w,
         )
         targets.append(t)
 

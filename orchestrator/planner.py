@@ -500,12 +500,14 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                             dur = extended_end - current
 
             # Calculate exposure parameters
-            # Split total into sub-exposures of at most 900s (15 min) each
+            # Split total into sub-exposures of at most max_single_exposure_sec
+            # each (CR mitigation), per-frame rounded to exposure_round_sec.
             total_exp_min = dur.to(u.minute).value - config.overhead_minutes
             total_exp_sec = int(total_exp_min * 60)
-            max_single_sec = 900
+            max_single_sec = config.max_single_exposure_sec
             n_exp = max(1, math.ceil(total_exp_sec / max_single_sec))
-            exp_sec = int(round(total_exp_sec / n_exp / 10) * 10)
+            exp_sec = int(round(total_exp_sec / n_exp / config.exposure_round_sec)
+                          * config.exposure_round_sec)
             if exp_sec < 10:
                 exp_sec = 10
                 n_exp = 1
@@ -569,7 +571,10 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                     entry.end = new_end
                     entry.airmass = new_am
                     total_exp_min = (entry.end - entry.start).to(u.minute).value - config.overhead_minutes
-                    entry.exp_sec = int(round(total_exp_min * 60 / entry.n_exp / 10) * 10)
+                    entry.exp_sec = int(
+                        round(total_exp_min * 60 / entry.n_exp
+                              / config.exposure_round_sec)
+                        * config.exposure_round_sec)
                     if entry.exp_sec < 10:
                         entry.exp_sec = 10
                     entry.exp_str = f"{entry.n_exp}x{entry.exp_sec}s"

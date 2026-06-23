@@ -8,6 +8,8 @@ import logging
 import math
 from pathlib import Path
 
+from astropy.time import Time
+
 from .accounting import TimeAccountant
 from .config import LLAMAS_CONFIG, LLAMASConfig
 from .models import ObsPlan
@@ -67,10 +69,15 @@ def run_nightly(date: str,
             default_program=accountant.default_program,
         )
     else:
-        targets = load_targets_csv(candidates_path)
-        for t in targets:
-            if t.program == 'default':
-                t.program = accountant.default_program
+        try:
+            night_mjd = Time(date).mjd
+        except Exception:
+            night_mjd = float('nan')
+        targets = load_targets_csv(
+            candidates_path,
+            night_mjd=night_mjd,
+            default_program=accountant.default_program,
+        )
 
     if not targets:
         logger.error("No targets loaded from %s", candidates_path)

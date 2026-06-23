@@ -12,6 +12,8 @@ import math
 import sys
 from pathlib import Path
 
+from astropy.time import Time
+
 from .config import LLAMAS_CONFIG
 from .normalize import (
     load_targets_csv, load_from_rubinalerts, estimate_llamas_exposure,
@@ -73,7 +75,11 @@ def cmd_plan(args):
     if args.from_rubinalerts:
         targets = load_from_rubinalerts(args.targets)
     else:
-        targets = load_targets_csv(args.targets)
+        try:
+            night_mjd = Time(args.date).mjd
+        except Exception:
+            night_mjd = float('nan')
+        targets = load_targets_csv(args.targets, night_mjd=night_mjd)
 
     if not targets:
         logger.error("No targets loaded. Exiting.")

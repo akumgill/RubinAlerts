@@ -89,16 +89,4 @@ Validated all findings against code. Notable pushback / corrections:
 
 Hard rule: **no test may hit a live broker/DB/API** — mock/stub everything.
 
-### 2026-06-23 — Stage 3 progress + new requirement
-
-- **Chunk A+B committed & verified** (7 tests green): `20c1dad` test scaffold,
-  `882e222` fold moon into merit + coverage-aware w_broker (R1, R6).
-- **New PI requirement (2026-06-23):** track **cumulative integration time per target
-  across nights** and a completeness signal, so consecutive nights don't re-observe a
-  target that already has enough integration time. Distinct from per-program hour
-  budgets. Routed to architect as work item **W11** (chunk H); design questions: target
-  identity across nights, completeness criterion (cumulative vs required exposure),
-  cross-night persistence, prioritizer integration (down-weight/exclude satisfied targets,
-  only schedule the *remaining* needed time). Slots after accounting (D) + prioritizer (E).
-
 

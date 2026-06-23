@@ -98,9 +98,10 @@ def run_nightly(date: str,
         return ObsPlan(date=date, moon_phase=moon_phase,
                        evening_twilight=evening, morning_twilight=morning)
 
-    # 6. Rank targets with composite scoring
-    scores = rank_targets(observable, accountant, evening, morning, config,
-                          moon_phase=moon_phase)
+    # 6. Rank targets with composite scoring (breakdowns are attached to each
+    # target and flow through create_schedule onto the plan for write_summary).
+    scores, _breakdowns = rank_targets(observable, accountant, evening, morning,
+                                       config, moon_phase=moon_phase)
 
     # 7. Create schedule (charges time automatically via accountant)
     plan = create_schedule(

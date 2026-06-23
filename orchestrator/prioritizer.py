@@ -6,7 +6,7 @@ and keyword signals into a single score for the greedy scheduler.
 
 import logging
 import math
-from typing import Optional
+from typing import Optional, Tuple
 
 from astropy.time import Time
 import astropy.units as u
@@ -19,6 +19,40 @@ logger = logging.getLogger(__name__)
 
 # Priority → base science weight
 SCIENCE_WEIGHTS = {1: 1.0, 2: 0.7, 3: 0.4, 4: 0.2}
+
+# ---------------------------------------------------------------------------
+# Composite-score scaling constants
+# ---------------------------------------------------------------------------
+# The composite score is a *multiplicative science core* plus two *additive
+# nudges*. Each constant below sets the relative weight of one term; they are
+# chosen so a PI can reconstruct any ranking by hand from the breakdown dict.
+#
+#   science_term       = SCIENCE_SCALE × science × budget × phase
+#   observability_term = OBSERVABILITY_BONUS × observability
+#   keyword_term       = KEYWORD_SCALE × keyword_adj
+#   total              = science_term + observability_term + keyword_term
+#
+# All three core factors (science, budget, phase) live in [0, 1] (phase is
+# clamped below), so the science term spans [0, SCIENCE_SCALE]. Setting
+# SCIENCE_SCALE = 100 makes the science core the dominant axis: a P1 target on
+# a healthy budget at peak (1×1×1) earns ~100, while a P4 (0.2) earns ~20.
+SCIENCE_SCALE = 100.0
+
+# Observability is a fraction in [0, 1] of the night the target is up. It is an
+# additive *nudge* (bonus), not a multiplier, so a poorly-observable but
+# scientifically vital target is not zeroed out — it just loses up to 20 pts.
+# At 20, observability can swing a ranking between near-equal science tiers
+# (e.g. it can lift a fully-observable P2 core above a barely-up P1 core only
+# when the science gap is small), but cannot by itself outrank a full priority
+# tier (which differ by ~30 pts: 100→70→40→20).
+OBSERVABILITY_BONUS = 20.0
+
+# Keyword adjustment is a net signed value (boosts − demotions, typically in
+# roughly [-0.6, +0.6]). Scaled by 50 it becomes a meaningful but bounded human
+# override: an "urgent"/"high priority" note (~+0.3..+0.5) adds ~15-25 pts, and
+# a "backup"/"filler" note subtracts similarly — enough to reorder within a
+# tier or nudge across an adjacent one, never to dominate the science core.
+KEYWORD_SCALE = 50.0
 
 # Keyword adjustments: scan target notes for scheduling signals
 KEYWORD_BOOSTS = {
@@ -54,15 +88,26 @@ def _keyword_adjustment(notes: str) -> float:
     return adj
 
 
+def _clamp01(x: float) -> float:
+    """Clamp a value to [0, 1]; non-finite → 0.0."""
+    if not math.isfinite(x):
+        return 0.0
+    return max(0.0, min(1.0, x))
+
+
 def _phase_factor(target: Target) -> float:
     """Light curve phase factor: targets near peak are more valuable.
 
     Uses phase_weight from the alert pipeline (w_time = exp(-dt²/2τ²))
     if available. Falls back to 1.0 for manually-entered targets or
     those without timing info.
+
+    Clamped to [0, 1] so a malformed/over-unity phase_weight can never let a
+    stale near-peak target blow past the science core (R2): the multiplicative
+    core is bounded at 1.0 and the science term at SCIENCE_SCALE.
     """
     if math.isfinite(target.phase_weight):
-        return target.phase_weight
+        return _clamp01(target.phase_weight)
     return 1.0
 
 
@@ -71,55 +116,96 @@ def compute_composite_score(target: Target,
                             evening: Optional[Time] = None,
                             morning: Optional[Time] = None,
                             config: LLAMASConfig = None,
-                            moon_phase: Optional[str] = None) -> float:
+                            moon_phase: Optional[str] = None
+                            ) -> Tuple[float, dict]:
     """Compute composite priority score for scheduling.
+
+    Scoring model
+    -------------
+    The score is a **multiplicative science core** plus two **additive
+    nudges**, so a PI can reconstruct any ranking by hand from the returned
+    breakdown:
+
+        science_term       = SCIENCE_SCALE × science × budget × phase
+        observability_term = OBSERVABILITY_BONUS × observability
+        keyword_term       = KEYWORD_SCALE × keyword_adj
+        total              = science_term + observability_term + keyword_term
+
+    The three core factors (science, budget, phase) all live in [0, 1] (phase
+    is clamped here, observability is clamped, budget/science are sane by
+    construction), so the multiplicative core is bounded at 1.0 and the science
+    term at SCIENCE_SCALE. Observability and keywords are *additive* nudges —
+    they reorder within or across adjacent tiers but cannot, by themselves,
+    leapfrog the science core (see the constant docstrings above for why the
+    scales are 100 / 20 / 50).
 
     Components
     ----------
     science_weight : float
-        P1-P4 mapped to 1.0/0.7/0.4/0.2.
+        P1-P4 mapped to 1.0/0.7/0.4/0.2 (in [0, 1]).
     budget_factor : float
-        1.0/0.5/0.1 based on remaining program hours.
+        1.0/0.5/0.1 based on remaining program hours (in [0, 1]).
     observability : float
-        Fraction of night target is above airmass limit (0-1).
+        Fraction of night target is above airmass limit, clamped to [0, 1].
     phase_factor : float
-        Light curve phase weight — near-peak targets score higher.
+        Light curve phase weight, clamped to [0, 1] — near-peak targets score
+        higher but can never exceed 1.0 (R2).
     keyword_adj : float
-        Boost/demotion from notes keywords.
+        Net boost/demotion from notes keywords (signed).
 
     Returns
     -------
-    float
-        Composite score; higher = schedule first.
+    (score, breakdown) : tuple of (float, dict)
+        ``score`` is the composite total (higher = schedule first).
+        ``breakdown`` records every input factor and term:
+        ``science``, ``budget``, ``phase``, ``observability``, ``keyword_adj``,
+        ``science_term``, ``observability_term``, ``keyword_term``, ``total``.
     """
     if config is None:
         config = LLAMAS_CONFIG
 
-    # Science priority
+    # Science priority (table values are already in [0, 1])
     science = SCIENCE_WEIGHTS.get(target.priority, 0.3)
 
-    # Budget factor
+    # Budget factor (accountant returns 1.0/0.5/0.1, all in [0, 1]); clamp
+    # defensively in case a future accountant returns out-of-range values.
     budget = 1.0
     if accountant is not None:
         budget = accountant.get_budget_factor(target.program, moon_phase)
+    budget = _clamp01(budget)
 
-    # Observability fraction
+    # Observability fraction, clamped to [0, 1].
     observability = 0.5  # default if twilight not provided
     if evening is not None and morning is not None:
         night_hours = (morning - evening).to(u.hour).value
         if night_hours > 0 and target.window_hours > 0:
-            observability = min(1.0, target.window_hours / night_hours)
+            observability = target.window_hours / night_hours
+    observability = _clamp01(observability)
 
-    # Phase factor
+    # Phase factor (clamped to [0, 1] inside _phase_factor)
     phase = _phase_factor(target)
 
-    # Keyword adjustment
+    # Keyword adjustment (signed; not clamped — it is a bounded human override)
     kw_adj = _keyword_adjustment(target.notes)
 
-    # Composite: science × budget × phase as base, observability and keywords additive
-    score = science * 100.0 * budget * phase + observability * 20.0 + kw_adj * 50.0
+    # Composite: multiplicative science core + additive observability/keyword.
+    science_term = SCIENCE_SCALE * science * budget * phase
+    observability_term = OBSERVABILITY_BONUS * observability
+    keyword_term = KEYWORD_SCALE * kw_adj
+    score = science_term + observability_term + keyword_term
 
-    return score
+    breakdown = {
+        'science': science,
+        'budget': budget,
+        'phase': phase,
+        'observability': observability,
+        'keyword_adj': kw_adj,
+        'science_term': science_term,
+        'observability_term': observability_term,
+        'keyword_term': keyword_term,
+        'total': score,
+    }
+    return score, breakdown
 
 
 def rank_targets(targets: list,
@@ -127,22 +213,30 @@ def rank_targets(targets: list,
                  evening: Optional[Time] = None,
                  morning: Optional[Time] = None,
                  config: LLAMASConfig = None,
-                 moon_phase: Optional[str] = None) -> dict:
-    """Score all targets and return name → score mapping.
+                 moon_phase: Optional[str] = None) -> Tuple[dict, dict]:
+    """Score all targets and return (scores, breakdowns) mappings.
 
-    Also stores the composite score in each target's merit_score field.
+    Also stores the composite score in each target's merit_score field and the
+    per-component breakdown in each target's score_breakdown field (so the
+    summary writer can persist/display it, mirroring the alert-pipeline merit
+    breakdown — R14).
 
     Returns
     -------
-    dict
-        {target.name: composite_score} for use in create_schedule().
+    (scores, breakdowns) : tuple of (dict, dict)
+        ``scores``: {target.name: composite_score} for create_schedule().
+        ``breakdowns``: {target.name: breakdown_dict} from
+        compute_composite_score, for write_summary / score_breakdown.json.
     """
     scores = {}
+    breakdowns = {}
     for t in targets:
-        s = compute_composite_score(t, accountant, evening, morning, config,
-                                    moon_phase)
+        s, breakdown = compute_composite_score(
+            t, accountant, evening, morning, config, moon_phase)
         t.merit_score = s
+        t.score_breakdown = breakdown
         scores[t.name] = s
+        breakdowns[t.name] = breakdown
 
     ranked = sorted(targets, key=lambda t: t.merit_score, reverse=True)
     for i, t in enumerate(ranked):
@@ -152,4 +246,4 @@ def rank_targets(targets: list,
                      if accountant else 1.0,
                      _phase_factor(t))
 
-    return scores
+    return scores, breakdowns

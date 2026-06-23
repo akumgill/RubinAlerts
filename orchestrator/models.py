@@ -33,6 +33,10 @@ class Target:
     program: str = 'default'
     merit_score: float = float('nan')
     phase_weight: float = float('nan')  # w_time from alert pipeline: exp(-dt²/2τ²)
+    # Per-component composite-score breakdown from prioritizer.rank_targets
+    # (keys: science, budget, phase, observability, keyword_adj, *_term, total).
+    # None until the target has been ranked.
+    score_breakdown: Optional[dict] = field(default=None, repr=False)
 
     # Planner-populated fields
     transit_time: Optional[Time] = field(default=None, repr=False)
@@ -121,6 +125,14 @@ class ObsPlan:
 
     standards_start: Optional[dict] = None
     standards_end: Optional[dict] = None
+
+    # Which scoring path produced the ranking (R18): 'prioritizer' when
+    # composite scores were supplied, else 'fallback/priority-only'.
+    scoring_mode: str = 'fallback/priority-only'
+    # {target.name: breakdown_dict} from the prioritizer (R14). Empty when the
+    # fallback path ran. Used by write_summary to persist score_breakdown.json
+    # and render the per-target breakdown table.
+    score_breakdowns: dict = field(default_factory=dict)
 
     @property
     def night_duration_hours(self) -> float:

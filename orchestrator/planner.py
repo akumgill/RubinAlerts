@@ -25,6 +25,15 @@ DEFAULT_STANDARDS_PATH = (
     Path(__file__).parent.parent / 'ref' / 'LDSS_ObsPlan_Generator' / 'standards.txt'
 )
 
+# Per-degree penalty applied to the slew (angular separation) from the
+# previously-scheduled target. The 1-minute IFU overhead (config.overhead_min)
+# assumes negligible slew, so this term compensates by gently discouraging picks
+# that cross the sky. It is deliberately *modest* (0.5 pt/deg) so it tie-breaks
+# between near-equal candidates and keeps DDF clusters together, rather than
+# dominating the science/airmass terms (airmass alone is weighted ×10). This is
+# NOT a full path optimizer — just a greedy nudge toward the current pointing.
+SLEW_PENALTY = 0.5
+
 
 # ---------------------------------------------------------------------------
 # Twilight
@@ -380,6 +389,9 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
     scheduled_entries = []
     scheduled_names = set()
     current = evening
+    # Coord of the most-recently placed science target; None before the first
+    # pick (so the first target incurs no slew penalty).
+    prev_coord = None
 
     while current < morning:
         best = None
@@ -408,11 +420,19 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             if am > config.max_airmass:
                 continue
 
+            # Slew penalty: angular separation from the previously-placed
+            # target. The 1-min overhead excludes slew, so this term
+            # compensates (modest, tie-breaks only — see SLEW_PENALTY).
+            slew_pen = 0.0
+            if prev_coord is not None:
+                sep_deg = prev_coord.separation(t.coord).deg
+                slew_pen = sep_deg * SLEW_PENALTY
+
             # Score: use prioritizer if available, else priority-based
             if prioritizer_scores and t.name in prioritizer_scores:
-                score = prioritizer_scores[t.name] - am * 10
+                score = prioritizer_scores[t.name] - am * 10 - slew_pen
             else:
-                score = (5 - t.priority) * 100 - am * 10
+                score = (5 - t.priority) * 100 - am * 10 - slew_pen
             if score > best_score:
                 best_score = score
                 best = t
@@ -479,6 +499,7 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             )
             scheduled_entries.append(entry)
             scheduled_names.add(best.name)
+            prev_coord = best.coord  # anchor slew penalty to this pointing
             current = current + dur
         else:
             # Jump to next available window
@@ -549,6 +570,16 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
     std_start, std_end = select_standards(standards_path, evening, morning, config)
 
     # 7. Build and return ObsPlan
+    # Record which scoring path ran (R18) and gather per-target breakdowns
+    # (R14) from any target carrying one (set by prioritizer.rank_targets).
+    scoring_mode = ('prioritizer' if prioritizer_scores
+                    else 'fallback/priority-only')
+    score_breakdowns = {}
+    for t in list(eligible) + list(backup):
+        bd = getattr(t, 'score_breakdown', None)
+        if bd:
+            score_breakdowns[t.name] = bd
+
     plan = ObsPlan(
         date=str(evening.iso[:10]),
         evening_twilight=evening,
@@ -558,6 +589,8 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
         backup=backup,
         standards_start=std_start,
         standards_end=std_end,
+        scoring_mode=scoring_mode,
+        score_breakdowns=score_breakdowns,
     )
 
     logger.info("Schedule: %d targets, %.0f min, %.0f%% efficiency",

@@ -200,19 +200,30 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
         logger.warning("No valid targets after filtering in %s", path)
         return []
 
-    # Map merit to priority by quartile
+    # Map merit to priority. NOTE: P1-P4 here are WITHIN-NIGHT RELATIVE labels
+    # (tonight's quartiles), not absolute science classes — a P1 tonight may be
+    # weaker than a P4 on a richer night. (R8; the summary header repeats this
+    # caveat.) Absolute thresholds were deliberately deferred by the architect.
     merit_col = 'merit' if 'merit' in df.columns else 'merit_score'
     if merit_col in df.columns:
-        q75, q50, q25 = np.percentile(df[merit_col].values, [75, 50, 25])
-        def _priority(m):
-            if m >= q75:
-                return 1
-            elif m >= q50:
-                return 2
-            elif m >= q25:
-                return 3
-            return 4
-        df['_priority'] = df[merit_col].apply(_priority)
+        n = len(df)
+        if n < 4:
+            # Quartile bins degenerate (np.percentile collapses) with <4
+            # targets. Assign P-labels by sorted rank instead so it cannot
+            # crash or collapse every target into one tier: best→P1, etc.
+            order = df[merit_col].rank(method='first', ascending=False)
+            df['_priority'] = order.astype(int).clip(upper=4)
+        else:
+            q75, q50, q25 = np.percentile(df[merit_col].values, [75, 50, 25])
+            def _priority(m):
+                if m >= q75:
+                    return 1
+                elif m >= q50:
+                    return 2
+                elif m >= q25:
+                    return 3
+                return 4
+            df['_priority'] = df[merit_col].apply(_priority)
     else:
         df['_priority'] = 3
 

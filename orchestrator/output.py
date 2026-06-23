@@ -3,6 +3,7 @@
 Generates timeline, Magellan TCS catalog, and human-readable summary files.
 """
 
+import json
 import logging
 import math
 from pathlib import Path
@@ -129,6 +130,14 @@ def write_summary(plan: ObsPlan, path: str, accountant=None) -> None:
         lines.append(f"Morning twilight:  {plan.morning_twilight.iso[11:16]} UT")
     lines.append(f"Night duration:    {plan.night_duration_hours:.1f} hours")
     lines.append(f"Moon phase:        {plan.moon_phase}")
+    # R18: record which scoring path produced the ranking so the scale of the
+    # numbers below is unambiguous.
+    lines.append(f"Scoring mode:      {plan.scoring_mode}")
+    lines.append("")
+    # R8: P-labels are WITHIN-NIGHT RELATIVE (tonight's quartiles), not absolute
+    # science classes. A P1 tonight may be weaker than a P4 on a richer night.
+    lines.append("Note: P1-P4 are WITHIN-NIGHT RELATIVE priorities (tonight's "
+                 "ranking), not absolute classes.")
     lines.append("")
 
     # Schedule summary
@@ -176,6 +185,33 @@ def write_summary(plan: ObsPlan, path: str, accountant=None) -> None:
     lines.append("-" * 70)
     lines.append("")
 
+    # Per-target composite-score breakdown (R14): mirror the alert-pipeline
+    # merit breakdown so a PI can reconstruct any ranking. Only present when
+    # the prioritizer ran (breakdowns attached to the plan).
+    if plan.score_breakdowns:
+        from .prioritizer import (SCIENCE_SCALE, OBSERVABILITY_BONUS,
+                                  KEYWORD_SCALE)
+        lines.append("-" * 78)
+        lines.append(
+            f"Composite score breakdown ({SCIENCE_SCALE:g} x sci x budget x "
+            f"phase + {OBSERVABILITY_BONUS:g} x obs + {KEYWORD_SCALE:g} x kw):")
+        lines.append(f"{'Target':<18} {'sci':>5} {'budget':>6} {'phase':>5} "
+                     f"{'obs':>5} {'kw':>6} {'total':>7}")
+        lines.append("-" * 78)
+        # Order by total descending for readability.
+        ordered = sorted(plan.score_breakdowns.items(),
+                         key=lambda kv: kv[1].get('total', 0.0), reverse=True)
+        for name, bd in ordered:
+            lines.append(
+                f"{name:<18} {bd.get('science', 0.0):>5.2f} "
+                f"{bd.get('budget', 0.0):>6.2f} {bd.get('phase', 0.0):>5.2f} "
+                f"{bd.get('observability', 0.0):>5.2f} "
+                f"{bd.get('keyword_adj', 0.0):>6.2f} "
+                f"{bd.get('total', 0.0):>7.1f}"
+            )
+        lines.append("-" * 78)
+        lines.append("")
+
     # Backup targets
     if plan.backup:
         lines.append("Backup targets:")
@@ -201,8 +237,26 @@ def write_summary(plan: ObsPlan, path: str, accountant=None) -> None:
 
     lines.append("=" * 70)
 
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, 'w') as f:
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, 'w') as f:
         f.write('\n'.join(lines) + '\n')
 
     logger.info("Wrote summary: %s", path)
+
+    # R14: persist the per-target breakdown as a JSON sidecar in the output dir
+    # (mirrors the alert-pipeline merit breakdown). Always written so consumers
+    # have a stable artifact; empty when the fallback path ran.
+    sidecar = out_path.parent / 'score_breakdown.json'
+    payload = {
+        'date': plan.date,
+        'moon_phase': plan.moon_phase,
+        'scoring_mode': plan.scoring_mode,
+        'breakdowns': plan.score_breakdowns,
+    }
+    try:
+        with open(sidecar, 'w') as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+        logger.info("Wrote score breakdown: %s", sidecar)
+    except (OSError, TypeError) as e:
+        logger.warning("Could not write score breakdown sidecar: %s", e)

@@ -1,0 +1,432 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{float}  % For [H] placement specifier
+
+% Code listing style
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!10},
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!50!black},
+    stringstyle=\color{red!50!black},
+}
+
+\title{Spectroscopic Follow-up Orchestration Layer\\[0.5em]
+\large Design Document for MAGNETS Collaboration Review}
+\author{Akum Gill\\
+\small Harvard University\\
+\small Collaborators: Chris Stubbs, Ashley Villar's group (Yize Dong)}
+\date{April 2026 \\ \small Draft for Review}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document describes the design and implementation of an orchestration layer for automated spectroscopic follow-up of transients discovered by the RubinAlerts pipeline. The system connects target requests to automated observing plan generation for LLAMAS on Magellan/Baade, providing composite prioritization and multi-program time accounting for the MAGNETS collaboration.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%===============================================================================
+\section{Overview}
+
+This infrastructure supports the MAGNETS collaboration (Magellan partner institutions pooling time for Rubin transient follow-up) and implements the ``collaborative infrastructure needed to execute this blended program'' (Stubbs 2026B proposal).
+
+\subsection{System Context}
+
+The orchestration layer sits between:
+\begin{itemize}
+    \item \textbf{Upstream}: RubinAlerts pipeline candidates, manual target requests
+    \item \textbf{Downstream}: LLAMAS observing plans, time accounting records
+\end{itemize}
+
+\subsection{MAGNETS Collaboration Context}
+
+From the Stubbs 2026B proposal (propid 2835):
+\begin{quote}
+``MAGNETS, a collaboration between several Magellan partner institutions, is a brand new effort motivated by the start of LSST alerts in March of this year... Our collaboration's plan is to pool our awarded observing time and develop an internal queue schedule to address a wide range of science goals.''
+\end{quote}
+
+\textbf{Key requirements from proposal:}
+\begin{itemize}
+    \item Queue-based observational strategy
+    \item Time apportioned in proportion to TAC awards
+    \item Multiple science cases: SNe Ia cosmology (Stubbs), core collapse (Villar), exotic transients
+    \item Student projects declared and protected
+\end{itemize}
+
+\textbf{Instrument:} LLAMAS Integral Field Spectrograph (Magellan/Baade)
+
+%===============================================================================
+\section{Requirements}
+
+\subsection{Functional Requirements}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llc@{}}
+\toprule
+ID & Requirement & Priority \\
+\midrule
+F1 & Ingest target requests from CSV and RubinAlerts & Must \\
+F2 & Normalize heterogeneous inputs to common schema & Must \\
+F3 & Score/rank targets by composite priority & Must \\
+F4 & Track time allocations per program/PI & Must \\
+F5 & Generate observing plans for LLAMAS & Must \\
+F6 & Handle backup target lists & Should \\
+F7 & Integrate with RubinAlerts merit-scored candidates & Should \\
+F8 & Support white dwarf spectrophotometric standards & Should \\
+F9 & Moon phase-aware scheduling (dark/grey/bright) & Should \\
+F10 & Google Sheet integration for manual requests & Planned \\
+\bottomrule
+\end{tabular}
+\caption{Functional requirements}
+\end{table}
+
+\subsection{Non-Functional Requirements}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+ID & Requirement \\
+\midrule
+NF1 & Run nightly without manual intervention \\
+NF2 & Produce human-readable audit trail \\
+NF3 & Graceful degradation if external APIs fail \\
+NF4 & Compatible with existing SkyPortal data flow \\
+\bottomrule
+\end{tabular}
+\caption{Non-functional requirements}
+\end{table}
+
+%===============================================================================
+\section{Architecture}
+
+\subsection{Data Flow}
+
+\begin{figure}[H]
+\centering
+\begin{verbatim}
+    candidates.csv (from RubinAlerts)
+           |
+           v
+    +------------------+
+    |  normalize.py    |  Load targets, parse coords, estimate exposures
+    +--------+---------+
+             |
+             v
+    +------------------+
+    |  prioritizer.py  |  Composite scoring: science x budget x phase
+    +--------+---------+      + observability + keywords
+             |
+             v
+    +------------------+
+    |  planner.py      |  Greedy scheduling, standard star selection
+    +--------+---------+
+             |
+             v
+    +------------------+
+    |  accounting.py   |  Charge time, persist state
+    +--------+---------+
+             |
+             v
+       Output files:
+       - LLAMAS_{date}_timeline.txt
+       - LLAMAS_{date}_catalog.txt
+       - LLAMAS_{date}_summary.txt
+       - time_accounting.json
+\end{verbatim}
+\caption{LLAMAS orchestrator data flow}
+\end{figure}
+
+\subsection{Module Responsibilities}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lp{10cm}@{}}
+\toprule
+Module & Purpose \\
+\midrule
+\texttt{config.py} & LLAMASConfig: LCO site ($-29.01^\circ$, $-70.69^\circ$, 2380m), 1-min IFU overhead, airmass limit 1.6, exposure table from proposal \\
+\texttt{models.py} & Target, ScheduledEntry, ProgramAllocation, ObsPlan dataclasses \\
+\texttt{normalize.py} & Load CSV/RubinAlerts targets, parse coordinates, estimate exposures \\
+\texttt{planner.py} & Twilight calculation, observability windows, greedy scheduling, standard star selection \\
+\texttt{prioritizer.py} & Composite scoring: science $\times$ budget $\times$ phase $\times$ observability + keywords \\
+\texttt{accounting.py} & TimeAccountant: per-program budgets (D/G/B), charge/reconcile, JSON persistence \\
+\texttt{output.py} & Timeline, Magellan TCS catalog, human-readable summary writers \\
+\texttt{reporting.py} & Nightly time reports, season progress with burn rate projections \\
+\bottomrule
+\end{tabular}
+\caption{Module responsibilities}
+\end{table}
+
+%===============================================================================
+\section{Component Details}
+
+\subsection{Target Normalization}
+
+Converts heterogeneous inputs to canonical schema:
+
+\begin{lstlisting}[language=Python]
+@dataclass
+class Target:
+    name: str
+    ra_deg: float
+    dec_deg: float
+    coord: SkyCoord  # Computed from ra_deg, dec_deg
+
+    mag: float
+    mag_filter: str  # 'r', 'g', 'i', etc.
+    redshift: float  # For exposure estimation
+
+    priority: int  # 1 (highest) to 4 (lowest)
+    program: str   # For time accounting
+
+    exposure_minutes: float
+    n_exposures: int
+
+    merit_score: float  # From RubinAlerts (optional)
+    phase_weight: float # w_time from alert pipeline
+\end{lstlisting}
+
+\subsubsection{Merit-to-Priority Mapping}
+
+When loading from RubinAlerts candidates, merit scores are converted to priorities via quartile mapping:
+\begin{itemize}
+    \item Top 25\% $\rightarrow$ P1
+    \item 25--50\% $\rightarrow$ P2
+    \item 50--75\% $\rightarrow$ P3
+    \item Bottom 25\% $\rightarrow$ P4
+\end{itemize}
+
+\subsection{Composite Priority Scoring}
+
+The prioritizer computes a composite score combining multiple factors:
+
+\begin{equation}
+\text{score} = (\text{science} \times 100 \times \text{budget} \times \text{phase}) + (\text{observability} \times 20) + (\text{keywords} \times 50)
+\end{equation}
+
+\textbf{Components:}
+\begin{itemize}
+    \item \textbf{science\_weight}: From explicit priority (P1=1.0, P2=0.7, P3=0.4, P4=0.2)
+    \item \textbf{budget\_factor}: 1.0 if $>$5h remaining, 0.5 if 0--5h, 0.1 if exhausted
+    \item \textbf{phase\_weight}: $w_\text{time}$ from alert pipeline merit function
+    \item \textbf{observability}: window\_hours / night\_hours (0--1)
+    \item \textbf{keyword\_adjustment}: ``HIGH PRIORITY'' +0.3, ``backup'' $-$0.3, etc.
+\end{itemize}
+
+The phase weight from the alert pipeline is:
+\begin{equation}
+w_\text{time} = \exp\left(-\frac{\Delta t^2}{2\tau^2}\right), \quad \tau = 10 \text{ days}
+\end{equation}
+
+This automatically boosts targets near peak brightness.
+
+\subsection{Time Accounting}
+
+Multi-program budgets tracked per moon phase:
+
+\begin{lstlisting}
+# allocations.yaml
+semester: "2026B"
+default_program: "MAGNETS-Stubbs"
+programs:
+  - program: "MAGNETS-Stubbs"
+    pi: "Stubbs"
+    allocated_hours:
+      dark: 5.0
+      grey: 20.0
+      bright: 5.0
+  - program: "MAGNETS-Villar"
+    pi: "Villar"
+    allocated_hours:
+      dark: 4.0
+      grey: 8.0
+      bright: 4.0
+\end{lstlisting}
+
+\textbf{Charge-on-schedule}: Time is debited when the plan is generated. Post-night reconciliation adjusts for weather losses or target changes. Persistent JSON state maintains a full charge log for audit.
+
+\subsection{Greedy Scheduling Algorithm}
+
+The scheduler uses a greedy algorithm adapted from Alex's LDSS3 script:
+
+\begin{equation}
+\text{schedule\_score} = \text{composite\_priority} - \text{airmass} \times 10
+\end{equation}
+
+At each time step, the scheduler selects the observable target with the highest score. Falls back to $(5 - \text{priority}) \times 100 - \text{airmass} \times 10$ when no prioritizer is active (backward compatibility with \texttt{plan} command).
+
+\subsection{Exposure Time Estimation}
+
+Three-tier cascade from Stubbs 2026B proposal Table 1:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+Strategy & Input Required & Example & Fallback \\
+\midrule
+Redshift table & $z$ known & $z=0.25 \rightarrow 95$ min (grey) & --- \\
+Magnitude scaling & mag known & mag 20 $\rightarrow$ 45 min, 2.5$\times$/mag & If no $z$ \\
+Default & neither & 45 min & If no mag \\
+\bottomrule
+\end{tabular}
+\caption{Exposure estimation cascade}
+\end{table}
+
+\textbf{Moon phase scheduling} (from proposal Table 1):
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ccccc@{}}
+\toprule
+Redshift & Moon & Peak $r$ & Exposure & Binning \\
+\midrule
+0.10--0.20 & Bright & 19.3 & 35 min & 2$\times$ \\
+0.20--0.30 & Grey & 20.6 & 95 min & 2$\times$ \\
+0.30--0.35 & Grey/Dark & 21.3 & 45--160 min & 4$\times$ \\
+0.35--0.40 & Dark & 21.9 & 180 min & 4$\times$ \\
+\bottomrule
+\end{tabular}
+\caption{Exposure times by redshift and moon phase (Stubbs 2026B proposal)}
+\end{table}
+
+%===============================================================================
+\section{CLI Interface}
+
+\begin{lstlisting}[language=bash]
+# Basic plan from CSV
+python -m orchestrator plan --date 2026-10-15 \
+    --targets targets.csv --moon grey --output-dir output/
+
+# Full nightly run with time accounting
+python -m orchestrator run-nightly --date 2026-10-15 \
+    --candidates candidates.csv \
+    --allocations allocations.yaml \
+    --moon grey --output-dir output/
+
+# Post-night reconciliation
+python -m orchestrator reconcile \
+    --allocations allocations.yaml \
+    --program MAGNETS-Stubbs \
+    --actual-hours 3.5 --moon grey --date 2026-10-15
+
+# Backward compatibility (no subcommand = plan)
+python -m orchestrator --date 2026-10-15 --targets targets.csv --moon grey
+\end{lstlisting}
+
+%===============================================================================
+\section{Output Artifacts}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+File & Contents \\
+\midrule
+\texttt{LLAMAS\_\{date\}\_timeline.txt} & UT observing sequence with times \\
+\texttt{LLAMAS\_\{date\}\_catalog.txt} & Magellan TCS 16-field catalog format \\
+\texttt{LLAMAS\_\{date\}\_summary.txt} & Human-readable plan with budget tracking \\
+\texttt{time\_accounting.json} & Persistent time charges and audit log \\
+\texttt{season\_report.txt} & Progress summary with burn rate projections \\
+\bottomrule
+\end{tabular}
+\caption{Output artifacts}
+\end{table}
+
+%===============================================================================
+\section{Key Design Decisions}
+
+\begin{enumerate}
+    \item \textbf{LLAMAS only} --- Orchestrator is for LLAMAS on Magellan/Baade exclusively. LDSS3 materials are reference only.
+
+    \item \textbf{1-minute IFU overhead} --- LLAMAS's integral field unit eliminates slit alignment, giving $\sim$10$\times$ better overhead than slit spectrographs.
+
+    \item \textbf{Composite priority with phase awareness} --- Targets near peak brightness are automatically boosted via the phase weight from the alert pipeline.
+
+    \item \textbf{Charge-on-schedule with reconciliation} --- Simple, prevents over-scheduling. Post-night reconciliation handles weather and target changes.
+
+    \item \textbf{Greedy scheduling} --- Fast ($O(N \log N)$), near-optimal for single-night scheduling.
+
+    \item \textbf{Quartile-based priority mapping} --- Automatic P1--P4 assignment from merit scores ensures fair distribution across priority levels.
+\end{enumerate}
+
+%===============================================================================
+\section{Planned Features}
+
+\subsection{Google Sheet Integration}
+
+Allow PIs to manually enqueue targets not sourced from alerts:
+
+\begin{lstlisting}[language=Python]
+import gspread
+from google.oauth2.service_account import Credentials
+
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+
+def fetch_sheet(sheet_id: str, range_name: str) -> list[dict]:
+    creds = Credentials.from_service_account_file(
+        'credentials.json', scopes=SCOPES)
+    client = gspread.authorize(creds)
+    sheet = client.open_by_key(sheet_id)
+    worksheet = sheet.worksheet(range_name)
+    return worksheet.get_all_records()
+\end{lstlisting}
+
+\textbf{Use case}: PIs want to follow up interesting targets discovered through other channels (other surveys, ToO triggers, collaboration requests).
+
+%===============================================================================
+\section{Open Questions for Review}
+
+\begin{enumerate}
+    \item \textbf{Time accounting granularity}: Currently charge-on-schedule with post-night reconciliation. Is this sufficient, or do we need more sophisticated tracking?
+
+    \item \textbf{Priority conflicts}: How should we handle when multiple programs request the same target? Currently first-come-first-served based on plan generation order.
+
+    \item \textbf{Backup target policy}: Should backups count against time budget when scheduled? Currently they do.
+
+    \item \textbf{Multi-night planning}: Should we look ahead to optimize across nights? Currently single-night greedy.
+
+    \item \textbf{Keyword vocabulary}: Current keywords include ``HIGH PRIORITY'', ``classification needed'', ``rising'', ``near peak'', ``backup'', ``low prio'', ``if time''. Are these sufficient?
+
+    \item \textbf{Priority weight tuning}: Current weights (science$\times$100, observability$\times$20, keywords$\times$50) were chosen heuristically. Should these be configurable or tuned?
+\end{enumerate}
+
+%===============================================================================
+\section{References}
+
+\subsection{Local Files}
+\begin{itemize}
+    \item Alex's LDSS3 script: \texttt{ref/LDSS\_ObsPlan\_Generator/generate\_obsplan.py}
+    \item Stubbs 2026B proposal: \texttt{ref/cstubbs2026B (2) (1).pdf}
+    \item RubinAlerts pipeline: \texttt{run\_tonight.py}, \texttt{core/magellan\_planning.py}
+\end{itemize}
+
+\subsection{Proposal Details (Stubbs 2026B, propid 2835)}
+\begin{itemize}
+    \item Semester: 2026B (Jul 7 -- Jan 16)
+    \item Instrument: LLAMAS Integral Field Spectrograph
+    \item Telescope: Magellan Baade
+    \item Nights: 0.5D + 2.0G + 0.5B (30 hours total)
+    \item Targets: 29 (SNe Ia in DDFs + WD standards)
+    \item Magnitude range: $18.0 \leq r \leq 21.5$
+    \item Redshift range: $0.1 < z < 0.4$
+\end{itemize}
+
+\end{document}

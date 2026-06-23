@@ -30,36 +30,33 @@
 }
 
 \title{\textbf{RubinAlerts}: A Multi-Broker Pipeline for Type~Ia Supernova\\
-Discovery and Spectroscopic Follow-Up Planning\\
+Discovery and Spectroscopic Follow-Up Scheduling\\
 in Rubin Observatory Deep Drilling Fields}
 
-\author{C.~Stubbs}
+\author{A.~Gil \and C.~Stubbs}
 
-\date{February 2026}
+\date{April 2026}
 
 \begin{document}
 
 \maketitle
 
 \begin{abstract}
-We describe \textsc{RubinAlerts}, a pipeline for discovering, aggregating,
-and prioritizing Type~Ia supernova (SN~Ia) candidates in the Rubin
-Observatory Legacy Survey of Space and Time (LSST) Deep Drilling Fields
-(DDFs).  The system queries three independent alert brokers---ANTARES,
-ALeRCE (ZTF), and ALeRCE-LSST---cross-matches their detections,
-deduplicates sources, screens against known variable star catalogs, and
-produces a ranked list of SN~Ia candidates.  Galactic extinction
-corrections are applied using IRSA SFD dust maps, and spectroscopic
-redshifts are obtained from NED for host galaxy distance estimation.
-Light curve peak fitting is performed using both inverted-parabola
-models in flux space and the Villar supernova parametric model (SPM),
-with peak times determined by numerical flux maximization.  A
-two-dimensional merit function combining temporal proximity to peak and
-extinction-corrected apparent brightness enables automated generation of
-prioritized spectroscopic follow-up target lists for the Magellan
-telescopes at Las Campanas Observatory.  This document describes the
-pipeline architecture, algorithms, data structures, and current
-implementation status.
+We describe \textsc{RubinAlerts}, a two-subsystem pipeline for
+discovering, prioritizing, and scheduling spectroscopic follow-up of
+Type~Ia supernova (SN~Ia) candidates in the Rubin Observatory LSST
+Deep Drilling Fields (DDFs).  The \textbf{alert pipeline} queries five
+independent brokers---Fink, ANTARES, ALeRCE (ZTF and LSST), ATLAS,
+and TNS---cross-matches their detections, screens against known
+variables, fits multi-band light curves using parabola, Villar SPM,
+and optionally SALT2 models, and computes a six-component
+multiplicative merit function.  The \textbf{LLAMAS orchestrator}
+converts ranked candidates into executable observing plans for the
+MAGNETS collaboration, with multi-program time accounting, composite
+priority scoring incorporating light curve phase, and greedy
+scheduling optimized for the LLAMAS integral field spectrograph on
+Magellan/Baade.  This document describes the pipeline architecture,
+algorithms, data structures, and current implementation status.
 \end{abstract}
 
 \tableofcontents
@@ -84,30 +81,44 @@ photometric SN candidates discovered each night, which ones should
 receive scarce spectroscopic follow-up resources?  The answer depends on
 (1)~the probability that the candidate is a genuine SN~Ia rather than a
 contaminant, (2)~its brightness relative to the spectroscopic
-sensitivity limit, and (3)~its temporal phase relative to maximum
+sensitivity limit, (3)~its temporal phase relative to maximum
 light---spectra obtained near peak are most valuable for classification
-and cosmological standardization.
+and cosmological standardization, (4)~host galaxy properties, and
+(5)~multi-broker agreement.
 
-\textsc{RubinAlerts} addresses this by aggregating classifications from
-multiple alert brokers, fitting light curves to estimate peak
-brightness and timing, and computing a merit function that encodes the
-scientific value of observing each candidate on a given night.  The
-output is a prioritized, observatory-ready target list in the native
-Magellan catalog format.
+\textsc{RubinAlerts} addresses this through two coupled subsystems:
+
+\begin{enumerate}
+\item \textbf{Alert Pipeline}: Aggregates classifications from five
+alert brokers, fits light curves to estimate peak brightness and timing,
+classifies host galaxies, and computes a six-component merit function.
+Output: ranked \texttt{candidates.csv} with full diagnostic information.
+
+\item \textbf{LLAMAS Orchestrator}: Converts ranked candidates into
+executable LLAMAS observing plans for the MAGNETS collaboration, with
+exposure estimation from Stubbs 2026B proposal Table~1, multi-program
+time budgets, and greedy scheduling with standard star interleaving.
+\end{enumerate}
+
+\subsection{MAGNETS Collaboration}
+
+MAGNETS (Magellan partner institutions pooling time for Rubin transient
+follow-up) operates a queue-based scheduling system where observing time
+and target prioritization are apportioned in proportion to TAC-awarded
+time from each institution.  The primary instrument is LLAMAS, an
+integral field spectrograph on Magellan/Baade with $\sim$1~minute
+overhead per observation (vs.\ $\sim$10~min for slit setup) and host
+galaxy spectra obtained ``for free'' within the IFU field of view.
 
 \subsection{Deep Drilling Fields}
 
 The pipeline targets the seven fields listed in
 Table~\ref{tab:ddf_fields}, comprising the six Rubin LSST DDFs plus the
-M49 (NGC~4472) field in the Virgo Cluster.  Each field is searched
-within a 1.75\degr\ radius, matching the LSST field of view
-($\sim$3.5\degr\ diameter).
+M49 (NGC~4472) field in the Virgo Cluster.
 
 \begin{table}[h]
 \centering
-\caption{Target fields and their properties.  The ``ZTF'' column
-indicates whether the field falls within the Zwicky Transient Facility
-footprint (Dec~$\gtrsim -30\degr$).}
+\caption{Target fields and their properties.}
 \label{tab:ddf_fields}
 \begin{tabular}{lrrcc}
 \toprule
@@ -130,98 +141,97 @@ M49      & 187.44 & $+8.00$  & 1.75\degr & Yes \\
 \label{sec:architecture}
 %% =========================================================================
 
-Figure~\ref{fig:pipeline} shows the end-to-end data flow.  The pipeline
-is implemented in Python and orchestrated through a Jupyter notebook
-(\texttt{supernova\_monitor.ipynb}), with reusable logic organized into
-modules under the \texttt{core/}, \texttt{broker\_clients/},
-\texttt{cache/}, \texttt{host\_galaxy/}, and \texttt{utils/}
-directories.
+Figure~\ref{fig:pipeline} shows the end-to-end data flow.  The alert
+pipeline is orchestrated through \texttt{run\_tonight.py}, with reusable
+logic organized into modules under \texttt{core/},
+\texttt{broker\_clients/}, \texttt{cache/}, \texttt{host\_galaxy/}, and
+\texttt{utils/}.  The LLAMAS orchestrator lives in \texttt{orchestrator/}.
 
 \begin{figure}[h]
 \centering
 \begin{tikzpicture}[
-    node distance=0.8cm and 1.2cm,
-    block/.style={rectangle, draw, fill=blue!8, text width=3.2cm,
-                  minimum height=0.9cm, align=center, rounded corners=2pt,
+    node distance=0.7cm and 0.9cm,
+    block/.style={rectangle, draw, fill=blue!8, text width=3.0cm,
+                  minimum height=0.8cm, align=center, rounded corners=2pt,
                   font=\small},
-    broker/.style={rectangle, draw, fill=orange!15, text width=2.5cm,
+    broker/.style={rectangle, draw, fill=orange!15, text width=2.2cm,
+                   minimum height=0.7cm, align=center, rounded corners=2pt,
+                   font=\small},
+    data/.style={rectangle, draw, fill=green!10, text width=2.8cm,
+                 minimum height=0.7cm, align=center, rounded corners=2pt,
+                 font=\small},
+    output/.style={rectangle, draw, fill=red!10, text width=3.0cm,
                    minimum height=0.8cm, align=center, rounded corners=2pt,
                    font=\small},
-    data/.style={rectangle, draw, fill=green!10, text width=3.2cm,
+    orch/.style={rectangle, draw, fill=purple!10, text width=3.0cm,
                  minimum height=0.8cm, align=center, rounded corners=2pt,
                  font=\small},
-    output/.style={rectangle, draw, fill=red!10, text width=3.2cm,
-                   minimum height=0.8cm, align=center, rounded corners=2pt,
-                   font=\small},
-    arrow/.style={-{Stealth[length=6pt]}, thick},
+    arrow/.style={-{Stealth[length=5pt]}, thick},
 ]
 
 % Brokers
-\node[broker] (antares) {ANTARES\\(ZTF + Rubin)};
-\node[broker, right=of antares] (alerce) {ALeRCE\\(ZTF)};
-\node[broker, right=of alerce] (lsst) {ALeRCE-LSST\\(Rubin)};
+\node[broker] (fink) {Fink LSST};
+\node[broker, right=of fink] (antares) {ANTARES};
+\node[broker, right=of antares] (alerce) {ALeRCE\\(ZTF + LSST)};
 
 % Merge
-\node[block, below=1.2cm of alerce] (merge) {Cross-match \&\\Deduplicate};
+\node[block, below=1.0cm of antares] (merge) {Merge \& Dedup\\+ Variable Screen};
 
-% Extinction
-\node[block, below=of merge] (extinct) {Galactic Extinction\\(IRSA SFD)};
+% Enrichment
+\node[block, below=of merge] (enrich) {Photometry Fetch\\(Rubin, ZTF, ATLAS)};
 
-% Variable screening
-\node[block, below=of extinct] (varscreen) {Variable Star\\Screening};
+% Host & extinction
+\node[block, below=of enrich] (host) {Host Galaxy \&\\Extinction};
 
-% Classification filter
-\node[block, below=of varscreen] (classify) {$P(\mathrm{Ia})$ Filter\\+ Agreement};
-
-% NED redshifts
-\node[block, below=of classify] (ned) {NED Redshift\\Lookup};
-
-% Peak fitting
-\node[block, below=of ned] (peakfit) {Peak Fitting\\(Parabola + Villar)};
+% Fitting
+\node[block, below=of host] (fit) {Light Curve Fit\\(Parabola + Villar)};
 
 % Merit
-\node[block, below=of peakfit] (merit) {Merit Function\\$\mathcal{M}(\Delta t, m_{\mathrm{corr}})$};
+\node[block, below=of fit] (merit) {Merit Function\\$\prod W_i$};
 
-% Cache
-\node[data, right=2.5cm of peakfit] (cache) {SQLite Cache\\(\texttt{peak\_fit\_targets})};
+% candidates.csv
+\node[data, below=of merit] (csv) {\texttt{candidates.csv}};
 
-% External data
-\node[data, left=2.0cm of extinct] (irsa) {IRSA Dust\\Service};
-\node[data, left=2.0cm of ned] (neddb) {NED\\Database};
+% Enrichment sources
+\node[data, right=2.2cm of enrich] (atlas) {ATLAS Forced\\Photometry};
+\node[data, right=2.2cm of host] (tns) {TNS Cross-match\\+ NED + SFD};
 
-% Magellan
-\node[output, below=of merit] (magellan) {Magellan Observing\\Catalog};
+% Orchestrator
+\node[orch, below=0.8cm of csv] (orch) {LLAMAS Orchestrator\\(Prioritize + Schedule)};
+
+% Outputs
+\node[output, below left=0.8cm and 0.5cm of orch] (plan) {Observing Plan\\(timeline, catalog)};
+\node[output, below right=0.8cm and 0.5cm of orch] (acct) {Time Accounting\\(per-program)};
 
 % Arrows
-\draw[arrow] (antares.south) -- ++(0,-0.4) -| (merge.north);
-\draw[arrow] (alerce.south) -- (merge.north);
-\draw[arrow] (lsst.south) -- ++(0,-0.4) -| (merge.north);
-\draw[arrow] (merge) -- (extinct);
-\draw[arrow] (extinct) -- (varscreen);
-\draw[arrow] (varscreen) -- (classify);
-\draw[arrow] (classify) -- (ned);
-\draw[arrow] (ned) -- (peakfit);
-\draw[arrow] (peakfit) -- (merit);
-\draw[arrow] (peakfit) -- (cache);
-\draw[arrow] (cache.south) -- ++(0,-0.4) -| (magellan.east);
-\draw[arrow] (merit) -- (magellan);
-\draw[arrow] (irsa) -- (extinct);
-\draw[arrow] (neddb) -- (ned);
+\draw[arrow] (fink.south) -- ++(0,-0.3) -| (merge.north);
+\draw[arrow] (antares.south) -- (merge.north);
+\draw[arrow] (alerce.south) -- ++(0,-0.3) -| (merge.north);
+\draw[arrow] (merge) -- (enrich);
+\draw[arrow] (enrich) -- (host);
+\draw[arrow] (host) -- (fit);
+\draw[arrow] (fit) -- (merit);
+\draw[arrow] (merit) -- (csv);
+\draw[arrow] (csv) -- (orch);
+\draw[arrow] (orch) -- (plan);
+\draw[arrow] (orch) -- (acct);
+\draw[arrow] (atlas) -- (enrich);
+\draw[arrow] (tns) -- (host);
 
 \end{tikzpicture}
-\caption{Pipeline data flow.  Three alert brokers feed into a
-cross-matching and deduplication stage.  Galactic extinction corrections
-are applied using IRSA SFD dust maps, followed by variable star screening,
-classification filtering, NED spectroscopic redshift lookups, light curve
-peak fitting (inverted parabola and Villar SPM), and merit scoring using
-extinction-corrected magnitudes.  Results are cached in SQLite for
-consumption by the Magellan planning notebook.}
+\caption{System data flow.  Five alert brokers feed into a cross-matching
+and deduplication stage.  Photometry is fetched from Rubin (via Fink),
+ZTF (via ALeRCE), and ATLAS.  Host galaxy classification, TNS
+cross-matching, NED redshifts, and galactic extinction corrections are
+applied.  Light curves are fit using inverted parabola and Villar SPM
+models.  A six-component multiplicative merit function produces ranked
+\texttt{candidates.csv}, which feeds into the LLAMAS orchestrator for
+scheduling with time accounting.}
 \label{fig:pipeline}
 \end{figure}
 
-\subsection{Code Organization}
 
-The codebase is organized as follows:
+\subsection{Code Organization}
 
 \begin{center}
 \small
@@ -229,25 +239,39 @@ The codebase is organized as follows:
 \toprule
 Module & Purpose \\
 \midrule
-\texttt{run\_tonight.py} & Nightly CLI: all brokers $\to$ Magellan plan \\
+\multicolumn{2}{l}{\textit{Alert Pipeline}} \\
+\texttt{run\_tonight.py} & Nightly CLI: all brokers $\to$ candidates.csv \\
 \texttt{supernova\_monitor.py} & Multi-broker orchestrator class \\
-\texttt{broker\_clients/fink\_client.py} & Fink LSST API (Rubin photometry) \\
-\texttt{broker\_clients/antares\_client.py} & ANTARES broker interface \\
-\texttt{broker\_clients/alerce\_client.py} & ALeRCE REST API interface (ZTF \& LSST) \\
-\texttt{broker\_clients/alerce\_db\_client.py} & ALeRCE direct PostgreSQL access \\
-\texttt{broker\_clients/atlas\_client.py} & ATLAS forced photometry \\
+\texttt{config.py} & Centralized configuration (merit weights, thresholds) \\
 \texttt{core/alert\_aggregator.py} & Cross-match, deduplicate, merge \\
-\texttt{core/variable\_screen.py} & Known variable star screening \\
+\texttt{core/peak\_fitting.py} & Peak fitting (parabola + Villar SPM + SALT2) \\
+\texttt{core/magellan\_planning.py} & Merit function, observability, TCS catalog \\
+\texttt{core/variable\_screen.py} & Known variable rejection (13.7k sources) \\
+\texttt{core/report.py} & PDF report generation \\
 \texttt{core/ddf\_fields.py} & DDF field definitions \\
-\texttt{core/peak\_fitting.py} & Peak fitting (parabola + Villar SPM) \\
-\texttt{core/magellan\_planning.py} & Magellan target planning \& catalog generation \\
+\texttt{broker\_clients/fink\_client.py} & Fink LSST API (primary Rubin photometry) \\
+\texttt{broker\_clients/antares\_client.py} & ANTARES cone search (parallel) \\
+\texttt{broker\_clients/alerce\_client.py} & ALeRCE REST API (ZTF + LSST) \\
+\texttt{broker\_clients/alerce\_db\_client.py} & ALeRCE direct PostgreSQL \\
+\texttt{broker\_clients/atlas\_client.py} & ATLAS forced photometry (retry/backoff) \\
+\texttt{broker\_clients/tns\_client.py} & TNS cross-match for duplicate detection \\
+\texttt{broker\_clients/rubin\_tap\_client.py} & Rubin Science Platform TAP \\
+\texttt{host\_galaxy/morphology\_filter.py} & Galaxy classification, nuclear offset \\
+\texttt{utils/extinction.py} & Galactic extinction (IRSA SFD) \\
+\texttt{utils/ned\_query.py} & NED redshift lookups \\
 \texttt{cache/alert\_cache.py} & SQLite caching layer \\
-\texttt{host\_galaxy/morphology\_filter.py} & Galaxy morphology filtering \\
-\texttt{utils/extinction.py} & Galactic extinction corrections (IRSA SFD) \\
-\texttt{utils/ned\_query.py} & NED spectroscopic redshift lookups \\
-\texttt{utils/plotting.py} & Light curve visualization \\
-\texttt{utils/coordinates.py} & Coordinate utilities \\
-\texttt{utils/catalog\_query.py} & Catalog cross-matching utilities \\
+\midrule
+\multicolumn{2}{l}{\textit{LLAMAS Orchestrator}} \\
+\texttt{orchestrator/config.py} & LLAMAS instrument config (LCO site, overhead) \\
+\texttt{orchestrator/models.py} & Target, ScheduledEntry, ProgramAllocation, ObsPlan \\
+\texttt{orchestrator/normalize.py} & Input loading, exposure estimation \\
+\texttt{orchestrator/planner.py} & Twilight, observability, greedy scheduler \\
+\texttt{orchestrator/prioritizer.py} & Composite priority scoring \\
+\texttt{orchestrator/accounting.py} & Multi-program time tracking \\
+\texttt{orchestrator/run\_nightly.py} & End-to-end nightly orchestration \\
+\texttt{orchestrator/output.py} & Timeline, catalog, summary writers \\
+\texttt{orchestrator/reporting.py} & Time reports, season progress \\
+\texttt{orchestrator/cli.py} & CLI (plan, run-nightly, reconcile) \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -258,112 +282,70 @@ Module & Purpose \\
 \label{sec:data_sources}
 %% =========================================================================
 
-The pipeline queries four independent alert broker sources, each providing
-different coverage, classifiers, and data products.  Candidates from all
-brokers are merged, deduplicated by coordinate matching (1~arcsec tolerance),
-and screened against known variable star catalogs before photometry retrieval
-and light curve fitting.
+The pipeline queries five independent alert broker and enrichment
+sources, each providing different coverage, classifiers, and data
+products.
+
+\subsection{Fink LSST}
+
+Fink\footnote{\url{https://fink-portal.org/}} processes Rubin/LSST
+alerts through multiple ML classifiers including
+\texttt{snnSnVsOthers} (SN vs.\ non-SN) and \texttt{earlySNIa} (early
+Type~Ia identification).  The pipeline queries for candidates tagged as
+\texttt{sn\_near\_galaxy\_candidate} and
+\texttt{extragalactic\_new\_candidate}.  Fink serves as the primary
+source of Rubin prompt photometry: multi-band ($grizy$) light curves
+including DiaSource detections and forced photometry in nanoJanskys.
 
 \subsection{ANTARES}
 
 ANTARES\footnote{\url{https://antares.noirlab.edu/}} ingests both ZTF
-and (limited) Rubin alert streams.  The pipeline performs cone searches
-of each DDF field (1.75\degr\ radius) and filters for loci with
-supernova-related tags (\texttt{superphot\_plus\_classified},
-\texttt{SN\_candies}, \texttt{high\_amplitude\_transient\_candidate}).
+and Rubin alert streams.  The pipeline performs cone searches of each
+DDF field and filters for supernova-related tags.  ANTARES does not
+provide a trained SN~Ia classifier; the pipeline computes a heuristic
+proxy $P(\mathrm{Ia})$ \textbf{capped at 0.50} to prevent
+ANTARES-only detections from dominating the ranking.
 
-ANTARES does not provide a trained SN~Ia classifier.  Instead, the
-pipeline computes a heuristic proxy $P(\mathrm{Ia})$ based on the
-star/galaxy score (\texttt{ztf\_sgscore1}) and light curve duration.
-This proxy is \textbf{capped at 0.50} to prevent ANTARES-only
-detections from dominating the ranking:
-\begin{equation}
-P(\mathrm{Ia})_{\mathrm{ANTARES}} = \min\!\left(
-0.50,\; f(\texttt{sgscore}, \texttt{duration})\right).
-\end{equation}
+\subsection{ALeRCE (ZTF and LSST)}
 
-\subsection{ALeRCE (ZTF)}
+ALeRCE\footnote{\url{https://alerce.online/}} processes both ZTF
+alerts (random-forest classifier
+\texttt{lc\_classifier\_BHRF\_forced\_phot}) and Rubin/LSST alerts
+(stamp classifier \texttt{stamp\_classifier\_rubin}).  The ZTF
+classifier provides per-class probabilities (SN~Ia, SN~II, SN~Ib/c,
+SLSN); the LSST classifier distinguishes SN from AGN/variable/asteroid
+but does not sub-classify SN types.  Direct PostgreSQL access provides
+faster bulk queries than the REST API.
 
-ALeRCE\footnote{\url{https://alerce.online/}} processes ZTF alerts
-through a random-forest stamp classifier
-(\texttt{lc\_classifier\_BHRF\_forced\_phot}, version~2.1.0) trained on
-labeled ZTF data.  It outputs per-object probabilities for SN~Ia,
-SN~II, SN~Ib/c, and SLSN classes.  Coverage is limited to the ZTF
-footprint (Dec~$\gtrsim -30\degr$), so the three southern DDFs
-(ELAIS-S1, EDFS\_a, EDFS\_b) are not covered.
+\subsection{ATLAS}
 
-\subsection{ALeRCE-LSST}
+ATLAS\footnote{\url{https://fallingstar-data.com/forcedphot/}} provides
+forced photometry in cyan ($c$) and orange ($o$) filters as an
+enrichment source (not a primary classifier).  The pipeline uses batch
+submission via the \texttt{radeclist} API with retry/backoff logic and
+automatic token re-authentication on expiry.
 
-ALeRCE also processes Rubin/LSST alerts through a separate stamp
-classifier (\texttt{stamp\_classifier\_rubin}) that classifies objects
-into five categories: SN, AGN, variable star, asteroid, and bogus.
-Crucially, this classifier \textbf{does not sub-classify SN types}: a
-high $P(\mathrm{SN})$ indicates a likely supernova but does not
-distinguish Type~Ia from Type~II or Ib/c.
+\subsection{TNS}
 
-\paragraph{Known limitation.} The ALeRCE LSST API does not correctly
-handle cone-search queries (returns empty results).  The pipeline works
-around this by querying globally for all SN-classified objects and
-filtering locally by DDF coordinates using \texttt{astropy}.
-
-ALeRCE-LSST provides the richest Rubin photometry: multi-epoch
-$ugrizy$ light curves with both alert-triggered detections and forced
-photometry at the object position.
-
-\subsection{Fink}
-
-Fink\footnote{\url{https://fink-portal.org/}} processes Rubin/LSST
-alerts through multiple machine-learning classifiers including
-\texttt{snnSnVsOthers} (SN vs.\ non-SN) and \texttt{earlySNIa} (early
-Type~Ia identification).  The pipeline queries the Fink LSST
-API\footnote{\url{https://api.lsst.fink-portal.org/}} for candidates
-tagged as \texttt{sn\_near\_galaxy\_candidate} and
-\texttt{extragalactic\_new\_candidate}, filtering by Fink's SN
-classification score.
-
-Fink serves as the primary source of Rubin prompt photometry: for each
-candidate, the pipeline retrieves the full multi-band ($grizy$) light
-curve including DiaSource detections and forced photometry at every
-visit.  Flux is provided directly in nanoJanskys from Rubin difference
-imaging.  No authentication is required.
-
-\subsection{ALeRCE Direct Database Access}
-\label{sec:alerce_db}
-
-In addition to the REST API, the pipeline can query ALeRCE's ZTF
-database directly via PostgreSQL for bulk data retrieval.  Read-only
-credentials are fetched at runtime from the ALeRCE
-\texttt{usecases} repository on
-GitHub.\footnote{\url{https://github.com/alercebroker/usecases}}
-
-The \texttt{AlerceDBClient} class
-(\texttt{broker\_clients/alerce\_db\_client.py}) provides methods for:
-\begin{itemize}
-\item Bulk SN candidate queries with classifier probability thresholds,
-\item SPM (Villar supernova parametric model) feature retrieval,
-\item Per-object classification probabilities (pivoted by class),
-\item Pan-STARRS host galaxy photometry (\texttt{sgscore1}, \texttt{sgmag1}, colors),
-\item Light curve detections (\texttt{mjd}, \texttt{magpsf}, \texttt{sigmapsf}).
-\end{itemize}
-
-All queries operate on ALeRCE's \texttt{object}, \texttt{probability},
-\texttt{feature}, \texttt{detection}, and \texttt{ps1\_ztf} tables.  The
-direct database path is significantly faster than the REST API for batch
-queries returning hundreds to thousands of objects.  If the database is
-unreachable (e.g., no \texttt{psycopg2} installation or network
-restrictions), the pipeline falls back to the REST API transparently.
+The Transient Name Server\footnote{\url{https://www.wis-tns.org/}}
+(TNS) is cross-matched at 5\arcsec\ radius to identify
+already-reported candidates, retrieve IAU designations, and pull
+existing spectroscopic classifications and redshifts.
 
 \begin{table}[h]
 \centering
-\caption{Summary of alert broker properties.}
+\caption{Summary of alert broker and enrichment source properties.}
 \label{tab:brokers}
 \begin{tabular}{lcccl}
 \toprule
-Broker & Survey & Dec limit & Classifier & $P(\mathrm{Ia})$ range \\
+Source & Survey & Role & Classifier & Notes \\
 \midrule
-ANTARES       & ZTF + Rubin & $\gtrsim -30\degr$ (ZTF) & Heuristic proxy & 0.05--0.50 \\
-ALeRCE (ZTF)  & ZTF         & $\gtrsim -30\degr$       & RF stamp classifier & 0.0--1.0 \\
-ALeRCE-LSST   & Rubin       & All-sky                  & Rubin stamp classifier & 0.0--1.0 \\
+Fink          & Rubin   & Primary  & ML (SN vs.\ other) & Full Rubin photometry \\
+ANTARES       & ZTF+Rubin & Primary & Heuristic proxy & Capped at $P=0.50$ \\
+ALeRCE (ZTF)  & ZTF     & Primary  & RF stamp classifier & $P(\mathrm{Ia})$ direct \\
+ALeRCE (LSST) & Rubin   & Primary  & Stamp classifier & $P(\mathrm{SN})$ only \\
+ATLAS         & ATLAS   & Enrichment & None & Forced photometry \\
+TNS           & IAU     & Cross-match & None & Duplicate detection \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -374,250 +356,44 @@ ALeRCE-LSST   & Rubin       & All-sky                  & Rubin stamp classifier 
 \label{sec:aggregation}
 %% =========================================================================
 
-The \texttt{AlertAggregator} class (\texttt{core/alert\_aggregator.py})
-merges detections from all three brokers into a single, deduplicated
-candidate list.
+The \texttt{AlertAggregator} class merges detections from all brokers
+into a single, deduplicated candidate list.
 
 \subsection{Cross-Matching and Deduplication}
 
-Objects from different brokers are matched using two criteria:
-\begin{enumerate}
-\item \textbf{Coordinate proximity:} Two detections are considered the
-same astrophysical source if their angular separation is
-$\leq 1\arcsec$ (converted to degrees: $1/3600 \approx
-0.000278\degr$).
-\item \textbf{Shared identifiers:} Objects sharing a ZTF
-\texttt{object\_id} across brokers are merged regardless of coordinate
-offset.
-\end{enumerate}
-
-For each unique source, the pipeline creates a merged record retaining
-broker-specific identifiers (\texttt{object\_id\_ANTARES},
-\texttt{object\_id\_ALeRCE}, \texttt{object\_id\_ALeRCE-LSST}),
-classification probabilities, and quality diagnostics.
+Objects from different brokers are matched by coordinate proximity
+($\leq 1\arcsec$) or shared ZTF \texttt{object\_id}.  For each unique
+source, the pipeline retains broker-specific identifiers and
+classification probabilities.
 
 \subsection{Probability Normalization}
 
 Each broker's classification probability is normalized to a common
-$P(\mathrm{Ia})$ scale:
-\begin{itemize}
-\item \textbf{ALeRCE (ZTF):} Direct ML probability used as-is.
-\item \textbf{ALeRCE-LSST:} $P(\mathrm{SN})$ used as a proxy for
-$P(\mathrm{Ia})$, acknowledging the lack of subtype discrimination.
-\item \textbf{ANTARES:} Heuristic proxy capped at 0.50 (see
-\S\ref{sec:data_sources}).
-\end{itemize}
-
-\subsection{Agreement Scoring}
-
-For objects detected by multiple brokers, the pipeline computes
-aggregate statistics across all available $P(\mathrm{Ia})$ values:
-\begin{align}
-\bar{P} &= \frac{1}{N}\sum_{i=1}^{N} P_i(\mathrm{Ia}), \\
-\sigma_P &= \mathrm{std}(P_1, \ldots, P_N).
-\end{align}
-
-An agreement score is assigned based on $\sigma_P$:
-\begin{equation}
-\mathrm{Agreement} =
-\begin{cases}
-1.0 & \text{if } \sigma_P < 0.1 \quad \text{(high)}, \\
-0.5 & \text{if } 0.1 \leq \sigma_P < 0.25 \quad \text{(moderate)}, \\
-0.0 & \text{if } \sigma_P \geq 0.25 \quad \text{(low)}.
-\end{cases}
-\end{equation}
+$P(\mathrm{Ia})$ scale.  ALeRCE ZTF provides direct ML probability;
+ALeRCE LSST uses $P(\mathrm{SN})$ as proxy; ANTARES uses a heuristic
+capped at 0.50; Fink provides both \texttt{snnSnVsOthers} and
+\texttt{earlySNIa} scores.
 
 \subsection{Variable Star Screening}
 
 The \texttt{VariableScreener} class cross-matches candidates against
-catalogs of 13{,}749 known variable stars compiled from Gaia~DR3 and
-the AAVSO Variable Star Index (VSX), distributed across the six Rubin
-DDFs.  The matching radius is 2\arcsec.  Matched candidates are flagged
-with \texttt{known\_variable = True} and excluded from the SN~Ia
-candidate list.
+13{,}749 known variable stars from Gaia~DR3 and VSX across the DDFs
+(2\arcsec\ matching radius).
 
+\subsection{TNS Cross-Match}
 
-%% =========================================================================
-\section{Galactic Extinction Corrections}
-\label{sec:extinction}
-%% =========================================================================
+Candidates are cross-matched against TNS at 5\arcsec\ to identify
+already-reported transients, retrieve IAU designations (AT/SN names),
+spectroscopic classifications, and redshifts.  This prevents duplicate
+follow-up of known objects.
 
-Galactic dust along the line of sight reddens and dims extragalactic
-sources.  Correcting for this extinction is essential for accurate peak
-magnitude estimates and, consequently, for meaningful merit scores and
-absolute magnitude calculations.
+\subsection{Nuclear Offset Filter}
 
-\subsection{Dust Map Queries}
-
-The pipeline queries the IRSA Galactic Dust Reddening and Extinction
-service\footnote{\url{https://irsa.ipac.caltech.edu/applications/DUST/}}
-using the \texttt{astroquery.ipac.irsa.irsa\_dust.IrsaDust} interface.
-For each candidate, the \citet{Schlafly2011} recalibration of the
-\citet{Schlegel1998} (SFD) dust map provides the total Galactic
-extinction $A_\lambda$ in each photometric band:
-\begin{equation}
-A_\lambda(\ell, b) = R_\lambda \times E(B-V)_{\mathrm{SFD}},
-\end{equation}
-where $R_\lambda$ is the ratio of total-to-selective extinction for
-band~$\lambda$ and $E(B-V)_{\mathrm{SFD}}$ is the reddening from the
-SFD map.
-
-The service returns extinction values $A_{\mathrm{SFD}}$ for SDSS
-$ugriz$ filters.  The pipeline extracts $A_g$, $A_r$, $A_i$, $A_z$ for
-each candidate based on its individual sky coordinates (not a per-field
-average).
-
-\subsection{Caching}
-
-Extinction values are cached in the SQLite database
-(\texttt{galaxy\_info} table, \texttt{extinction\_json} column) keyed by
-coordinates with a tolerance of $0.1\arcmin$.  Subsequent pipeline runs
-retrieve cached values without re-querying IRSA, significantly reducing
-runtime for repeated analyses of the same fields.
-
-\subsection{Extinction-Corrected Magnitudes}
-
-The corrected apparent magnitude for band~$\lambda$ is:
-\begin{equation}
-m_{\lambda,\mathrm{corr}} = m_\lambda - A_\lambda,
-\end{equation}
-where $m_\lambda$ is the observed magnitude and $A_\lambda$ is the
-Galactic extinction in that band.  The extinction-corrected peak
-magnitudes ($\texttt{peak\_mag\_corrected}$) propagate through the merit
-function and Magellan catalog generation.
-
-\subsection{Typical Extinction Values}
-
-The DDF fields span a range of Galactic latitudes:
-
-\begin{center}
-\begin{tabular}{lcl}
-\toprule
-Field & Galactic $|b|$ & Typical $A_g$ \\
-\midrule
-COSMOS & $42\degr$ & $\sim 0.07$~mag \\
-M49 & $70\degr$ & $\sim 0.08$~mag \\
-XMM-LSS & $-59\degr$ & $\sim 0.10$~mag \\
-ECDFS & $-55\degr$ & $\sim 0.03$~mag \\
-ELAIS-S1 & $-73\degr$ & $\sim 0.04$~mag \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-While individual corrections are modest for most DDFs, they vary
-across each field and are important for precision photometry at the
-$\lesssim 0.1$~mag level relevant to SN~Ia standardization.
-
-
-%% =========================================================================
-\section{NED Spectroscopic Redshifts}
-\label{sec:ned}
-%% =========================================================================
-
-For each SN candidate, the pipeline queries the NASA/IPAC
-Extragalactic Database
-(NED)\footnote{\url{https://ned.ipac.caltech.edu/}} for spectroscopic
-redshifts of potential host galaxies.  Spectroscopic redshifts, when
-available, provide accurate distance estimates and enable absolute
-magnitude calculations.
-
-\subsection{Query Strategy}
-
-The \texttt{utils/ned\_query.py} module uses
-\texttt{astroquery.ipac.ned.Ned.query\_region()} to search for
-cataloged objects within a radius of 18\arcsec\ of each SN candidate
-position.  This search radius is chosen to encompass typical SN--host
-offsets while limiting contamination from unrelated sources.
-
-From the returned objects, the pipeline selects the nearest source with
-a valid spectroscopic redshift.  The result includes:
-\begin{itemize}
-\item \texttt{ned\_redshift}: spectroscopic redshift $z$,
-\item \texttt{ned\_name}: NED designation of the host galaxy,
-\item \texttt{ned\_sep\_arcsec}: angular separation from the SN position,
-\item \texttt{ned\_distmod}: distance modulus $\mu$.
-\end{itemize}
-
-\subsection{Distance Modulus}
-
-The distance modulus is computed using:
-\begin{equation}
-\mu = 5 \log_{10}\!\left(\frac{d_L}{10\,\mathrm{pc}}\right),
-\end{equation}
-where $d_L$ is the luminosity distance derived from the redshift using
-WMAP7 cosmology ($H_0 = 70.4$~km\,s$^{-1}$\,Mpc$^{-1}$,
-$\Omega_m = 0.272$).
-
-\subsection{Absolute Magnitude Estimation}
-
-When both extinction-corrected peak magnitude and NED distance modulus
-are available, the pipeline estimates the absolute magnitude:
-\begin{equation}
-M = m_{\mathrm{corr}} - \mu.
-\end{equation}
-For Type~Ia supernovae, the expected range is $M \approx -19.3 \pm
-0.5$~mag.  Candidates with anomalous absolute magnitudes (e.g.,
-$M < -21$ or $M > -16$) may warrant additional scrutiny or may indicate
-misclassification.
-
-\subsection{Caching and Rate Limiting}
-
-NED query results are cached in the \texttt{galaxy\_info} table (columns
-\texttt{redshift}, \texttt{ned\_name}, \texttt{ned\_separation\_arcsec}).
-Batch queries iterate over unique coordinates with error handling for
-timeouts and empty results.  NED's query service can be slow for large
-batches, so caching is important for interactive use.
-
-
-%% =========================================================================
-\section{Rubin Difference-Imaging Photometry}
-\label{sec:photometry}
-%% =========================================================================
-
-ALeRCE-LSST photometry is derived from Rubin \emph{difference imaging}:
-each science image is subtracted from a co-added reference template, and
-point-spread function (PSF) photometry is performed on the residual.
-
-\subsection{Flux Representation}
-
-The difference-image flux (\texttt{psfFlux}) is reported in
-\textbf{nanoJanskys} (nJy) and represents the flux difference
-$f_{\mathrm{sci}} - f_{\mathrm{tmpl}}$:
-\begin{itemize}
-\item $f > 0$: source is brighter than template (transient brightening).
-\item $f < 0$: source is fainter than template (fading below baseline).
-\item $f = 0$: source matches the template exactly.
-\end{itemize}
-
-The science-image flux (\texttt{scienceFlux}) is also available for
-alert-triggered detections (but not for forced photometry) and is always
-positive for real sources.
-
-\subsection{Magnitude Conversion}
-
-For positive flux values, the AB magnitude is:
-\begin{equation}
-\label{eq:mag_conversion}
-m = -2.5 \log_{10}(f_{\mathrm{nJy}}) + 31.4,
-\end{equation}
-with uncertainty propagated as:
-\begin{equation}
-\label{eq:mag_err}
-\sigma_m = \frac{2.5}{\ln 10} \cdot \frac{\sigma_f}{f}.
-\end{equation}
-
-\paragraph{Negative flux limitation.} Points with $f \leq 0$ cannot
-be converted to magnitudes and are dropped in magnitude-space
-representations.  This truncates the light curve tail, which is why all
-fitting in this pipeline is performed in flux space.
-
-\subsection{Forced Photometry}
-
-Forced photometry provides flux measurements at the object position even
-when the source is not detected above threshold, giving more complete
-temporal coverage than alert-triggered detections alone.  However, forced
-photometry only provides \texttt{psfFlux} (difference flux); the
-\texttt{scienceFlux} is not available.
+Using host galaxy positions from GLADE+, SDSS, PS1, and SkyMapper, the
+pipeline computes the angular offset between each transient and its host
+nucleus.  Candidates with offset $< 1\arcsec$ are flagged as likely
+AGN or TDE (nuclear transients); offsets of 1--30\arcsec\ are consistent
+with SNe in host galaxies.
 
 
 %% =========================================================================
@@ -625,89 +401,25 @@ photometry only provides \texttt{psfFlux} (difference flux); the
 \label{sec:peak_fitting}
 %% =========================================================================
 
-The \texttt{core/peak\_fitting.py} module estimates the time of peak
-brightness and peak apparent magnitude for each candidate.  Two methods
-are available.
+The \texttt{core/peak\_fitting.py} module estimates peak brightness
+and timing using a dual-fit strategy for robustness.
 
 \subsection{Inverted Parabola Model}
 
-Near maximum light, the flux light curve of a SN~Ia is approximately
-parabolic.  We fit an inverted parabola in flux space:
+Near maximum light, the flux light curve is approximately parabolic:
 \begin{equation}
-\label{eq:parabola}
 f(t) = f_{\mathrm{peak}} - a\,(t - t_0)^2,
 \end{equation}
-where $f_{\mathrm{peak}}$ is the peak flux (nJy), $t_0$ is the time of
-peak (MJD), and $a > 0$ is the curvature parameter.
+fit independently per band using \texttt{scipy.optimize.curve\_fit}
+with flux uncertainties as weights.
 
-The fit is performed independently per band using
-\texttt{scipy.optimize.curve\_fit} with the flux uncertainties as
-weights (absolute sigma).  Initial guesses are derived from the data:
-$f_{\mathrm{peak}}^{(0)} = \max(f)$, $t_0^{(0)} = t(\max f)$,
-$a^{(0)} = 1.0$.
-
-\paragraph{Working in flux space.} Fitting in flux space rather than
-magnitude space has three advantages: (1)~negative difference-imaging
-flux values are handled naturally; (2)~the parabola is a more physical
-model near peak in linear flux than in logarithmic magnitudes; (3)~there
-are no singularities from the $\log_{10}$ transform.
-
-\subsection{Goodness of Fit}
-
-The reduced chi-squared is:
-\begin{equation}
-\chi^2_\nu = \frac{1}{\nu} \sum_{i=1}^{N}
-\left(\frac{f_i - f(t_i)}{\sigma_{f,i}}\right)^2,
-\end{equation}
-where $\nu = \max(N-3, 1)$ is the number of degrees of freedom (three
-free parameters: $f_{\mathrm{peak}}$, $t_0$, $a$).
-
-\subsection{Fit Status Flags}
-
-Each per-band fit is assigned a status flag:
-
-\begin{center}
-\begin{tabular}{ll}
-\toprule
-Status & Criterion \\
-\midrule
-\texttt{ok} & $N \geq 4$ and $\chi^2_\nu \leq 10$ \\
-\texttt{underdetermined} & $N = 3$ (exactly constrained) \\
-\texttt{poor\_fit} & $N \geq 4$ and $\chi^2_\nu > 10$ \\
-\texttt{insufficient\_data} & $N < 3$ \\
-\texttt{fit\_failed} & Optimizer did not converge \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\subsection{Band Priority}
-
-For the ``headline'' peak estimate reported per candidate, the best band
-is selected from the priority list:
-\begin{equation}
-r > g > i > z > y > u.
-\end{equation}
-The $r$-band is prioritized because it is closest to rest-frame $B$-band
-for SN~Ia at the typical DDF redshift range ($z \sim 0.1$--$0.4$).  The
-first band with a successful fit (status \texttt{ok} or
-\texttt{underdetermined}) is selected.
-
-\subsection{Multi-Band Villar Supernova Parametric Model}
+\subsection{Multi-Band Villar SPM}
 \label{sec:villar}
 
-The primary peak-fitting method is a simultaneous multi-band fit of
-the Villar supernova parametric model \citep{Villar2019} directly to
-the combined Rubin\,+\,ZTF\,+\,ATLAS light curve data.  This fit
-uses a shared explosion epoch $t_0$ across all bands while allowing
-per-band amplitude and timescale parameters, providing much more
-robust peak estimates than independent per-band fits.
-
-\subsubsection{Model Definition}
-
-The Villar model describes the flux as a function of time with a smooth
-sigmoid rise and exponential decline:
+The primary method fits the Villar supernova parametric model
+\citep{Villar2019} simultaneously across all bands with a shared
+explosion epoch $t_0$:
 \begin{equation}
-\label{eq:villar}
 F(t) =
 \begin{cases}
 \displaystyle
@@ -720,477 +432,254 @@ F(t) =
 & t \geq t_0 + \gamma,
 \end{cases}
 \end{equation}
-where $t_0$ is the explosion epoch (MJD), $A$ is the peak amplitude
-in nanoJanskys, $\beta$ controls the pre-maximum slope,
-$\gamma$ sets the rise-to-decline transition time,
-$\tau_{\mathrm{rise}}$ and $\tau_{\mathrm{fall}}$ are the rise and
-fall timescales in days.
+with $1 + 5N_b$ parameters for $N_b$ bands.  Peak time is determined
+by numerical flux maximization on a fine grid rather than the analytic
+approximation.
 
-\subsubsection{Multi-Band Fitting Strategy}
+\subsection{Multi-Survey Photometry Combination}
 
-The key innovation is sharing $t_0$ across all photometric bands.
-For $N_b$ bands, the parameter vector is:
-\begin{equation}
-\vec{p} = \bigl[t_0,\; A_1, \beta_1, \gamma_1, \tau_{\mathrm{rise},1},
-\tau_{\mathrm{fall},1},\; A_2, \beta_2, \ldots\bigr],
-\end{equation}
-with $1 + 5N_b$ total free parameters.  The fit minimizes
-\begin{equation}
-\chi^2 = \sum_{b=1}^{N_b} \sum_{i=1}^{n_b}
-\left(\frac{F_{b,i}^{\mathrm{obs}} - F_b(t_i;\,\vec{p})}
-{\sigma_{b,i}}\right)^2
-\end{equation}
-using \texttt{scipy.optimize.least\_squares} with the Trust Region
-Reflective algorithm and Huber-like \texttt{soft\_l1} robust loss
-function, which down-weights outliers.  Bounds constrain all
-parameters to physically reasonable ranges (e.g., $A > 0$,
-$0 < \beta < 1$, $\gamma > 1$~day).
+The pipeline combines photometry from up to three surveys before
+fitting: Rubin/LSST (via Fink, $grizy$, nJy), ZTF (via ALeRCE,
+$gr$), and ATLAS (forced photometry, cyan/orange).  All flux is
+standardized to nanoJanskys.
 
-This multi-band approach constrains the explosion epoch using data
-from every available band simultaneously, which is particularly
-valuable for the Rubin DDFs where $g$, $r$, $i$, $z$ photometry
-is available plus supplementary ZTF $g$/$r$ and ATLAS cyan/orange
-data when the target is in the northern sky.
+\subsection{Optional SALT2 Template Fitting}
 
-\subsubsection{Light Curve Cleaning}
-
-Before fitting, the \texttt{clean\_light\_curve()} function processes
-the combined photometry:
-\begin{enumerate}
-\item \textbf{Deduplication:} When a DiaSource detection and a
-forced-photometry measurement exist at the same (MJD, band), the
-detection is kept (it has better-characterized uncertainties).
-\item \textbf{Sigma clipping:} Per (night, band) group, points
-deviating more than $4\sigma$ from the inverse-variance weighted
-mean flux are rejected.  This removes catastrophic outliers from
-difference-imaging artifacts.
-\end{enumerate}
-
-\subsubsection{Photometric Quality Cuts}
-
-Before fitting, each candidate must satisfy three criteria designed to
-reject single-epoch events, single-band artifacts, and poorly-sampled
-objects that cannot be reliably typed:
-\begin{enumerate}
-\item At least 5 photometric data points with $\mathrm{SNR} > 5$.
-\item Detections (among high-SNR points) in at least 2 photometric
-  bands.
-\item A time baseline of at least 2~days between first and last
-  observation.
-\end{enumerate}
-After fitting, the multi-band Villar SPM model must converge with
-data from $\geq 2$ bands.  If the Villar fit fails, the inverted
-parabola is accepted only when it too succeeds in $\geq 2$ bands.
-
-\subsubsection{Numerical Peak Finding}
-
-The time of peak brightness is determined by numerical maximization of
-the flux function rather than the analytic approximation $t_{\mathrm{peak}}
-\approx t_0 + \gamma$.  The analytic formula can be
-inaccurate by 7--21~days because the sigmoid rise term shifts the true
-flux maximum away from the transition time.
-
-The pipeline evaluates $F(t)$ on a fine grid of 2000 points spanning
-$[t_0,\; t_0 + \gamma + 3\tau_{\mathrm{fall}}]$
-and identifies the grid point with maximum flux:
-\begin{equation}
-t_{\mathrm{peak}} = \arg\max_t F(t).
-\end{equation}
-The corresponding peak magnitude is:
-\begin{equation}
-m_{\mathrm{peak}} = -2.5\,\log_{10}(F_{\mathrm{peak}}/\mathrm{nJy}) + 31.4\,\mathrm{mag},
-\end{equation}
-where $31.4 = -2.5\log_{10}(3.631\times10^{-6}) \approx 8.9 + 22.5$ is
-the AB zero-point for nanoJansky flux units.
-
-\subsubsection{Multi-Survey Photometry Combination}
-
-The nightly pipeline (\texttt{run\_tonight.py}) combines photometry
-from up to three surveys before fitting:
-\begin{itemize}
-\item \textbf{Rubin/LSST} (via Fink): difference-imaging photometry
-  in $g$, $r$, $i$, $z$ bands, including both DiaSource detections
-  and forced photometry.  Flux in nanoJanskys (nJy).
-\item \textbf{ZTF} (via ALeRCE): detections in $g$, $r$ bands.
-  Magnitudes converted to nJy via
-  $F_{\mathrm{nJy}} = 10^{(31.4 - m)/2.5}$.
-\item \textbf{ATLAS}: forced photometry in cyan ($c$) and orange ($o$)
-  bands, queried only for candidates brighter than 20th magnitude
-  (the approximate ATLAS detection limit).  Targets are submitted
-  in batch via the \texttt{radeclist} API endpoint for efficiency.
-  Flux in microJanskys converted via
-  $F_{\mathrm{nJy}} = F_{\mu\mathrm{Jy}} \times 1000$.
-\end{itemize}
-All photometry is standardized to a common DataFrame with columns
-\texttt{mjd}, \texttt{flux}, \texttt{flux\_err}, \texttt{band},
-\texttt{survey} before the combined fit.
-
-\subsubsection{Integration with Parabola Fits}
-
-Both the multi-band Villar fit and per-band parabola fits are run on
-every candidate.  The Villar result is preferred when it converges
-(fit status = \texttt{ok}), with the parabola as fallback.  The
-summary table includes peak magnitude, peak MJD, delta-$t$ (days
-since peak), and the fit method used for each candidate.
-
-\subsection{Optional: SALT2 Template Fitting}
-
-If the \texttt{sncosmo} package is installed, a multi-band SALT2
-template fit is also available.  The SALT2 model parameterizes SN~Ia
-light curves as:
-\begin{equation}
-f(t, \lambda) = x_0 \left[ M_0(t, \lambda) + x_1\, M_1(t, \lambda)
-\right] \times \exp\!\left[ c\, \mathrm{CL}(\lambda) \right],
-\end{equation}
-where $x_0$ is the amplitude, $x_1$ is the stretch parameter
-(light-curve width), $c$ is the color parameter, $M_0$ and $M_1$ are
-the template spectral surfaces, and $\mathrm{CL}(\lambda)$ is the color
-law.  The fit simultaneously uses all LSST bands ($g$, $r$, $i$, $z$,
-$y$, $u$ mapped to \texttt{sncosmo} band names \texttt{lsstg},
-\texttt{lsstr}, etc.) and requires $\geq 5$ data points across $\geq 2$
-bands.
-
-The SALT2 fit returns $t_0$ (time of $B$-band maximum), $x_1$
-(stretch), $c$ (color), the peak rest-frame $B$-band magnitude, and
-the redshift $z$ (which can float or be fixed if a spectroscopic
-redshift is known).
+If \texttt{sncosmo} is installed, a SALT2 template fit provides
+stretch ($x_1$), color ($c$), and rest-frame $B$-band peak magnitude.
 
 
 %% =========================================================================
-\section{Merit Function for Spectroscopic Follow-Up}
+\section{Merit Function}
 \label{sec:merit}
 %% =========================================================================
 
-Given the fitted peak time $t_0$ and extinction-corrected peak magnitude
-$m_{\mathrm{corr}}$, we define a merit function that encodes the
-scientific value of spectroscopically observing a candidate on a given
-night:
+The alert pipeline computes a six-component multiplicative merit
+function encoding the scientific value of spectroscopically observing
+each candidate:
 \begin{equation}
 \label{eq:merit}
-\boxed{\mathcal{M} = W_t(\Delta t) \times W_m(m),}
+\boxed{\mathcal{M} = W_{\mathrm{time}} \times W_{\mathrm{mag}}
+\times W_{\mathrm{prob}} \times W_{\mathrm{host}} \times
+W_{\mathrm{ext}} \times W_{\mathrm{broker}}}
 \end{equation}
-where $\Delta t = t_{\mathrm{now}} - t_0$ is the time since peak (days,
-positive means post-peak), and $m$ is the extinction-corrected peak
-apparent magnitude $m_{\mathrm{corr}}$ (falling back to the uncorrected
-$m$ if extinction data are unavailable).
-
-\subsection{Time Weight}
-
-The time weight is a Gaussian centered on peak:
-\begin{equation}
-\label{eq:wt}
-W_t = \exp\!\left(-\frac{\Delta t^2}{2\tau^2}\right),
-\end{equation}
-with $\tau = 10$~days by default.  This gives:
-\begin{center}
-\begin{tabular}{rc}
-\toprule
-$|\Delta t|$ (days) & $W_t$ \\
-\midrule
-0 & 1.000 \\
-5 & 0.882 \\
-10 & 0.607 \\
-15 & 0.325 \\
-20 & 0.135 \\
-30 & 0.011 \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-The Gaussian is symmetric: pre-peak observations (rising light curve)
-receive the same weight as post-peak.  This is appropriate because
-pre-peak spectra are highly valuable for constraining explosion physics,
-while post-peak spectra within $\sim$2~weeks are standard for
-classification.
-
-\subsection{Magnitude Weight}
-
-The magnitude weight is a Gaussian in apparent magnitude space:
-\begin{equation}
-\label{eq:wm}
-W_m = \exp\!\left(-\frac{(m - m_{\mathrm{opt}})^2}{\sigma_m^2}\right),
-\end{equation}
-with default parameters:
-\begin{itemize}
-\item $m_{\mathrm{opt}} = 20.5$ --- the optimal magnitude for Magellan
-6.5\,m spectroscopy.  At this brightness, a SN~Ia at $z \sim 0.1$--0.15
-yields a classification-quality spectrum in $\sim$20--40 minutes with
-LDSS3C or IMACS.
-\item $\sigma_m = \frac{m_{\mathrm{faint}} - m_{\mathrm{bright}}}{4} =
-\frac{23.0 - 18.0}{4} = 1.25$~mag --- chosen so that the weight spans
-the useful magnitude range ($\sim$18--23~mag) with reasonable falloff.
-\end{itemize}
-
-\subsection{Combined Merit Surface}
-
-The product $\mathcal{M} = W_t \times W_m$ defines a two-dimensional
-surface over $(\Delta t, m)$ space.  The maximum merit
-($\mathcal{M} = 1$) occurs at $\Delta t = 0$, $m = m_{\mathrm{opt}}$.
-Objects far from peak, or too bright (nearby, less cosmologically
-interesting) or too faint (requiring prohibitively long exposures) are
-deprioritized.
-
-Candidates with $\texttt{peak\_mjd} = \mathrm{NaN}$ or
-$\texttt{peak\_mag} = \mathrm{NaN}$ (due to insufficient photometry or
-fit failure) receive $\mathcal{M} = \mathrm{NaN}$ and are placed at
-the bottom of the target list.
-
-All merit function parameters ($\tau$, $m_{\mathrm{opt}}$,
-$m_{\mathrm{bright}}$, $m_{\mathrm{faint}}$) are configurable to
-accommodate different instruments and science goals.
-
-
-%% =========================================================================
-\section{Magellan Observing Plan Generation}
-\label{sec:magellan}
-%% =========================================================================
-
-The final stage of the pipeline generates a target catalog in the native
-Magellan Telescope Control System (TCS) format for spectroscopic
-follow-up.
-
-\subsection{Observability Constraints}
-
-For a specified UT observing date, the pipeline computes target
-observability from Las Campanas Observatory:
-\begin{center}
-\begin{tabular}{ll}
-Latitude:  & $-29.0146\degr$ \\
-Longitude: & $-70.6926\degr$ \\
-Altitude:  & 2516\,m \\
-\end{tabular}
-\end{center}
-
-Using \texttt{astropy.coordinates.AltAz} and
-\texttt{astropy.coordinates.get\_sun}, the pipeline:
-\begin{enumerate}
-\item Computes nautical twilight boundaries (Sun altitude $< -12\degr$).
-\item Creates a time grid at 15-minute intervals spanning the dark hours.
-\item For each target, computes altitude at each grid point.
-\item Retains targets that spend at least a configurable minimum time
-(default: 1~hour) above the airmass limit (default: airmass $< 2.0$,
-corresponding to altitude $> 30\degr$).
-\end{enumerate}
-
-\subsection{Target Prioritization}
-
-Observable targets are sorted by Right Ascension (ascending) for
-efficient telescope slewing.  Within the catalog, comment lines encode
-the merit score, peak magnitude, time from peak, DDF field, and fit
-status for each target, enabling the observer to make informed decisions
-about which targets to prioritize during the night.
-
-\subsection{Catalog Format}
-
-The Magellan TCS requires a 16-field whitespace-separated format:
 
 \begin{center}
-\small
-\begin{tabular}{rlp{7cm}}
-\toprule
-Field & Name & Description \\
-\midrule
-1  & Reference number & Sequential integer \\
-2  & Object name & Alphanumeric $+$ \texttt{+-.\textunderscore} only \\
-3  & RA & \texttt{hh:mm:ss.s} (J2000) \\
-4  & Dec & \texttt{$\pm$dd:mm:ss} (J2000) \\
-5  & Equinox & \texttt{2000.0} \\
-6  & PM$_\alpha$ & 0.000 (no proper motion) \\
-7  & PM$_\delta$ & 0.000 \\
-8  & Rotator angle & Instrument-dependent (degrees) \\
-9  & Rotator mode & \texttt{GRV}, \texttt{EQU}, \texttt{HRZ}, or \texttt{OFF} \\
-10--12 & Guide probe 1 & RA, Dec, equinox (zeros if unused) \\
-13--15 & Guide probe 2 & RA, Dec, equinox (zeros if unused) \\
-16 & Epoch & 0.000 (no proper motion) \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-Instrument presets (LDSS3C, IMACS, MagE, FIRE) provide default rotator
-angles and modes.  Guide probe fields are set to zero (no preselected
-guide stars).
-
-
-%% =========================================================================
-\section{Data Schema}
-\label{sec:schema}
-%% =========================================================================
-
-The pipeline uses a SQLite database (\texttt{cache/data/alerts\_cache.db})
-for caching intermediate results and bridging between the discovery
-notebook and the Magellan planning notebook.
-
-\subsection{Existing Tables}
-
-\paragraph{\texttt{alerts}} Caches raw broker query results.  Columns:
-\texttt{object\_id} (TEXT), \texttt{broker} (TEXT), \texttt{ra} (REAL),
-\texttt{dec} (REAL), \texttt{discovery\_date} (TEXT),
-\texttt{classification} (JSON), \texttt{metadata} (JSON),
-\texttt{cached\_at} (TIMESTAMP).  Unique on
-\texttt{(object\_id, broker)}.
-
-\paragraph{\texttt{galaxy\_info}} Caches galaxy morphology, photometry,
-extinction, and redshift data from catalog queries.  Columns:
-\texttt{ra}, \texttt{dec}, \texttt{morphology}, \texttt{catalog} (JSON),
-\texttt{redshift}, \texttt{magnitude\_g/r/i/z},
-\texttt{extinction\_json} (JSON dict of $\{$band: $A_\lambda\}$ from
-IRSA SFD), \texttt{ned\_name} (NED host designation),
-\texttt{ned\_separation\_arcsec} (angular offset from SN position).
-Unique on \texttt{(ra, dec)}.
-
-\paragraph{\texttt{merged\_alerts}} Caches deduplicated/merged alerts.
-Columns: \texttt{unique\_id}, \texttt{ra}, \texttt{dec},
-\texttt{brokers\_detected}, per-broker classification JSON,
-\texttt{last\_updated}.
-
-\subsection{New Table: \texttt{peak\_fit\_targets}}
-
-This table serves as the intermediate data product between the main
-pipeline and the Magellan planning notebook:
-
-\begin{center}
-\small
 \begin{tabular}{lll}
 \toprule
-Column & Type & Description \\
+Component & Formula & Default Parameters \\
 \midrule
-\texttt{object\_id}              & TEXT  & Primary identifier \\
-\texttt{object\_id\_alerce\_lsst}& TEXT  & ALeRCE-LSST ID \\
-\texttt{object\_id\_antares}     & TEXT  & ANTARES ID \\
-\texttt{ddf\_field}              & TEXT  & DDF field name \\
-\texttt{ra}, \texttt{dec}        & REAL  & J2000 coordinates (deg) \\
-\texttt{mean\_ia\_prob}          & REAL  & Mean $P(\mathrm{Ia})$ \\
-\texttt{brokers\_detected}       & TEXT  & Broker names \\
-\texttt{A\_g}, \texttt{A\_r}, \texttt{A\_i} & REAL & Galactic extinction (mag) \\
-\texttt{ned\_redshift}           & REAL  & NED spectroscopic redshift \\
-\texttt{ned\_distmod}            & REAL  & Distance modulus from NED $z$ \\
-\texttt{peak\_mjd}               & REAL  & Fitted peak time (MJD) \\
-\texttt{peak\_mag}               & REAL  & Fitted peak magnitude (AB) \\
-\texttt{peak\_mag\_corrected}    & REAL  & Extinction-corrected peak mag \\
-\texttt{peak\_mag\_err}          & REAL  & Magnitude uncertainty \\
-\texttt{peak\_band}              & TEXT  & Best-fit band \\
-\texttt{peak\_fit\_status}       & TEXT  & Fit quality flag \\
-\texttt{villar\_peak\_mjd}       & REAL  & Villar SPM peak time (MJD) \\
-\texttt{villar\_peak\_mag}       & REAL  & Villar SPM peak magnitude \\
-\texttt{mjd\_now}                & REAL  & MJD when merit computed \\
-\texttt{delta\_t}                & REAL  & $t_{\mathrm{now}} - t_0$ (days) \\
-\texttt{merit}                   & REAL  & Merit score (0--1) \\
-\texttt{abs\_mag}                & REAL  & $m_{\mathrm{corr}} - \mu$ \\
-\texttt{cached\_at}              & TIMESTAMP & Write timestamp \\
+$W_{\mathrm{time}}$ & $\exp(-\Delta t^2 / 2\tau^2)$ &
+  $\tau = 10$ days \\
+$W_{\mathrm{mag}}$ & $\exp(-(m - m_{\mathrm{opt}})^2 / \sigma_m^2)$ &
+  $m_{\mathrm{opt}} = 20.5$, $\sigma_m = 1.25$ \\
+$W_{\mathrm{prob}}$ & $P(\mathrm{Ia}) \in [0.1, 1.0]$ &
+  Clipped lower bound \\
+$W_{\mathrm{host}}$ & $\{1.0, 0.6, 0.7\}$ &
+  Elliptical, Spiral, Unknown \\
+$W_{\mathrm{ext}}$ & $\exp(-E(B\!-\!V) / 0.15)$ &
+  Penalizes high extinction \\
+$W_{\mathrm{broker}}$ & $1.0 + 0.1 \times (N - 1)$ &
+  Multi-broker agreement \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The table uses \texttt{INSERT OR REPLACE} keyed on
-\texttt{object\_id}, so re-running the main pipeline overwrites stale
-entries.
+The multiplicative structure ensures a candidate must score well on
+\emph{all} factors.  A single high score (e.g., bright magnitude) cannot
+compensate for a poor score elsewhere (e.g., far past peak).
 
 
 %% =========================================================================
-\section{Current Status and Future Work}
+\section{LLAMAS Orchestrator}
+\label{sec:orchestrator}
+%% =========================================================================
+
+The LLAMAS orchestrator converts ranked \texttt{candidates.csv} output
+from the alert pipeline into executable observing plans for the MAGNETS
+collaboration.
+
+\subsection{Exposure Estimation}
+
+Exposure times are estimated using a three-tier cascade from the Stubbs
+2026B proposal Table~1:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Strategy & Input & Example & Fallback \\
+\midrule
+Redshift table & $z$ known & $z = 0.25 \to 95$~min (grey) & --- \\
+Magnitude scaling & mag known & mag~20 $\to$ 45~min, $2.5\times$/mag & --- \\
+Default & neither & 45~min & Always \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The redshift-based table encodes moon phase constraints:
+\begin{center}
+\begin{tabular}{cccc}
+\toprule
+$z$ range & Moon phase & Peak $r$ & Exposure \\
+\midrule
+0.10--0.20 & Bright & 19.3 & 35~min \\
+0.20--0.30 & Grey & 20.6 & 95~min \\
+0.30--0.35 & Grey/Dark & 21.3 & 100~min \\
+0.35--0.40 & Dark & 21.9 & 180~min \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Composite Priority Scoring}
+
+The orchestrator's prioritizer computes a composite score incorporating
+multiple signals:
+\begin{equation}
+S = \underbrace{W_{\mathrm{sci}} \times 100}_{\text{science}}
+\times \underbrace{F_{\mathrm{budget}}}_{\text{time budget}}
+\times \underbrace{W_{\phi}}_{\text{LC phase}}
++ \underbrace{f_{\mathrm{obs}} \times 20}_{\text{observability}}
++ \underbrace{\Delta_{\mathrm{kw}} \times 50}_{\text{keywords}}
+\end{equation}
+where:
+\begin{itemize}
+\item $W_{\mathrm{sci}}$: P1$\to$1.0, P2$\to$0.7, P3$\to$0.4, P4$\to$0.2
+\item $F_{\mathrm{budget}}$: 1.0 ($>$5h remaining), 0.5 (0--5h), 0.1 (exhausted)
+\item $W_\phi$: phase weight from alert pipeline ($W_{\mathrm{time}} = \exp(-\Delta t^2/2\tau^2)$)
+\item $f_{\mathrm{obs}}$: fraction of night target is above airmass limit
+\item $\Delta_{\mathrm{kw}}$: keyword adjustments (``HIGH PRIORITY'' $+0.3$, ``backup'' $-0.3$)
+\end{itemize}
+
+The phase weight $W_\phi$ ensures targets near peak brightness are
+automatically prioritized over those well past peak, even at the same
+nominal priority level.
+
+\subsection{Greedy Scheduling Algorithm}
+
+Targets are scheduled using a greedy algorithm adapted from existing
+LDSS3 scheduling tools:
+\begin{equation}
+\mathrm{score}_i(t) = S_i - \alpha(t) \times 10
+\end{equation}
+where $S_i$ is the composite priority and $\alpha(t)$ is the airmass
+at time~$t$.  At each time step, the highest-scoring observable target
+is scheduled.  Spectrophotometric standard stars from the Boyd et al.\
+WD catalog are interleaved at the start and end of the night.
+
+Key parameters: maximum airmass 1.6, IFU overhead 1~min, gap fill up
+to 5~min, sub-exposures capped at 900~s.
+
+\subsection{Multi-Program Time Accounting}
+
+Time is tracked per program per moon phase using an \texttt{allocations.yaml}
+configuration:
+
+\begin{lstlisting}[language={}]
+semester: "2026B"
+default_program: "MAGNETS-Stubbs"
+programs:
+  - program: "MAGNETS-Stubbs"
+    pi: "Stubbs"
+    allocated_hours: {dark: 5.0, grey: 20.0, bright: 5.0}
+  - program: "MAGNETS-Villar"
+    pi: "Villar"
+    allocated_hours: {dark: 4.0, grey: 8.0, bright: 4.0}
+\end{lstlisting}
+
+Time is charged when plans are generated (charge-on-schedule), with a
+\texttt{reconcile} command for post-night adjustment.  State is
+persisted in \texttt{time\_accounting.json} with a full charge log for
+audit.
+
+\subsection{Outputs}
+
+The orchestrator produces:
+\begin{itemize}
+\item \textbf{Timeline}: UT schedule with standard stars, exposure
+parameters, and priority annotations
+\item \textbf{TCS catalog}: Magellan telescope control system format
+(16-field, J2000)
+\item \textbf{Summary}: Human-readable plan with efficiency metrics and
+per-program time budget status
+\item \textbf{Time report}: Per-program charges and remaining budget
+\item \textbf{Season report}: Cumulative usage, burn rate, projected
+exhaustion
+\end{itemize}
+
+
+%% =========================================================================
+\section{Galactic Extinction and Host Galaxy}
+\label{sec:environment}
+%% =========================================================================
+
+\subsection{Extinction Corrections}
+
+The pipeline queries the IRSA Galactic Dust Reddening service using the
+\citet{Schlafly2011} recalibration of the \citet{Schlegel1998} (SFD)
+dust map.  Extinction values $A_\lambda$ for SDSS $ugriz$ are cached in
+SQLite.  The $E(B\!-\!V)$ reddening is computed from $A_g / R_g$ with
+$R_g = 3.303$.
+
+\subsection{Host Galaxy Classification}
+
+The \texttt{MorphologyFilter} queries SDSS, Pan-STARRS, SkyMapper, and
+GLADE+ (22M galaxies) for host galaxy morphology using optical color
+cuts ($g-r > 0.55$ and $r-i > 0.15$ for ellipticals).  NED provides
+spectroscopic redshifts for distance modulus computation.
+
+
+%% =========================================================================
+\section{Current Status}
 \label{sec:status}
 %% =========================================================================
 
 \subsection{Implemented}
 
+\paragraph{Alert Pipeline:}
 \begin{itemize}
-\item Multi-broker alert ingestion (ANTARES, ALeRCE-ZTF, ALeRCE-LSST)
-with DDF-targeted queries and local caching.
-\item ALeRCE direct PostgreSQL database access for bulk candidate
-queries, SPM features, classification probabilities, and Pan-STARRS
-host photometry, with transparent fallback to the REST API.
-\item Cross-matching and deduplication across brokers (1\arcsec\
-coordinate tolerance $+$ shared ZTF ID matching).
-\item Galactic extinction corrections using IRSA SFD dust maps, with
-per-object lookups and SQLite caching (see \S\ref{sec:extinction}).
-\item NED spectroscopic redshift lookups for host galaxies, with
-distance modulus computation and absolute magnitude estimation (see
-\S\ref{sec:ned}).
-\item Variable star screening against 13{,}749 known variables from
-Gaia~DR3 and VSX.
-\item Classification filtering with configurable $P(\mathrm{Ia})$
-threshold, multi-broker agreement scoring, and minimum broker count.
-\item Optional elliptical host galaxy morphology filtering via
-cross-match with SDSS and Pan-STARRS galaxy catalogs (color cuts:
-$g-r > 0.55$ and $r-i > 0.15$).
-\item ATLAS forced photometry enrichment (cyan and orange bands) for
-independent light curve validation.
-\item Flux-space and magnitude-space light curve visualization with
-per-band colors and survey-specific markers.
-\item LSST alert stamp display (Science/Template/Difference cutouts).
-\item Interactive human-in-the-loop visual classification tool
-(SN/variable/bogus labels saved to CSV).
-\item Inverted-parabola light curve peak fitting in flux space with
-per-band fits, band-priority selection, and batch processing.
-\item Villar SPM peak fitting using pre-computed ALeRCE features with
-numerical flux maximization for accurate peak time determination
-(see \S\ref{sec:villar}).
-\item Optional SALT2 template fitting (gated by \texttt{sncosmo}
-availability).
-\item Two-dimensional merit function $\mathcal{M}(\Delta t, m_{\mathrm{corr}})$
-using extinction-corrected peak magnitudes.
-\item SQLite caching of peak-fit targets with merit scores
-(\texttt{peak\_fit\_targets} table).
-\item Magellan observing catalog generation with observability filtering
-from Las Campanas, RA-ordered target lists, and instrument-specific
-rotator presets (LDSS3C, IMACS, MagE, FIRE).
-\item CSV export of candidate tables with timestamps.
-\item Diagnostic plots: light curves with Villar SPM overlays and peak
-markers, discovery space ($\Delta t$ vs.\ peak magnitude with merit
-color-coding), extinction histograms, redshift distributions, and
-Hubble diagrams.
-\item Pipeline logging: every run writes a \texttt{DEBUG}-level log
-file (\texttt{pipeline.log}) to the night output directory, capturing
-all warnings, errors, and timing for post-run diagnostics.
-\item Fink API circuit breaker: after five consecutive photometry
-request failures (each timing out at 60\,s), the pipeline skips
-remaining Fink queries to avoid hanging when the server is
-unresponsive.
+\item Five-broker alert ingestion (Fink, ANTARES, ALeRCE-ZTF,
+ALeRCE-LSST, ATLAS) with DDF-targeted queries
+\item TNS cross-matching for duplicate detection and IAU designations
+\item Cross-matching and deduplication (1\arcsec\ tolerance + shared ZTF IDs)
+\item Variable star screening (13{,}749 sources from Gaia~DR3/VSX)
+\item Nuclear offset filter for AGN/TDE rejection
+\item Galactic extinction corrections (IRSA SFD) with SQLite caching
+\item NED spectroscopic redshifts and distance moduli
+\item Host galaxy morphology (SDSS/PS1/SkyMapper/GLADE+)
+\item Multi-band light curve fitting (parabola + Villar SPM + optional SALT2)
+\item Multi-survey photometry combination (Rubin + ZTF + ATLAS)
+\item Six-component multiplicative merit function
+\item Rise time constraints filter ($>$30~day risers rejected)
+\item ZTF batch photometry via ALeRCE direct PostgreSQL
+\item ATLAS forced photometry with retry/backoff and token re-auth
+\item PDF report generation with merit breakdowns, sky maps, light curves
+\item Slew-minimized observing sequence optimization
+\item SQLite caching across all external queries
 \end{itemize}
 
-\subsection{Planned}
-
+\paragraph{LLAMAS Orchestrator:}
 \begin{itemize}
-\item Standalone Magellan planning notebook reading from the SQLite
-cache, with airmass charts and sky-map visualizations.
-\item Exposure time estimation based on target magnitude and desired
-signal-to-noise ratio.
-\item Photometric redshift estimation from multi-band light curve
-fitting (e.g., via SALT2 with floating $z$).
-\item Integration with Rubin alert stream when LSST operations begin.
+\item Exposure estimation cascade (redshift table $\to$ magnitude $\to$ fallback)
+\item Greedy scheduling with composite priority scoring
+\item Phase-aware prioritization ($W_\phi$ from alert pipeline)
+\item Multi-program time accounting (charge-on-schedule + reconciliation)
+\item WD spectrophotometric standard star interleaving
+\item CLI with three subcommands (\texttt{plan}, \texttt{run-nightly},
+\texttt{reconcile})
+\item Nightly time reports and season progress reporting
+\item Magellan TCS catalog output
 \end{itemize}
 
-\subsection{Known Limitations}
+\subsection{Remaining Work}
 
-\begin{enumerate}
-\item ALeRCE-LSST cone search API is broken; global query with local
-filtering is used as a workaround.
-\item LSST stamp classifier does not sub-classify SN types ($P(\mathrm{SN})$
-only, not $P(\mathrm{Ia})$).
-\item ANTARES $P(\mathrm{Ia})$ is a heuristic proxy, not an ML
-classifier, capped at 0.50.
-\item Negative difference-imaging flux is lost in magnitude-space
-representations; all fitting is performed in flux space.
-\item The 1\arcsec\ cross-match tolerance may occasionally merge
-distinct sources in crowded fields.
-\item LSST \texttt{scienceFlux} is only available for alert detections,
-not forced photometry.
-\item The inverted-parabola model is only valid near peak; the
-multi-band Villar SPM fit provides a better full light curve model
-but requires well-sampled multi-band data ($\geq 5$ points per band).
-\item Pan-STARRS and SDSS host galaxy data are only available for DDFs
-at Dec~$\gtrsim -30\degr$ (COSMOS, XMM-LSS, M49, and marginally
-ECDFS).  The three southern DDFs (ELAIS-S1, EDFS\_a, EDFS\_b) lack
-coverage for elliptical host classification using optical colors.
-\item NED spectroscopic redshift coverage is incomplete; only
-$\sim$10--30\% of SN candidates have NED-cataloged host galaxies with
-measured redshifts, depending on the field depth.
-\item At the default ALeRCE classifier threshold of $P > 0.5$,
-superluminous supernovae (SLSN) dominate the high-probability tail
-because they are more distinctive to the classifier.  A lower threshold
-(e.g., $P > 0.3$) recovers more Type~Ia candidates at the cost of
-increased contamination.
-\end{enumerate}
+\begin{itemize}
+\item Integration test with real alert pipeline \texttt{candidates.csv}
+\item Historical validation on archived DP1 data
+\item Unit tests with pytest coverage
+\item Boyd et al.\ 2026 WD standard catalog integration
+\item Google Sheet ingester for manual target requests
+\item Multi-night look-ahead optimization
+\end{itemize}
 
 
 %% =========================================================================
@@ -1202,20 +691,14 @@ increased contamination.
 \bibitem[Schlegel et al.(1998)]{Schlegel1998}
 Schlegel, D.~J., Finkbeiner, D.~P., \& Davis, M.\ 1998,
 \textit{ApJ}, 500, 525.
-\textit{Maps of Dust Infrared Emission for Use in Estimation of
-Reddening and Cosmic Microwave Background Radiation Foregrounds.}
 
 \bibitem[Schlafly \& Finkbeiner(2011)]{Schlafly2011}
 Schlafly, E.~F., \& Finkbeiner, D.~P.\ 2011,
 \textit{ApJ}, 737, 103.
-\textit{Measuring Reddening with Sloan Digital Sky Survey Stellar
-Spectra and Recalibrating SFD.}
 
 \bibitem[Villar et al.(2019)]{Villar2019}
 Villar, V.~A., et al.\ 2019,
 \textit{ApJ}, 884, 83.
-\textit{SuperRAENN: A Semi-supervised Supernova Photometric Classification
-Pipeline Trained on Pan-STARRS1 Medium-Deep Survey Supernovae.}
 
 \end{thebibliography}
 

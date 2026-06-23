@@ -74,3 +74,32 @@ python -m orchestrator --date 2026-10-15 --targets ref/test_targets.csv --moon g
 - Alert pipeline: `nights/ut{YYYYMMDD}/`
 - Orchestrator: `--output-dir` flag, files named `LLAMAS_{date}_{timeline,catalog,summary}.txt`
 - Time accounting: `time_accounting.json` in output dir
+
+## Knowledge Base
+
+Central knowledge repository for this project and related research:
+`~/Documents/knowledge-base/research/wiki/`
+
+Relevant entries:
+- `projects/rubinalerts.md` — Project overview, goals, timeline, MAGNETS context
+- `methods/spectroscopic-scheduling.md` — Scheduling algorithm details, LDSS3 reference, LLAMAS specifics
+- `methods/alert-broker-aggregation.md` — Broker client details
+- `methods/light-curve-fitting.md` — Parabola + Villar fitting
+- `methods/merit-scoring.md` — Merit function components
+
+When making significant changes to RubinAlerts architecture or methods, update the corresponding knowledge-base entries to keep them in sync.
+
+## Roadmap / Next Steps
+
+### HIGH PRIORITY
+1. **Fix `orchestrator/config.py` docstring** — says "Magellan/Clay" but LLAMAS is on Magellan/Baade
+2. **Document quartile priority mapping** — merit_score → P1-P4 via quartiles not in architecture.md
+3. **State file path consistency** — `run-nightly` writes to `output_dir/time_accounting.json`, but `reconcile` defaults to `./time_accounting.json`
+
+### MEDIUM PRIORITY
+4. Add weight scaling comments in `prioritizer.py` (explain 100.0/20.0/50.0 constants)
+5. Document sub-exposure splitting (auto-splits at 900s for cosmic ray mitigation)
+6. Expand keyword documentation in architecture.md (list all 12 keywords)
+
+### PLANNED FEATURES
+7. **Google Sheet integration** — Allow PIs to manually enqueue targets not sourced from alerts (gspread + service account). Design spec exists in `docs/design/spectroscopic-orchestration.md` §Interface Specifications.

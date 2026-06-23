@@ -24,27 +24,26 @@
 \hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
 
 \title{Spectroscopic Follow-up Orchestration Layer\\[0.5em]
-\large Design \& Implementation Review for the MAGNETS Collaboration}
+\large Design \& Implementation Overview for the MAGNETS Collaboration}
 \author{Akum Gill\\
 \small Harvard University\\
 \small Collaborators: Chris Stubbs, Ashley Villar's group (Yize Dong), Conor Ransome}
-\date{Revised June 2026 \\ \small Reflects the post-review implementation}
+\date{June 2026}
 
 \begin{document}
 
 \maketitle
 
 \begin{abstract}
-This document describes the design and current implementation of the orchestration
-layer for automated spectroscopic follow-up of transients discovered by the RubinAlerts
-pipeline, targeting LLAMAS on Magellan/Baade for the MAGNETS collaboration. It supersedes
-the April 2026 draft and incorporates a full design review (18 findings across ingestion,
-merit scoring, prioritization, scheduling, time accounting, and transparency) together with
-two subsequently-added capabilities: a cross-night \emph{per-target integration ledger}
-and \emph{per-program light-curve phase preferences}. The guiding constraints throughout
-are the PI mandates: \textbf{no wasted time on sky} and \textbf{transparent, defensible
-prioritization}. The system is exercised by 96 offline unit tests (no live broker/database
-calls).
+This document describes the design and implementation of the orchestration layer for
+automated spectroscopic follow-up of transients discovered by the RubinAlerts pipeline,
+targeting LLAMAS on Magellan/Baade for the MAGNETS collaboration. It covers alert ingestion,
+merit scoring, prioritization, scheduling, and multi-program time accounting, including a
+cross-night \emph{per-target integration ledger} and \emph{per-program light-curve phase
+preferences}. Two principles guide the design throughout: \textbf{no wasted time on sky} and
+\textbf{transparent, defensible prioritization} --- an observer should be able to reconstruct
+why any target was ranked where it was. The system is exercised by 96 offline unit tests (no
+live broker/database calls).
 \end{abstract}
 
 \tableofcontents
@@ -94,18 +93,18 @@ construction}. This matters operationally: \textbf{Rubin LSST is offline 2026-08
 the end of August 2026}, during which the ZTF-fed brokers are the \emph{primary} alert
 source and the southern DDFs lose discovery coverage entirely.
 
-\subsection{Liveness reporting (review finding R5)}
-Brokers previously swallowed errors and returned empty results, so a silent outage was
-indistinguishable from a quiet sky --- unacceptable during the Rubin downtime. The
-aggregator now records, per broker, a status record
-\verb|{queried, responded, n_returned, error}|, written to a \texttt{broker\_status.json}
-sidecar and rendered as a ``Broker Status'' block in the run report. A broker raising an
-exception is recorded as queried-but-unresponsive rather than crashing the run.
+\subsection{Liveness reporting}
+A silent broker outage must never be mistaken for a quiet sky --- especially during the
+Rubin downtime, when the ZTF-fed brokers are the only source. The aggregator therefore
+records, per broker, a status record \verb|{queried, responded, n_returned, error}|, written
+to a \texttt{broker\_status.json} sidecar and rendered as a ``Broker Status'' block in the
+run report. A broker that raises is recorded as queried-but-unresponsive rather than crashing
+the run, so the observer can always distinguish ``no candidates'' from ``broker down''.
 
-\subsection{Cross-matching (R13)}
+\subsection{Cross-matching}
 Cross-broker de-duplication uses true angular separation
-(\texttt{SkyCoord.separation}) against a fixed radius, replacing the previous RA/Dec box
-test whose effective radius shrank with declination (worst in the southern fields).
+(\texttt{SkyCoord.separation}) against a fixed radius rather than an RA/Dec box test, whose
+effective radius would otherwise shrink with declination (worst in the southern fields).
 
 \section{Merit scoring (alert pipeline)}
 The alert pipeline ranks candidates by a \emph{multiplicative} merit, so a candidate must
@@ -117,24 +116,23 @@ w_{\rm ext}\, w_{\rm broker}\, w_{\rm moon}\, (w_{\rm salt}\, w_{\rm absmag}).
 \begin{itemize}[nosep]
   \item $w_{\rm time} = \exp(-\Delta t^2 / 2\tau^2)$, $\tau = 10$\,d --- peaks at maximum light.
   \item $w_{\rm mag} = \exp(-((m-m_{\rm opt})/\sigma_m)^2)$, $m_{\rm opt}\approx20.5$ (Magellan S/N sweet spot).
-  \item $w_{\rm prob}$ --- \textbf{ML-derived P(Ia) only (R7)}. The uncalibrated ANTARES
-  heuristic proxy is kept in a separate \texttt{antares\_proxy\_prob} column and excluded
+  \item $w_{\rm prob}$ --- \textbf{ML-derived P(Ia) only}. The ANTARES heuristic proxy is
+  uncalibrated, so it is kept in a separate \texttt{antares\_proxy\_prob} column and excluded
   from the pooled probability; ANTARES contributes to detection/coverage, not to P(Ia).
   \item $w_{\rm host}, w_{\rm ext}$ --- host-morphology and Galactic-extinction factors.
-  \item $w_{\rm broker}$ --- \textbf{coverage-aware (R6)}:
+  \item $w_{\rm broker}$ --- \textbf{coverage-aware}:
   $1 + 0.3\,\mathrm{clip}\!\big(\tfrac{n-1}{n_{\max}-1},0,1\big)$ where $n_{\max}$ is the
-  number of brokers that \emph{could} have seen the field given its declination. A
-  single-broker southern field is no longer penalized relative to a single-broker
-  equatorial field; full multi-broker coverage still earns up to $+30\%$.
-  \item $w_{\rm moon}$ --- \textbf{now folded into the ranking merit (R1)}. Previously the
-  moon penalty was computed during observability filtering but never multiplied into the
-  ranked merit, while the report \emph{claimed} it had been applied. Merit is now recomputed
-  with the real moon penalty as a single source of truth, and \texttt{candidates.csv}
-  (the orchestrator's input) carries the moon-aware merit.
+  number of brokers that \emph{could} have seen the field given its declination. This ensures
+  a single-broker southern field is not penalized relative to a single-broker equatorial
+  field; full multi-broker coverage earns up to $+30\%$.
+  \item $w_{\rm moon}$ --- folded into the ranking merit (not only into observability
+  filtering), so targets close to a bright Moon are correctly down-weighted in the ranking
+  itself. Merit is computed with the Moon penalty as a single source of truth, and
+  \texttt{candidates.csv} (the orchestrator's input) carries the Moon-aware merit.
 \end{itemize}
 
 \section{Prioritization (orchestrator)}
-\subsection{Composite score (R2, R14)}
+\subsection{Composite score}
 Each target receives a composite score that is a \emph{multiplicative science core} plus
 two \emph{additive nudges}:
 \begin{align}
@@ -144,14 +142,13 @@ two \emph{additive nudges}:
 \texttt{total} &= \texttt{science\_term} + \texttt{observability\_term} + \texttt{keyword\_term}
 \end{align}
 with \texttt{SCIENCE\_SCALE}$=100$, \texttt{OBSERVABILITY\_BONUS}$=20$,
-\texttt{KEYWORD\_SCALE}$=50$. These constants, previously undocumented magic numbers, now
-carry rationale in code: the science core ($s,b,p,c\in[0,1]$) is the dominant axis (a P1 at
-peak on a healthy budget $\approx100$; a P4 $\approx20$), while observability and keyword
-nudges reorder within or across adjacent tiers but cannot by themselves leapfrog a full
-priority tier. The phase factor is clamped to $[0,1]$ so a malformed weight can never blow
-past the science core. Every target's component \textbf{breakdown is persisted}
-(\texttt{score\_breakdown.json}) and printed in the summary, so a PI can reconstruct any
-ranking by hand --- where:
+\texttt{KEYWORD\_SCALE}$=50$. The scales are chosen so the science core ($s,b,p,c\in[0,1]$)
+is the dominant axis (a P1 at peak on a healthy budget $\approx100$; a P4 $\approx20$), while
+observability and keyword nudges reorder within or across adjacent tiers but cannot by
+themselves leapfrog a full priority tier. The phase factor is clamped to $[0,1]$ so it can
+never push the science core past its bound. Every target's component \textbf{breakdown is
+persisted} (\texttt{score\_breakdown.json}) and printed in the summary, so a PI can
+reconstruct any ranking by hand --- where:
 \begin{center}
 \begin{tabular}{@{}ll@{}}
 \toprule
@@ -173,7 +170,7 @@ luminosity-correlating spectral indicators are measured). Progenitor, circumstel
 ejecta, narrow CSM lines that are gone by peak, and transients that evolve too fast to wait).
 A single peak-centered weight cannot serve both.
 
-\textbf{Implementation.} The phase factor is now computed relative to a per-program
+\textbf{Implementation.} The phase factor is computed relative to a per-program
 preferred epoch:
 \begin{equation}
 p = \exp\!\Big(-\frac{(\Delta t - \Delta t_{\rm pref})^2}{2\tau^2}\Big),\qquad
@@ -188,12 +185,12 @@ config value; its exact choice is a science-policy decision for the collaboratio
 alert-sourced target without a \texttt{delta\_t} value falls back to the legacy symmetric
 weight (peak-meaningful only), since the sign is unrecoverable from $w_{\rm time}$ alone.
 
-\subsection{Priority labels (R8)}
+\subsection{Priority labels}
 Merit maps to P1--P4 by \emph{tonight's quartiles}; these are \textbf{within-night relative}
 labels, not absolute science classes (a ``P1'' on a quiet night may be weaker than a ``P4''
 on a rich one). The summary header states this caveat, and the $<4$-target degenerate case
-is guarded by rank-based assignment. Absolute, cross-night-calibrated thresholds were
-deliberately deferred until merit statistics across nights exist.
+is guarded by rank-based assignment. Absolute, cross-night-calibrated thresholds are a
+natural future refinement once merit statistics across many nights are available.
 
 \section{Scheduling}
 A greedy scheduler steps through the night, at each slot selecting the observable target
@@ -202,32 +199,32 @@ maximizing
 \text{score} - 10\times\text{airmass} - \texttt{SLEW\_PENALTY}\times\theta_{\rm slew},
 \end{equation}
 where $\theta_{\rm slew}$ is the angular distance from the previously scheduled target
-(\texttt{SLEW\_PENALTY}$=0.5$). The slew term (R9) is a modest tie-breaker --- the IFU's
-1-minute overhead model assumes negligible slew, which is reasonable for clustered DDF
-targets but needed a guard against large cross-sky jumps. The scoring mode
+(\texttt{SLEW\_PENALTY}$=0.5$). The slew term is a modest tie-breaker: the IFU's 1-minute
+overhead model assumes negligible slew, which is reasonable for clustered DDF targets, and
+this term guards against large cross-sky jumps between consecutive picks. The scoring mode
 (\texttt{prioritizer} vs.\ \texttt{fallback/priority-only}) is stamped into the summary
-header (R18). Standard stars are placed at start and end \emph{and} interleaved at a
-configurable mid-night cadence (\texttt{standard\_interleave\_hours}$=3.5$; R10) for
-spectrophotometric calibration over a long night. Exposures are split into sub-exposures of
-at most \texttt{max\_single\_exposure\_sec}$=900$\,s for cosmic-ray mitigation (R16,
-now config-driven).
+header so it is always clear which ranking produced the plan. Standard stars are placed at
+start and end \emph{and} interleaved at a configurable mid-night cadence
+(\texttt{standard\_interleave\_hours}$=3.5$) for spectrophotometric calibration over a long
+night. Exposures are split into sub-exposures of at most
+\texttt{max\_single\_exposure\_sec}$=900$\,s for cosmic-ray mitigation.
 
 \section{Time accounting}\label{sec:accounting}
 Per-program budgets are defined per moon phase (dark/grey/bright) in \texttt{allocations.yaml}.
 Time is \textbf{charged on schedule} and trued-up post-night by \texttt{reconcile}.
-Key review fixes:
+Key properties:
 \begin{itemize}[nosep]
-  \item \textbf{State-path consistency (R3).} \texttt{run-nightly} and \texttt{reconcile}
-  now derive the state file from the same \texttt{output\_dir/time\_accounting.json}
-  convention (helper \texttt{\_default\_state\_path}); previously \texttt{reconcile} defaulted
-  to a different path, loaded empty state, and silently double-charged.
-  \item \textbf{Science-time charging (R4).} Charges \texttt{charged\_minutes} (exposure $+$
-  overhead) rather than the padded wall-clock window; gap-fill / end-of-night stretch is
-  tracked as \texttt{padding\_minutes} for transparency but never billed.
-  \item \textbf{Phase-aware budget factor (R11).} The 1.0/0.5/0.1 budget factor uses
-  remaining hours \emph{in the relevant moon phase} as a fraction of that phase's allocation
-  ($>50\%\rightarrow1.0$, $>0\rightarrow0.5$, exhausted $\rightarrow0.1$), instead of a
-  global hour cliff.
+  \item \textbf{Consistent state path.} \texttt{run-nightly} and \texttt{reconcile} derive
+  the state file from the same \texttt{output\_dir/time\_accounting.json} convention (helper
+  \texttt{\_default\_state\_path}), so a reconciliation always updates the night it belongs to
+  rather than charging against an empty ledger.
+  \item \textbf{Science-time charging.} The budget is charged \texttt{charged\_minutes}
+  (exposure $+$ overhead), not the padded wall-clock window; gap-fill / end-of-night stretch
+  is tracked separately as \texttt{padding\_minutes} for transparency but never billed.
+  \item \textbf{Phase-aware budget factor.} The 1.0/0.5/0.1 budget factor uses remaining
+  hours \emph{in the relevant moon phase} as a fraction of that phase's allocation
+  ($>50\%\rightarrow1.0$, $>0\rightarrow0.5$, exhausted $\rightarrow0.1$), so dark time is
+  not throttled because grey time is short, and vice versa.
 \end{itemize}
 
 \section{Per-target integration ledger}\label{sec:ledger}
@@ -276,12 +273,12 @@ left to the PIs for now (see \S\ref{sec:future}).
 
 \section{Exposure estimation}
 The orchestrator estimates LLAMAS exposure via a cascade: a redshift$\rightarrow$time table
-from the proposal (now \textbf{linearly interpolated} to remove the previous hard cliffs,
-R12, clamped outside the tabulated range), falling back to magnitude scaling
+from the proposal (\textbf{linearly interpolated} so there are no discontinuities between
+tabulated rows, and clamped outside the tabulated range), falling back to magnitude scaling
 (mag 20 $\approx$ 45\,min, $2.5\times$ per magnitude), then a 45-minute default. The IFU
-overhead is $\sim$1\,min (vs.\ $\sim$10\,min for slit instruments). The orchestrator
-deliberately omits moon/airmass scaling here (the proposal table is the reference); this is a
-documented divergence from the alert-pipeline estimator, not an inconsistency.
+overhead is $\sim$1\,min (vs.\ $\sim$10\,min for slit instruments). Moon/airmass scaling is
+intentionally omitted here, since the proposal table is the reference for LLAMAS exposures;
+this is a deliberate divergence from the alert-pipeline estimator, not an inconsistency.
 
 \section{CLI and outputs}
 \begin{lstlisting}[language=bash]

@@ -53,6 +53,7 @@ class TimeAccountant:
                     'dark': 0.0, 'grey': 0.0, 'bright': 0.0,
                 }),
                 used_hours={'dark': 0.0, 'grey': 0.0, 'bright': 0.0},
+                phase_preference=prog.get('phase_preference', 'peak'),
             )
             allocations[alloc.program] = alloc
 
@@ -218,6 +219,17 @@ class TimeAccountant:
         elif frac > 0.0:
             return 0.5
         return 0.1
+
+    def get_phase_preference(self, program: str) -> str:
+        """Light-curve phase the program wants its SNe at.
+
+        Returns the program's configured ``phase_preference`` ('peak' or
+        'rising'), or 'peak' for an unknown program (the conservative default —
+        most MAGNETS science is cosmology/standardization).
+        """
+        if program not in self.allocations:
+            return 'peak'
+        return self.allocations[program].phase_preference or 'peak'
 
     def get_remaining(self, program: str,
                       moon_phase: Optional[str] = None) -> float:

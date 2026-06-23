@@ -33,6 +33,7 @@ class Target:
     program: str = 'default'
     merit_score: float = float('nan')
     phase_weight: float = float('nan')  # w_time from alert pipeline: exp(-dt²/2τ²)
+    delta_t: float = float('nan')  # days from peak; <0 rising, 0 peak, >0 declining
     # Per-target integration ledger fields (W11). Populated by run_nightly from
     # the TargetLedger: cumulative integration so far, completeness fraction
     # (cumulative / required_full), and the FULL required exposure in minutes
@@ -108,6 +109,11 @@ class ProgramAllocation:
     used_hours: dict = field(default_factory=lambda: {
         'dark': 0.0, 'grey': 0.0, 'bright': 0.0,
     })
+    # Light-curve phase the program wants its SNe at: 'peak' (cosmology/
+    # standardization, best S/N at the SALT epoch) or 'rising' (progenitor/CSM/
+    # flash spectroscopy, early ejecta). Maps to a preferred delta_t offset via
+    # LLAMASConfig.phase_preference_offsets in the prioritizer.
+    phase_preference: str = 'peak'
 
     @property
     def remaining_hours(self) -> float:

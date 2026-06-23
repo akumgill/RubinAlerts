@@ -5,9 +5,14 @@
 semester: "2026B"
 default_program: "MAGNETS-Stubbs"
 
+# Each program may declare a light-curve phase_preference:
+#   peak    cosmology/standardization — best S/N at the SALT epoch (delta_t=0)
+#   rising  progenitor/CSM/exotic science — early ejecta ~7 d before peak
+# Absent -> 'peak' (the conservative default).
 programs:
   - program: "MAGNETS-Stubbs"
     pi: "Stubbs"
+    phase_preference: "peak"
     allocated_hours:
       dark: 5.0
       grey: 20.0
@@ -15,6 +20,7 @@ programs:
 
   - program: "MAGNETS-Villar"
     pi: "Villar"
+    phase_preference: "rising"
     allocated_hours:
       dark: 4.0
       grey: 8.0

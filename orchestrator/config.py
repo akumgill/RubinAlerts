@@ -49,6 +49,26 @@ class LLAMASConfig:
 
     fallback_exposure_minutes: float = 45.0
 
+    # ------------------------------------------------------------------
+    # Light-curve phase preference (per-program peak vs rising)
+    # ------------------------------------------------------------------
+    # Gaussian width (days) of the phase weight w_time = exp(-dt²/2τ²). Matches
+    # the alert-pipeline merit tau (core.magellan_planning) and
+    # normalize.PHASE_WEIGHT_TAU_DAYS, so a program's phase factor is on the
+    # same footing as the alert-sourced phase weight.
+    phase_tau_days: float = 10.0
+    # Preferred time-from-peak (delta_t, in DAYS) per phase preference. 'peak'
+    # standardization science wants the SALT epoch (dt=0); 'rising' progenitor/
+    # CSM/flash science wants ~7 d before peak (dt=-7). The exact rising offset
+    # is a tunable science-policy choice, not a hard instrument constant.
+    phase_preference_offsets: dict = field(default_factory=lambda: {
+        'peak': 0.0, 'rising': -7.0,
+    })
+    # Half-width (days) of the 'peak' phase bucket used by the per-target
+    # integration ledger (commit 2): |dt| <= window -> peak, dt < -window ->
+    # rising, dt > window -> declining.
+    phase_bucket_window_days: float = 5.0
+
     # Sub-exposure splitting. A long integration is broken into N sub-exposures
     # each no longer than ``max_single_exposure_sec`` to limit cosmic-ray
     # accumulation per frame (CR mitigation; frames are later co-added).

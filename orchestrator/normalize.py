@@ -233,6 +233,16 @@ def load_targets_csv(path: str, night_mjd: float = float('nan'),
                     "Target %s has peak_mjd but no night date was supplied; "
                     "leaving phase neutral", name)
 
+        # Signed time-from-peak (days) for per-program phase preference. An
+        # explicit delta_t column wins; otherwise derive it from peak_mjd and a
+        # finite night_mjd (delta_t = night - peak). Absent -> NaN (neutral).
+        delta_t = float('nan')
+        if 'delta_t' in df.columns and pd.notna(row.get('delta_t')):
+            delta_t = float(row['delta_t'])
+        elif ('peak_mjd' in df.columns and pd.notna(row.get('peak_mjd'))
+                and math.isfinite(night_mjd)):
+            delta_t = night_mjd - float(row['peak_mjd'])
+
         t = Target(
             name=name,
             ra_deg=ra_deg,
@@ -247,6 +257,7 @@ def load_targets_csv(path: str, night_mjd: float = float('nan'),
             source='csv',
             program=program,
             phase_weight=phase_w,
+            delta_t=delta_t,
         )
         targets.append(t)
 
@@ -348,6 +359,12 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
         if 'w_time' in df.columns and pd.notna(row.get('w_time')):
             phase_w = float(row['w_time'])
 
+        # Signed time-from-peak (days) from the alert pipeline, used for
+        # per-program phase preference. Absent -> NaN (neutral).
+        delta_t = float('nan')
+        if 'delta_t' in df.columns and pd.notna(row.get('delta_t')):
+            delta_t = float(row['delta_t'])
+
         t = Target(
             name=str(row[name_col]).strip(),
             ra_deg=float(row['ra']),
@@ -360,6 +377,7 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
             source='rubinalerts',
             program=default_program,
             phase_weight=phase_w,
+            delta_t=delta_t,
         )
         targets.append(t)
 

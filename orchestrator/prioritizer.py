@@ -95,17 +95,39 @@ def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
-def _phase_factor(target: Target) -> float:
-    """Light curve phase factor: targets near peak are more valuable.
+def _phase_factor(target: Target, phase_preference: str = 'peak',
+                  config: LLAMASConfig = None) -> float:
+    """Light-curve phase factor for a program's desired phase.
 
-    Uses phase_weight from the alert pipeline (w_time = exp(-dt²/2τ²))
-    if available. Falls back to 1.0 for manually-entered targets or
-    those without timing info.
+    Different MAGNETS programs want SNe at different light-curve phases:
+    cosmology/standardization wants PEAK (best S/N, the SALT epoch); progenitor/
+    CSM/exotic science wants the RISE (early ejecta, flash spectroscopy). The
+    factor is a Gaussian centered on the program's PREFERRED time-from-peak:
 
-    Clamped to [0, 1] so a malformed/over-unity phase_weight can never let a
-    stale near-peak target blow past the science core (R2): the multiplicative
-    core is bounded at 1.0 and the science term at SCIENCE_SCALE.
+        factor = exp(-(delta_t - dt_pref)² / (2·τ²))
+
+    where ``dt_pref`` = config.phase_preference_offsets[phase_preference] (days;
+    0 for 'peak', -7 for 'rising') and τ = config.phase_tau_days. It is maximal
+    (1.0) when the target's signed delta_t equals the preferred offset and falls
+    off symmetrically either side.
+
+    Cascade:
+    1. If ``target.delta_t`` is finite -> the signed, preference-aware Gaussian.
+    2. Else if ``target.phase_weight`` is finite -> legacy symmetric weight
+       (peak-meaningful only; preference is ignored because the sign is lost).
+    3. Else -> 1.0 (neutral; do NOT fabricate near-peak).
+
+    Clamped to [0, 1] so a malformed/over-unity weight can never let a stale
+    near-peak target blow past the science core (R2): the multiplicative core
+    is bounded at 1.0 and the science term at SCIENCE_SCALE.
     """
+    if config is None:
+        config = LLAMAS_CONFIG
+    if math.isfinite(target.delta_t):
+        dt_pref = config.phase_preference_offsets.get(phase_preference, 0.0)
+        tau = config.phase_tau_days
+        return _clamp01(math.exp(
+            -((target.delta_t - dt_pref) ** 2) / (2.0 * tau ** 2)))
     if math.isfinite(target.phase_weight):
         return _clamp01(target.phase_weight)
     return 1.0
@@ -191,8 +213,13 @@ def compute_composite_score(target: Target,
             observability = target.window_hours / night_hours
     observability = _clamp01(observability)
 
-    # Phase factor (clamped to [0, 1] inside _phase_factor)
-    phase = _phase_factor(target)
+    # Phase factor (clamped to [0, 1] inside _phase_factor). The program's
+    # phase preference (peak vs rising) selects the Gaussian center; default
+    # 'peak' when no accountant is supplied to look it up.
+    phase_preference = 'peak'
+    if accountant is not None:
+        phase_preference = accountant.get_phase_preference(target.program)
+    phase = _phase_factor(target, phase_preference, config)
 
     # Completeness factor (W11): per-target integration ledger weight, clamped
     # to [0, 1]. 1.0 (neutral) when no ledger is in use.
@@ -211,6 +238,10 @@ def compute_composite_score(target: Target,
         'science': science,
         'budget': budget,
         'phase': phase,
+        # Label only (which Gaussian center produced ``phase``). Does NOT affect
+        # the total == sum-of-terms invariant since phase is folded into
+        # science_term.
+        'phase_preference': phase_preference,
         'completeness': completeness,
         'observability': observability,
         'keyword_adj': kw_adj,
@@ -280,11 +311,13 @@ def rank_targets(targets: list,
     ranked = sorted(targets, key=lambda t: t.merit_score, reverse=True)
     for i, t in enumerate(ranked):
         bd = t.score_breakdown or {}
+        pref = bd.get('phase_preference', 'peak')
         logger.debug("Rank %2d: %-18s score=%.1f P%d budget=%.1f phase=%.2f "
-                     "complete=%.2f",
+                     "(%s) complete=%.2f",
                      i + 1, t.name, t.merit_score, t.priority,
                      accountant.get_budget_factor(t.program, moon_phase)
                      if accountant else 1.0,
-                     _phase_factor(t), bd.get('completeness', 1.0))
+                     bd.get('phase', _phase_factor(t, pref, config)),
+                     pref, bd.get('completeness', 1.0))
 
     return scores, breakdowns

@@ -22,8 +22,13 @@ ZTF_CLASSIFIER_PRIMARY = "lc_classifier_BHRF_forced_phot"
 ZTF_CLASSIFIER_FALLBACK = "lc_classifier_transient"
 ZTF_CLASS_NAME = "SNIa"
 
-# LSST classifier configuration
-LSST_CLASSIFIER = "stamp_classifier_rubin"
+# LSST classifier configuration.
+# NOTE: there is intentionally no LSST_CLASSIFIER constant. The ALeRCE LSST
+# object endpoint returns HTTP 500 for ANY server-side filter
+# (classifier=, class_name=, probability=) when survey='lsst', and
+# "stamp_classifier_rubin" is not even a valid ALeRCE classifier. We instead
+# page through bare query_objects() and filter locally. The actual classifier
+# used is read per-row from the returned `classifier_name` column.
 LSST_CLASS_NAME = "SN"
 
 # LSST band code → name mapping
@@ -36,8 +41,9 @@ class AlerceClient(BaseBrokerClient):
     Supports two survey modes:
     - survey='ztf': Uses lc_classifier_BHRF_forced_phot (v2.1.0) for SN Ia
       classification via forced photometry. Falls back to lc_classifier_transient.
-    - survey='lsst': Uses stamp_classifier_rubin for SN classification
-      from Rubin/LSST alert stream data.
+    - survey='lsst': Queries bare LSST objects and filters locally for SN
+      classification from Rubin/LSST alert stream data (the LSST object
+      endpoint rejects server-side classifier/class/probability filters).
     """
 
     def __init__(self, cache_dir: str = './cache/data', survey: str = 'ztf',
@@ -395,140 +401,157 @@ class AlerceClient(BaseBrokerClient):
                            ddf_fields: Optional[List[Dict]] = None) -> pd.DataFrame:
         """Query ALeRCE LSST survey for SN candidates in DDFs.
 
-        The LSST cone search API is not operational, so we query globally
-        for all SN-classified objects and filter by DDF coordinates locally.
+        The ALeRCE LSST object endpoint returns HTTP 500 for ANY server-side
+        filter (classifier=, class_name=, probability=), so we page through
+        bare query_objects(survey='lsst', ...) and filter LOCALLY for
+        class_name == 'SN', probability >= min_probability, and DDF coordinates.
+
+        Error handling: a genuine API error inside the page loop PROPAGATES
+        (re-raised) so the upstream broker-status layer records it as a real
+        error rather than masking it as "0 candidates". An empty-but-successful
+        response (legitimately no SN-in-DDF) returns an empty DataFrame quietly.
         """
         fields = ddf_fields or DDF_FIELDS
         field_names = ','.join(f['name'] for f in fields)
-        cache_key = (f"lsst_alerts_v1_{LSST_CLASSIFIER}_ddf_{field_names}"
+        cache_key = (f"lsst_alerts_v2_bare_ddf_{field_names}"
                      f"_p{min_probability}_d{days_back}_n{limit}")
         cache_path = self._get_cache_path(cache_key)
         cached_data = self._load_cache(cache_path)
         if cached_data:
             return pd.DataFrame(cached_data)
 
-        try:
-            from astropy.coordinates import SkyCoord
-            import astropy.units as u
-            from astropy.time import Time
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+        from astropy.time import Time
 
-            cutoff_date = datetime.now() - timedelta(days=days_back)
-            cutoff_mjd = Time(cutoff_date.isoformat(), format='isot').mjd
+        cutoff_date = datetime.now() - timedelta(days=days_back)
+        cutoff_mjd = Time(cutoff_date.isoformat(), format='isot').mjd
 
-            # Query LSST SN objects globally (cone search is broken on API).
-            # Cap at max_pages to keep runtime reasonable — the API returns
-            # objects sorted by descending probability, so we get the best
-            # candidates first.
-            max_pages = max(1, limit // 100) + 1  # e.g. limit=1000 → 11 pages
-            logger.info(f"  Querying ALeRCE LSST globally for {LSST_CLASS_NAME} "
-                        f"(classifier={LSST_CLASSIFIER}, max_pages={max_pages})")
+        # Page through bare LSST objects (no server-side filters — they 500).
+        # Cap at max_pages to keep runtime reasonable — the API returns objects
+        # sorted by descending probability, so we get the best candidates first.
+        max_pages = max(1, limit // 100) + 1  # e.g. limit=1000 → 11 pages
+        logger.info(f"  Querying ALeRCE LSST objects (bare, local filter for "
+                    f"{LSST_CLASS_NAME}, max_pages={max_pages})")
 
-            all_results = []
-            page = 1
-            page_size = 100
+        all_results = []
+        page = 1
+        page_size = 100
+        n_pages_scanned = 0
 
-            while page <= max_pages:
-                try:
-                    results = self.alerce.query_objects(
-                        survey='lsst',
-                        classifier=LSST_CLASSIFIER,
-                        class_name=LSST_CLASS_NAME,
-                        format="pandas",
-                        page_size=page_size,
-                        page=page,
-                    )
-                except Exception as e:
-                    logger.debug(f"ALeRCE LSST query error (page {page}): {e}")
-                    break
+        while page <= max_pages:
+            try:
+                results = self.alerce.query_objects(
+                    survey='lsst',
+                    format="pandas",
+                    page_size=page_size,
+                    page=page,
+                )
+            except Exception as e:
+                # A genuine API error must NOT be masked as an empty sky.
+                # Re-raise so SupernovaMonitor.query_all_brokers records it as
+                # responded=False with the error string.
+                logger.warning(f"ALeRCE LSST query failed (page {page}): {e}")
+                raise
 
-                if results is None or len(results) == 0:
-                    break
+            if results is None or len(results) == 0:
+                break
 
-                all_results.append(results)
-                logger.info(f"    Page {page}: {len(results)} objects")
+            all_results.append(results)
+            n_pages_scanned = page
+            logger.info(f"    Page {page}: {len(results)} objects")
 
-                if len(results) < page_size:
-                    break
-                page += 1
+            if len(results) < page_size:
+                break
+            page += 1
 
-            if not all_results:
-                logger.info("  No LSST SN objects found in ALeRCE")
-                return pd.DataFrame()
-
-            all_objects = pd.concat(all_results, ignore_index=True)
-            logger.info(f"  Total LSST objects retrieved: {len(all_objects)}")
-
-            # Filter by DDF coordinates locally
-            obj_coords = SkyCoord(
-                ra=all_objects['meanra'].values * u.deg,
-                dec=all_objects['meandec'].values * u.deg,
-            )
-
-            in_any_ddf = np.zeros(len(all_objects), dtype=bool)
-            ddf_assignments = [''] * len(all_objects)
-
-            for field in fields:
-                center = SkyCoord(ra=field['ra'] * u.deg, dec=field['dec'] * u.deg)
-                seps = obj_coords.separation(center)
-                in_field = seps <= DDF_SEARCH_RADIUS_DEG * u.deg
-                for idx in np.where(in_field)[0]:
-                    if not in_any_ddf[idx]:
-                        ddf_assignments[idx] = field['name']
-                in_any_ddf |= in_field
-
-            ddf_objects = all_objects[in_any_ddf].copy()
-            ddf_names = [ddf_assignments[i] for i in np.where(in_any_ddf)[0]]
-
-            logger.info(f"  {len(ddf_objects)} objects in DDFs "
-                        f"(out of {len(all_objects)} total)")
-
-            if len(ddf_objects) == 0:
-                return pd.DataFrame()
-
-            # Convert to standard alert format
-            alerts_list = []
-            for (_, row), ddf_name in zip(ddf_objects.iterrows(), ddf_names):
-                oid = row.get('oid')
-                alerts_list.append({
-                    'object_id': str(oid),
-                    'ra': row.get('meanra'),
-                    'dec': row.get('meandec'),
-                    'discovery_date': row.get('firstmjd'),
-                    'last_mjd': row.get('lastmjd'),
-                    'n_detections': row.get('n_det'),
-                    'n_forced': row.get('n_forced', 0),
-                    'sn_ia_prob': row.get('probability'),
-                    'classifier': LSST_CLASSIFIER,
-                    'class': row.get('class_name', LSST_CLASS_NAME),
-                    'stellar': row.get('stellar'),
-                    'magnitude': None,
-                    'broker': 'ALeRCE-LSST',
-                    'alerce_survey': 'lsst',
-                    'ddf_field': ddf_name,
-                })
-
-            # Skip per-object probability enrichment for LSST — the stamp
-            # classifier probability is already in sn_ia_prob from query_objects,
-            # and enriching hundreds of objects one-by-one is too slow.
-
-            if alerts_list:
-                self._save_cache(cache_path, alerts_list)
-
-            df = pd.DataFrame(alerts_list)
-            logger.info(f"Retrieved {len(df)} ALeRCE LSST alerts from DDFs")
-
-            # Log per-DDF breakdown
-            if len(df) > 0 and 'ddf_field' in df.columns:
-                for field_name, count in df['ddf_field'].value_counts().items():
-                    logger.info(f"    {field_name}: {count}")
-
-            return df
-
-        except Exception as e:
-            logger.error(f"Error querying ALeRCE LSST: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
+        truncated = page > max_pages
+        if not all_results:
+            logger.info("  No LSST objects returned by ALeRCE (empty response)")
             return pd.DataFrame()
+
+        all_objects = pd.concat(all_results, ignore_index=True)
+        logger.info(f"  Scanned {n_pages_scanned} page(s), "
+                    f"{len(all_objects)} total LSST objects"
+                    + ("  [WARNING: hit max_pages — results may be truncated]"
+                       if truncated else ""))
+
+        # --- Local filter 1: class_name == SN and probability >= threshold ---
+        class_mask = all_objects['class_name'] == LSST_CLASS_NAME
+        prob_mask = all_objects['probability'].astype(float) >= min_probability
+        sn_objects = all_objects[class_mask & prob_mask].copy()
+        logger.info(f"  {len(sn_objects)} objects pass class=={LSST_CLASS_NAME} "
+                    f"& probability>={min_probability} "
+                    f"(out of {len(all_objects)})")
+
+        if len(sn_objects) == 0:
+            return pd.DataFrame()
+
+        # --- Local filter 2: DDF coordinates ---
+        obj_coords = SkyCoord(
+            ra=sn_objects['meanra'].values * u.deg,
+            dec=sn_objects['meandec'].values * u.deg,
+        )
+
+        in_any_ddf = np.zeros(len(sn_objects), dtype=bool)
+        ddf_assignments = [''] * len(sn_objects)
+
+        for field in fields:
+            center = SkyCoord(ra=field['ra'] * u.deg, dec=field['dec'] * u.deg)
+            seps = obj_coords.separation(center)
+            in_field = seps <= DDF_SEARCH_RADIUS_DEG * u.deg
+            for idx in np.where(in_field)[0]:
+                if not in_any_ddf[idx]:
+                    ddf_assignments[idx] = field['name']
+            in_any_ddf |= in_field
+
+        ddf_objects = sn_objects[in_any_ddf].copy()
+        ddf_names = [ddf_assignments[i] for i in np.where(in_any_ddf)[0]]
+
+        logger.info(f"  {len(ddf_objects)} SN-in-DDF survived "
+                    f"(out of {len(sn_objects)} SN objects)")
+
+        if len(ddf_objects) == 0:
+            return pd.DataFrame()
+
+        # Convert to standard alert format
+        alerts_list = []
+        for (_, row), ddf_name in zip(ddf_objects.iterrows(), ddf_names):
+            oid = row.get('oid')
+            alerts_list.append({
+                'object_id': str(oid),
+                'ra': row.get('meanra'),
+                'dec': row.get('meandec'),
+                'discovery_date': row.get('firstmjd'),
+                'last_mjd': row.get('lastmjd'),
+                'n_detections': row.get('n_det'),
+                'n_forced': row.get('n_forced', 0),
+                'sn_ia_prob': row.get('probability'),
+                'classifier': row.get('classifier_name'),
+                'class': row.get('class_name', LSST_CLASS_NAME),
+                'stellar': row.get('stellar'),
+                'magnitude': None,
+                'broker': 'ALeRCE-LSST',
+                'alerce_survey': 'lsst',
+                'ddf_field': ddf_name,
+            })
+
+        # Skip per-object probability enrichment for LSST — the classifier
+        # probability is already in sn_ia_prob from query_objects, and enriching
+        # hundreds of objects one-by-one is too slow.
+
+        if alerts_list:
+            self._save_cache(cache_path, alerts_list)
+
+        df = pd.DataFrame(alerts_list)
+        logger.info(f"Retrieved {len(df)} ALeRCE LSST alerts from DDFs")
+
+        # Log per-DDF breakdown
+        if len(df) > 0 and 'ddf_field' in df.columns:
+            for field_name, count in df['ddf_field'].value_counts().items():
+                logger.info(f"    {field_name}: {count}")
+
+        return df
 
     # ------------------------------------------------------------------
     # Probability enrichment

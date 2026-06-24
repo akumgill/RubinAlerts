@@ -42,8 +42,8 @@ merit scoring, prioritization, scheduling, and multi-program time accounting, in
 cross-night \emph{per-target integration ledger} and \emph{per-program light-curve phase
 preferences}. Two principles guide the design throughout: \textbf{no wasted time on sky} and
 \textbf{transparent, defensible prioritization} --- an observer should be able to reconstruct
-why any target was ranked where it was. The system is exercised by 96 offline unit tests (no
-live broker/database calls).
+why any target was ranked where it was. The system is exercised by 137 offline unit tests (no
+live broker/database calls), plus an opt-in live test that verifies real Fink retrieval.
 \end{abstract}
 
 \tableofcontents
@@ -310,23 +310,41 @@ python -m orchestrator reconcile-target --name "SN 2026abc" --actual-minutes 90 
         [--phase peak] --date ...
 python -m orchestrator ledger        --target-ledger out/target_ledger.json \
         [--show-satisfied]
+python -m orchestrator fields        --date 2026-08-13 [--airmass-limit 1.6]
 \end{lstlisting}
+The \texttt{fields} subcommand reports which Deep Drilling Fields are observable from Las
+Campanas on a given night (per-field minimum airmass, hours below the limit, and transit
+time), so an observer can see at a glance which fields are well-placed. The DDFs span a wide
+range of right ascension, so some field is always observable, but the \emph{set} that is
+well-placed rotates through the year (the southern fields ECDFS/ELAIS-S1/EDFS dominate
+Aug--Dec; COSMOS and M49 return in the austral summer).
 Transparency artifacts written per run: the timeline, TCS catalog, and summary; plus
 \texttt{score\_breakdown.json} (per-target score components), \texttt{time\_accounting.json}
 (budget audit), \texttt{target\_ledger.json} (per-phase integration), \texttt{broker\_status.json}
 (ingestion liveness), and \texttt{multi\_group\_alerts.json}.
 
 \section{Testing}
-The system has 96 unit tests (\texttt{tests/}). A hard rule: \textbf{no test contacts a live
+The system has 137 unit tests (\texttt{tests/}). A hard rule: \textbf{no test contacts a live
 broker, database, or API} --- brokers are stubbed and all state uses temp-file JSON.
 Coverage spans merit (moon folding, coverage-aware broker bonus), ingestion (liveness status,
 ML-only probability, angular-separation dedup), accounting (state path, science-time
 charging, phase-aware budget factor), prioritization (normalized score, breakdown invariant,
 slew penalty, small-list guard), exposure interpolation, standards insertion, the integration
-ledger (completeness, phase splitting, migration), phase preferences, and multi-group alerts.
+ledger (completeness, phase splitting, migration), phase preferences, multi-group alerts, and
+per-night field visibility. A separate opt-in test (\texttt{pytest -{}-run-live}) hits the real
+Fink API to confirm photometry retrieval works end-to-end; it is skipped by default.
 
 \section{Open questions and future work}\label{sec:future}
 \begin{enumerate}[nosep]
+  \item \textbf{Rubin downtime vs.\ the August nights \emph{(for collaboration discussion)}.}
+  Observability on the 2026B nights is excellent --- every night has 4--5 DDFs at airmass
+  $\sim$1.0 (verified with the \texttt{fields} report). However, the Rubin downtime
+  (2026-08-09 through end of August) overlaps several August nights on which the best-placed
+  fields are the \emph{southern} ones (ECDFS, ELAIS-S1, EDFS; $\delta < -32^\circ$). Those
+  fields are Rubin/LSST-only (no ZTF), so during the downtime they have no alert source and
+  are candidate-starved despite perfect placement --- only XMM-LSS (and partly ECDFS) still
+  receive ZTF-fed alerts. Options to discuss: prioritize XMM-LSS/ECDFS on those nights, lean
+  on manual/ToO targets, or treat them as opportunistic.
   \item \textbf{Alert-target ownership / charging \emph{(for collaboration discussion)}.}
   Time is charged to each target's program, but alert-discovered candidates need an assigned
   owner. This depends on the operating model: \textbf{(a)} the tool is a shared scheduler that

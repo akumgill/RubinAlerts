@@ -115,7 +115,12 @@ w_{\rm ext}\, w_{\rm broker}\, w_{\rm moon}\, (w_{\rm salt}\, w_{\rm absmag}).
 \end{equation}
 \begin{itemize}[nosep]
   \item $w_{\rm time} = \exp(-\Delta t^2 / 2\tau^2)$, $\tau = 10$\,d --- peaks at maximum light.
-  \item $w_{\rm mag} = \exp(-((m-m_{\rm opt})/\sigma_m)^2)$, $m_{\rm opt}\approx20.5$ (Magellan S/N sweet spot).
+  \item $w_{\rm mag}$ --- a \textbf{soft top-hat} matched to LLAMAS's followable window
+  (proposal $18 \le r \le 21.5$): full weight across the $\sim$18--21 plateau, a gentle
+  bright-side roll-off below $\sim$18 (saturation / very low-$z$), and a faint-side roll-off
+  toward the $\sim$mag-22 exposure wall (negligible by mag 23, where a spectrum would need
+  $>$10\,h). Unlike a symmetric Gaussian, it does \emph{not} penalize bright SNe --- brighter
+  is strictly better for S/N.
   \item $w_{\rm prob}$ --- \textbf{ML-derived P(Ia) only}. The ANTARES heuristic proxy is
   uncalibrated, so it is kept in a separate \texttt{antares\_proxy\_prob} column and excluded
   from the pooled probability; ANTARES contributes to detection/coverage, not to P(Ia).
@@ -372,7 +377,10 @@ Fink API to confirm photometry retrieval works end-to-end; it is skipped by defa
   seeing terms) and, ultimately, completeness judged from the \emph{achieved} signal-to-noise
   rather than elapsed clock time. The ledger is already forward-compatible: cumulative time
   can be swapped for cumulative S/N$^2$ (which adds linearly under background-limited
-  conditions) with no change to its structure.
+  conditions) with no change to its structure. The same calculation should eventually
+  \textbf{replace the soft top-hat $w_{\rm mag}$}: instead of a magnitude heuristic, weight a
+  target by whether it can reach a target S/N in an acceptable exposure given its magnitude
+  and the night's conditions (a \texttt{TODO(S/N-feasibility)} marker flags this in the code).
   \item \textbf{Multi-night look-ahead} scheduling, and surfacing broker liveness through the
   \texttt{supernova\_monitor} pipeline path (currently only the \texttt{run\_tonight} path).
 \end{enumerate}

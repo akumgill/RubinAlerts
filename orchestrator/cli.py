@@ -252,6 +252,36 @@ def cmd_reconcile_target(args):
     print(f"  cumulative now {ledger.cumulative_seconds(target) / 60.0:.1f} min")
 
 
+def cmd_fields(args):
+    """Show which Rubin DDFs are well-placed at LCO on a given UT night."""
+    _setup_logging(args.verbose)
+
+    from core.ddf_fields import field_visibility
+
+    airmass_limit = (args.airmass_limit if args.airmass_limit is not None
+                     else LLAMAS_CONFIG.max_airmass)
+
+    report = field_visibility(args.date, LLAMAS_CONFIG.location, airmass_limit)
+
+    dark_hours = report[0]['dark_hours'] if report else 0.0
+    print(f"\nDDF visibility for {args.date} at Las Campanas "
+          f"(astro night: {dark_hours:.1f} hrs, airmass limit {airmass_limit:.2f})")
+    if dark_hours <= 0:
+        print("  No astronomical night for this date — nothing observable.")
+        return
+
+    print(f"  {'Field':<10} {'min airmass':>11} {'hours<limit':>11} "
+          f"{'transit(UT)':>16} {'well-placed?':>12}")
+    print("  " + "-" * 64)
+    for f in report:
+        am = f"{f['min_airmass']:.2f}" if math.isfinite(f['min_airmass']) else "--"
+        transit = f['transit_ut'][11:16] if f['transit_ut'] else "--"
+        mark = "*" if f['well_placed'] else ""
+        print(f"  {f['name']:<10} {am:>11} {f['hours_below_limit']:>10.1f}h "
+              f"{transit:>16} {mark:>12}")
+    print("\n  * = well-placed (min airmass < 1.5 and observable below limit)")
+
+
 def cmd_ledger(args):
     """Print the per-target integration ledger summary table (W11)."""
     _setup_logging(args.verbose)
@@ -402,9 +432,19 @@ def main():
                                help='Include already-satisfied targets')
     ledger_parser.add_argument('-v', '--verbose', action='store_true')
 
+    # fields subcommand: which DDFs are well-placed at LCO tonight
+    fields_parser = subparsers.add_parser(
+        'fields', help='Show which Rubin DDFs are well-placed at LCO tonight')
+    fields_parser.add_argument('--date', required=True,
+                               help='Observing date YYYY-MM-DD (UT)')
+    fields_parser.add_argument('--airmass-limit', type=float, default=None,
+                               help='Airmass ceiling for the hours-observable '
+                                    'accumulator (default: config max_airmass)')
+    fields_parser.add_argument('-v', '--verbose', action='store_true')
+
     # Backward compatibility: if first arg is not a subcommand, assume 'plan'
     known_commands = {'plan', 'run-nightly', 'reconcile',
-                      'reconcile-target', 'ledger'}
+                      'reconcile-target', 'ledger', 'fields'}
     if len(sys.argv) > 1 and sys.argv[1] not in known_commands and sys.argv[1] != '-h' and sys.argv[1] != '--help':
         sys.argv.insert(1, 'plan')
 
@@ -420,6 +460,8 @@ def main():
         cmd_reconcile_target(args)
     elif args.command == 'ledger':
         cmd_ledger(args)
+    elif args.command == 'fields':
+        cmd_fields(args)
     else:
         parser.print_help()
         sys.exit(1)

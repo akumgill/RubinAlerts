@@ -5,7 +5,7 @@ All inputs are in-memory scalars/arrays — no network, DB, or API access.
 
 import numpy as np
 
-from core.magellan_planning import compute_merit_breakdown
+from core.magellan_planning import compute_merit_breakdown, _mag_weight
 from core.ddf_fields import (
     max_possible_brokers,
     MAX_BROKERS_ZTF_COVERAGE,
@@ -76,3 +76,56 @@ def test_multibroker_equatorial_beats_single_broker():
         num_brokers=MAX_BROKERS_ZTF_COVERAGE,
         max_possible_brokers=MAX_BROKERS_ZTF_COVERAGE, **COMMON)
     assert np.isclose(float(full['w_broker']), 1.3)
+
+
+# --- W3: soft top-hat magnitude weight (fixes bright-SN penalty) ----------
+
+def test_mag_weight_plateau_is_flat():
+    """Full weight across the LLAMAS followable plateau [18, 21]."""
+    for m in (18.0, 18.5, 19.0, 20.0, 20.5, 21.0):
+        assert np.isclose(float(_mag_weight(m)), 1.0, atol=1e-9)
+
+
+def test_mag_weight_bright_penalty_is_gone():
+    """Bright SNe are NOT penalised: mag 19 ~ 1.0 (was 0.24 under old Gaussian)."""
+    assert float(_mag_weight(19.0)) >= 0.9
+    assert np.isclose(float(_mag_weight(19.0)), 1.0, atol=1e-9)
+
+
+def test_mag_weight_faint_rolloff():
+    """Faint side rolls off monotonically toward the ~mag 22-23 exposure wall."""
+    assert np.isclose(float(_mag_weight(21.5)), 0.7788, atol=1e-3)
+    assert np.isclose(float(_mag_weight(22.0)), 0.3679, atol=1e-3)
+    assert float(_mag_weight(23.0)) < 0.05
+    assert float(_mag_weight(24.0)) < 0.01
+    faint = [float(_mag_weight(m)) for m in (21.0, 21.5, 22.0, 23.0, 24.0)]
+    assert all(a > b for a, b in zip(faint, faint[1:]))  # monotonic decreasing
+
+
+def test_mag_weight_gentle_bright_rolloff():
+    """Bright-side roll-off is gentle (saturation/low-z), not a steep penalty."""
+    assert np.isclose(float(_mag_weight(18.0)), 1.0, atol=1e-9)
+    assert 0.6 < float(_mag_weight(17.0)) < 0.9
+    assert float(_mag_weight(16.0)) < float(_mag_weight(17.0))
+
+
+def test_mag_weight_vectorized():
+    """Array input returns an array of the same shape with expected values."""
+    mags = np.array([18.0, 19.0, 20.5, 21.0, 22.0])
+    w = _mag_weight(mags)
+    assert isinstance(w, np.ndarray)
+    assert w.shape == mags.shape
+    np.testing.assert_allclose(w, [1.0, 1.0, 1.0, 1.0, 0.3679], atol=1e-3)
+
+
+def test_breakdown_uses_soft_tophat_mag_weight():
+    """A bright near-peak candidate (mag 19) now scores w_mag ~ 1.0, not ~0.24."""
+    common = dict(delta_t=0.0, ia_prob=0.6, host_morphology='unknown',
+                  extinction_ebv=0.03)
+    bright = compute_merit_breakdown(peak_mag=19.0, **common)
+    faint = compute_merit_breakdown(peak_mag=22.0, **common)
+
+    assert np.isclose(float(bright['w_mag']), 1.0, atol=1e-9)
+    assert np.isclose(float(faint['w_mag']), 0.3679, atol=1e-3)
+    # Brighter near-peak target now outranks a fainter one (was inverted/penalised).
+    assert float(bright['merit']) > float(faint['merit'])

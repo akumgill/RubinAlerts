@@ -109,6 +109,31 @@ MOON_PARAMS = {
 }
 
 
+# Soft top-hat magnitude weight, matched to LLAMAS's followable window
+# (Stubbs 2026B proposal: 18 <= r <= 21.5). Full weight across the plateau;
+# gentle Gaussian wings outside. Brighter-than-plateau is only mildly
+# down-weighted (saturation / very low-z), NOT penalized like the old symmetric
+# Gaussian did. Faint side rolls off toward the ~mag 22 exposure wall.
+# TODO(S/N-feasibility): replace this magnitude heuristic with an exposure/
+# signal-to-noise feasibility weight (can the target reach target S/N in an
+# acceptable LLAMAS exposure given mag + conditions?) — see design doc future work.
+MAG_PLATEAU_BRIGHT = 18.0   # full weight for MAG_PLATEAU_BRIGHT <= m <= MAG_PLATEAU_FAINT
+MAG_PLATEAU_FAINT  = 21.0
+MAG_BRIGHT_SOFT    = 2.0    # gentle bright-side roll-off scale (mag)
+MAG_FAINT_SOFT     = 1.0    # faint-side roll-off scale (mag) — ~0 by mag 23
+
+
+def _mag_weight(peak_mag):
+    """Soft top-hat magnitude weight in (0, 1]. Vectorized (np array in/out)."""
+    m = np.asarray(peak_mag, dtype=float)
+    w = np.ones_like(m)
+    bright = m < MAG_PLATEAU_BRIGHT
+    faint  = m > MAG_PLATEAU_FAINT
+    w = np.where(bright, np.exp(-((MAG_PLATEAU_BRIGHT - m) / MAG_BRIGHT_SOFT)**2), w)
+    w = np.where(faint,  np.exp(-((m - MAG_PLATEAU_FAINT) / MAG_FAINT_SOFT)**2), w)
+    return w
+
+
 def _coverage_aware_broker_bonus(num_brokers, max_possible_brokers,
                                  max_bonus=0.3):
     """Multi-broker agreement bonus scaled by achievable sky coverage.
@@ -155,7 +180,7 @@ def compute_merit(delta_t, peak_mag,
     M = W_t * W_m * W_p * W_h * W_ext * W_broker * W_moon * W_salt * W_absmag
 
     W_t = exp(-delta_t^2 / (2 * tau^2))        Gaussian time weight
-    W_m = exp(-((m - m_opt) / sigma_m)^2)      Gaussian magnitude weight
+    W_m = soft top-hat over [18, 21]           Magnitude weight (see _mag_weight)
     W_p = ia_prob                               Classifier probability (0-1)
     W_h = morphology weight                     Host galaxy type weight
     W_ext = exp(-E(B-V) / 0.15)                Extinction penalty
@@ -202,9 +227,14 @@ def compute_merit(delta_t, peak_mag,
     tau : float
         Time decay half-width in days (default 10).
     mag_optimal : float
-        Optimal magnitude for the telescope/instrument (default 20.5).
+        Deprecated/unused. The magnitude weight is now a soft top-hat
+        (see ``_mag_weight``) matched to the LLAMAS followable window
+        [18, 21], not a Gaussian centred on ``mag_optimal``. Kept for
+        backward compatibility with existing callers.
     mag_bright, mag_faint : float
-        Magnitude range bounds. sigma_m = (mag_faint - mag_bright) / 4.
+        Deprecated/unused. Formerly defined the Gaussian sigma; the
+        magnitude weight is now a soft top-hat (see ``_mag_weight``).
+        Kept for backward compatibility.
 
     Returns
     -------
@@ -214,10 +244,8 @@ def compute_merit(delta_t, peak_mag,
     delta_t = np.asarray(delta_t, dtype=float)
     peak_mag = np.asarray(peak_mag, dtype=float)
 
-    sigma_m = (mag_faint - mag_bright) / 4.0
-
     w_t = np.exp(-delta_t**2 / (2.0 * tau**2))
-    w_m = np.exp(-((peak_mag - mag_optimal) / sigma_m)**2)
+    w_m = _mag_weight(peak_mag)
 
     merit = w_t * w_m
 
@@ -307,7 +335,7 @@ def compute_merit_breakdown(delta_t, peak_mag,
     dict with keys:
         'merit': Final combined merit score
         'w_time': Time weight (Gaussian decay from peak)
-        'w_mag': Magnitude weight (Gaussian around optimal)
+        'w_mag': Magnitude weight (soft top-hat over [18, 21]; see _mag_weight)
         'w_prob': Classifier probability weight
         'w_host': Host morphology weight
         'w_ext': Extinction penalty
@@ -319,10 +347,8 @@ def compute_merit_breakdown(delta_t, peak_mag,
     delta_t = np.asarray(delta_t, dtype=float)
     peak_mag = np.asarray(peak_mag, dtype=float)
 
-    sigma_m = (mag_faint - mag_bright) / 4.0
-
     w_time = np.exp(-delta_t**2 / (2.0 * tau**2))
-    w_mag = np.exp(-((peak_mag - mag_optimal) / sigma_m)**2)
+    w_mag = _mag_weight(peak_mag)
 
     # Initialize all weights to 1.0
     w_prob = np.ones_like(delta_t)

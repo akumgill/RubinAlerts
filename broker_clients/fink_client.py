@@ -14,6 +14,7 @@ API docs: https://api.lsst.fink-portal.org
 """
 
 import logging
+import time
 from typing import Optional, List, Dict, Any
 
 import numpy as np
@@ -64,13 +65,30 @@ class FinkLSSTClient(BaseBrokerClient):
         HTTP request timeout in seconds.
     cache_dir : str
         Directory for caching data.
+    max_retries : int
+        Number of attempts for transient failures (Timeout, ConnectionError,
+        HTTP 5xx) in ``_post`` before giving up. Default 3.
+    retry_backoff_base : float
+        Base seconds for exponential backoff between retries (1s, 2s, 4s, ...).
+        Default 1.0.
+
+    Notes
+    -----
+    None-vs-empty contract for the query methods:
+      * ``None``  -> transport error / exhausted retries / malformed response
+                     (the caller should treat this as "we don't know").
+      * ``[]`` / empty DataFrame -> the query SUCCEEDED but the object simply
+                     has no rows (a legitimate, non-error result).
     """
 
     def __init__(self, base_url: str = FINK_LSST_URL, timeout: int = 60,
-                 cache_dir: str = './cache/data'):
+                 cache_dir: str = './cache/data',
+                 max_retries: int = 3, retry_backoff_base: float = 1.0):
         super().__init__(broker_name='Fink', cache_dir=cache_dir)
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_backoff_base = retry_backoff_base
 
     @property
     def available(self) -> bool:
@@ -87,26 +105,72 @@ class FinkLSSTClient(BaseBrokerClient):
     # ------------------------------------------------------------------
 
     def _post(self, endpoint: str, payload: dict) -> Optional[list]:
-        """POST to Fink API, return parsed JSON list or None."""
+        """POST to Fink API with retry/backoff on transient failures.
+
+        Retries on ``requests.exceptions.Timeout``, ``ConnectionError``, and
+        HTTP 5xx (server) errors up to ``self.max_retries`` times with
+        exponential backoff (``retry_backoff_base`` * 2**attempt seconds).
+        HTTP 4xx (client) errors are NOT retried.
+
+        Returns
+        -------
+        list
+            A list (possibly EMPTY) on a successful response — an empty list
+            means "queried OK, zero rows", which is a valid non-error result.
+        None
+            On transport error, exhausted retries, a non-2xx 4xx response, or
+            a malformed (non-list) body — the ERROR sentinel.
+        """
         url = f"{self.base_url}{endpoint}"
+        payload = dict(payload)
         payload["output-format"] = "json"
-        try:
-            r = requests.post(url, json=payload,
-                              headers={"Content-Type": "application/json"},
-                              timeout=self.timeout)
-            r.raise_for_status()
-            data = r.json()
-            if isinstance(data, list):
-                return data
-            logger.warning("Fink %s returned non-list: %s", endpoint,
-                           type(data).__name__)
-            return None
-        except requests.exceptions.HTTPError as e:
-            logger.warning("Fink %s HTTP error: %s", endpoint, e)
-            return None
-        except Exception as e:
-            logger.warning("Fink %s error: %s", endpoint, e)
-            return None
+
+        last_exc = None
+        for attempt in range(self.max_retries):
+            try:
+                r = requests.post(url, json=payload,
+                                  headers={"Content-Type": "application/json"},
+                                  timeout=self.timeout)
+                status = r.status_code
+                # Retry server-side (5xx) errors; do not retry client (4xx).
+                if 500 <= status < 600:
+                    logger.warning("Fink %s HTTP %d (attempt %d/%d)",
+                                   endpoint, status, attempt + 1,
+                                   self.max_retries)
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.retry_backoff_base * (2 ** attempt))
+                        continue
+                    return None
+                if 400 <= status < 500:
+                    logger.warning("Fink %s HTTP %d (client error, not retried)",
+                                   endpoint, status)
+                    return None
+                r.raise_for_status()
+                data = r.json()
+                if isinstance(data, list):
+                    # Successful response: may be empty (OK, zero rows).
+                    return data
+                logger.warning("Fink %s returned non-list: %s", endpoint,
+                               type(data).__name__)
+                return None
+            except (requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError) as e:
+                last_exc = e
+                logger.warning("Fink %s transient error (attempt %d/%d): %s",
+                               endpoint, attempt + 1, self.max_retries, e)
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_backoff_base * (2 ** attempt))
+                    continue
+                return None
+            except Exception as e:
+                # Non-transient (e.g. JSON decode, unexpected HTTPError):
+                # do not retry.
+                logger.warning("Fink %s error: %s", endpoint, e)
+                return None
+
+        logger.warning("Fink %s failed after %d attempts: %s",
+                       endpoint, self.max_retries, last_exc)
+        return None
 
     def query_sources(self, dia_object_id: str) -> Optional[pd.DataFrame]:
         """Fetch DiaSource detections for one object.
@@ -118,8 +182,11 @@ class FinkLSSTClient(BaseBrokerClient):
             "diaObjectId": str(dia_object_id),
             "columns": _PHOT_COLS,
         })
-        if not data:
+        # None -> transport error; [] -> queried OK but no rows.
+        if data is None:
             return None
+        if len(data) == 0:
+            return pd.DataFrame()
 
         df = pd.DataFrame(data)
         df = self._normalize_columns(df)
@@ -201,8 +268,11 @@ class FinkLSSTClient(BaseBrokerClient):
             "diaObjectId": str(dia_object_id),
             "columns": _FP_COLS,
         })
-        if not data:
+        # None -> transport error; [] -> queried OK but no rows.
+        if data is None:
             return None
+        if len(data) == 0:
+            return pd.DataFrame()
 
         df = pd.DataFrame(data)
         df = self._normalize_columns(df)
@@ -276,26 +346,45 @@ class FinkLSSTClient(BaseBrokerClient):
 
         Combines both source types, converts flux to magnitudes,
         and returns sorted by MJD.
+
+        None-vs-empty contract (mirrors ``_post``):
+          * Returns ``None`` ONLY if a sub-query hit a transport error
+            (``_post`` returned None) AND nothing else was retrieved — i.e.
+            we genuinely could not query the object.
+          * Returns an EMPTY DataFrame when every attempted sub-query
+            succeeded (queried OK) but the object simply has no photometry.
+          * Returns the combined light-curve DataFrame when there IS data.
         """
         frames = []
+        had_transport_error = False
 
         det = self.query_sources(dia_object_id)
-        if det is not None and len(det) > 0:
+        if det is None:
+            had_transport_error = True
+        elif len(det) > 0:
             frames.append(det)
             logger.info("  Fink detections: %d points (%s)",
                         len(det), sorted(det["band"].unique()))
 
         if include_forced:
             fp = self.query_forced_photometry(dia_object_id)
-            if fp is not None and len(fp) > 0:
+            if fp is None:
+                had_transport_error = True
+            elif len(fp) > 0:
                 frames.append(fp)
                 logger.info("  Fink forced phot: %d points (%s)",
                             len(fp), sorted(fp["band"].unique()))
 
         if not frames:
-            logger.warning("No Fink photometry for diaObjectId=%s",
-                           dia_object_id)
-            return None
+            if had_transport_error:
+                # Transport error and nothing retrieved -> ERROR sentinel.
+                logger.warning("Fink transport error for diaObjectId=%s",
+                               dia_object_id)
+                return None
+            # Queried OK but the object has no photometry -> empty DataFrame.
+            logger.info("No Fink photometry for diaObjectId=%s (queried OK)",
+                        dia_object_id)
+            return pd.DataFrame()
 
         combined = pd.concat(frames, ignore_index=True)
         combined = self._flux_to_mag(combined)

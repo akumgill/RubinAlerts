@@ -16,6 +16,34 @@ import pytest
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+# ---------------------------------------------------------------------------
+# Live-test gating: tests marked @pytest.mark.live hit real external services
+# and are SKIPPED by default. Run them with `pytest --run-live`.
+# ---------------------------------------------------------------------------
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-live", action="store_true", default=False,
+        help="run tests marked @pytest.mark.live against real external APIs",
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "live: test hits a real external API/broker; skipped unless --run-live",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-live"):
+        return
+    skip_live = pytest.mark.skip(reason="needs --run-live to hit live API")
+    for item in items:
+        if "live" in item.keywords:
+            item.add_marker(skip_live)
+
+
 @pytest.fixture
 def sample_merged_alerts():
     """A small DataFrame of merged broker candidates.

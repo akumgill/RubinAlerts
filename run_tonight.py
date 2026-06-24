@@ -18,6 +18,7 @@ import logging
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -43,6 +44,10 @@ from core.magellan_planning import (
     optimize_observing_sequence,
 )
 from core.ddf_fields import DDF_FIELDS, is_in_ddf, max_possible_brokers
+from core.fink_breaker import (
+    FinkBreaker, ACTION_FETCH, ACTION_COOLDOWN, ACTION_PROCEED,
+    FINK_MAX_CONSECUTIVE_FAILURES, FINK_MAX_COOLDOWNS, FINK_COOLDOWN_SECONDS,
+)
 
 # Multi-broker support
 try:
@@ -723,7 +728,7 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
     atlas_mjd_min = mjd_now - 30  # 30 days back
 
     # ---- Pass 1: Fetch Fink photometry and identify bright candidates ----
-    FINK_MAX_CONSECUTIVE_FAILURES = 5
+    # Breaker thresholds come from core.fink_breaker (FINK_MAX_CONSECUTIVE_FAILURES, ...).
     fink_data = {}  # did -> DataFrame
     bright_for_atlas = []  # (did, ra, dec) for candidates brighter than cut
 
@@ -799,30 +804,48 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
                     logger.info("ATLAS pre-filter (from broker mags): %d candidates < %.1f mag",
                                 len(bright_for_atlas), ATLAS_BRIGHT_MAG_CUT)
     else:
-        consecutive_fink_failures = 0
-        fink_skipped = 0
+        # Pause-and-resume circuit breaker: on a run of consecutive *transport*
+        # errors we cool down (sleep) and reset rather than aborting the night.
+        # An empty light curve (object queried OK, no photometry) is NOT a
+        # failure — it's just skipped. The breaker decision logic lives in the
+        # pure, testable FinkBreaker helper; the sleep stays here.
+        breaker = FinkBreaker()
+        fink_empty = 0
         for i, did in enumerate(dia_ids):
-            # Circuit breaker: if Fink API is consistently failing, skip remaining
-            if consecutive_fink_failures >= FINK_MAX_CONSECUTIVE_FAILURES:
-                fink_skipped += 1
-                continue
+            action = breaker.decide()
+            if action == ACTION_COOLDOWN:
+                logger.warning("Fink: %d consecutive transport failures — "
+                               "cooling down %ds (cooldown %d/%d), then resuming",
+                               breaker.consecutive_failures,
+                               FINK_COOLDOWN_SECONDS,
+                               breaker.cooldowns_used + 1, FINK_MAX_COOLDOWNS)
+                time.sleep(FINK_COOLDOWN_SECONDS)
+                breaker.record_cooldown()
+            elif action == ACTION_PROCEED:
+                # Cooldown budget exhausted: stop sleeping but keep going.
+                logger.warning("Fink: cooldown budget exhausted (%d) — "
+                               "continuing without further pauses",
+                               FINK_MAX_COOLDOWNS)
+                breaker.record_cooldown()  # resets streak so we don't re-trip every row
 
             logger.info("[%d/%d] Fink: %s", i + 1, len(dia_ids), did)
             fink_lc = fink.get_light_curve(str(did), include_forced=True)
-            if fink_lc is None or len(fink_lc) == 0:
-                consecutive_fink_failures += 1
-                logger.warning("  No Fink light curve (consecutive failures: %d/%d)",
-                               consecutive_fink_failures, FINK_MAX_CONSECUTIVE_FAILURES)
-                if consecutive_fink_failures >= FINK_MAX_CONSECUTIVE_FAILURES:
-                    logger.error("Fink API: %d consecutive failures — "
-                                 "skipping remaining %d candidates. "
-                                 "Server may be down.",
-                                 FINK_MAX_CONSECUTIVE_FAILURES,
-                                 len(dia_ids) - i - 1)
+
+            if fink_lc is None:
+                # Transport error — counts toward the breaker.
+                breaker.record_failure()
+                logger.warning("  Fink transport error (consecutive: %d/%d)",
+                               breaker.consecutive_failures,
+                               FINK_MAX_CONSECUTIVE_FAILURES)
+                continue
+            if len(fink_lc) == 0:
+                # Queried OK, no photometry — NOT a failure; just skip.
+                breaker.record_success()
+                fink_empty += 1
                 continue
 
-            # Success — reset counter
-            consecutive_fink_failures = 0
+            # Success — reset the consecutive-failure streak.
+            breaker.record_success()
             fink_data[did] = fink_lc
 
             # Check if any Rubin detection is brighter than the ATLAS cut
@@ -834,9 +857,10 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
                     if np.isfinite(ra) and np.isfinite(dec):
                         bright_for_atlas.append((str(did), ra, dec))
 
-        logger.info("Fink photometry: %d/%d candidates have data%s",
-                    len(fink_data), len(dia_ids),
-                    f" ({fink_skipped} skipped — Fink API down)" if fink_skipped else "")
+        logger.info("Fink photometry: %d/%d candidates have data "
+                    "(%d empty-OK, %d cooldowns)",
+                    len(fink_data), len(dia_ids), fink_empty,
+                    breaker.cooldowns_used)
 
     # ---- Batch ATLAS for bright candidates ----
     atlas_data = {}  # did -> DataFrame (nJy format)

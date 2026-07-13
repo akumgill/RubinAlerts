@@ -64,6 +64,153 @@ def get_tns_api_key() -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# TNS public-objects daily dump
+#
+# One ~25 MB download per night replaces per-object rate-limited cone
+# searches (~0.7 s/request + 60 s penalty sleeps). The dump endpoint is
+# stricter than /api/get: the tns_marker User-Agent must carry the REGISTERED
+# bot id/name (401 otherwise), so ~/.tns_credentials needs bot_id/bot_name.
+# ---------------------------------------------------------------------------
+
+TNS_DUMP_URL = ("https://www.wis-tns.org/system/files/tns_public_objects/"
+                "tns_public_objects.csv.zip")
+
+
+def _get_bot_identity():
+    """(bot_id, bot_name) from env or credentials file; (None, None) if absent."""
+    bot_id = os.environ.get('TNS_BOT_ID')
+    bot_name = os.environ.get('TNS_BOT_NAME')
+    if bot_id and bot_name:
+        return bot_id, bot_name
+    if os.path.exists(CREDENTIALS_FILE):
+        config = configparser.ConfigParser()
+        config.read(CREDENTIALS_FILE)
+        if 'tns' in config:
+            return (config['tns'].get('bot_id'), config['tns'].get('bot_name'))
+    return None, None
+
+
+def fetch_tns_public_objects(cache_dir: str = './cache/data',
+                             max_age_hours: float = 24.0) -> Optional[pd.DataFrame]:
+    """Download (or reuse cached) TNS public-objects catalog as a DataFrame.
+
+    Columns kept: name_prefix, name, ra, dec, redshift, type,
+    internal_names. Returns None when the download and cache both fail
+    (caller falls back to per-object cone searches).
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, 'tns_public_objects.csv.zip')
+
+    fresh = (os.path.exists(cache_path) and
+             (time.time() - os.path.getmtime(cache_path)) < max_age_hours * 3600)
+    if not fresh:
+        bot_id, bot_name = _get_bot_identity()
+        if not (bot_id and bot_name):
+            logger.warning("TNS dump: bot_id/bot_name missing from credentials "
+                           "— cannot download (add them from wis-tns.org/bots)")
+            return _load_tns_dump(cache_path) if os.path.exists(cache_path) else None
+        try:
+            marker = (f'tns_marker{{"tns_id":{bot_id},"type":"bot",'
+                      f'"name":"{bot_name}"}}')
+            r = requests.post(TNS_DUMP_URL, headers={'User-Agent': marker},
+                              data={'api_key': get_tns_api_key()},
+                              stream=True, timeout=300)
+            if r.status_code != 200:
+                logger.warning("TNS dump download failed (HTTP %d)", r.status_code)
+                return _load_tns_dump(cache_path) if os.path.exists(cache_path) else None
+            tmp = cache_path + '.tmp'
+            with open(tmp, 'wb') as f:
+                for chunk in r.iter_content(1 << 20):
+                    f.write(chunk)
+            os.replace(tmp, cache_path)
+            logger.info("TNS dump: downloaded %.1f MB",
+                        os.path.getsize(cache_path) / 1e6)
+        except Exception as e:
+            logger.warning("TNS dump download failed: %s", e)
+            return _load_tns_dump(cache_path) if os.path.exists(cache_path) else None
+
+    return _load_tns_dump(cache_path)
+
+
+def _load_tns_dump(path: str) -> Optional[pd.DataFrame]:
+    """Parse the dump zip -> DataFrame (name, ra, dec, redshift, type, ...)."""
+    try:
+        # Row 0 is a metadata line; row 1 is the real header.
+        df = pd.read_csv(path, compression='zip', skiprows=1,
+                         usecols=['name_prefix', 'name', 'ra', 'declination',
+                                  'redshift', 'type', 'internal_names'],
+                         dtype={'internal_names': str}, low_memory=False)
+        df = df.rename(columns={'declination': 'dec'})
+        df['ra'] = pd.to_numeric(df['ra'], errors='coerce')
+        df['dec'] = pd.to_numeric(df['dec'], errors='coerce')
+        df['redshift'] = pd.to_numeric(df['redshift'], errors='coerce')
+        df = df.dropna(subset=['ra', 'dec'])
+        logger.info("TNS dump: %d objects loaded", len(df))
+        return df
+    except Exception as e:
+        logger.warning("TNS dump parse failed: %s", e)
+        return None
+
+
+def crossmatch_tns_local(targets: pd.DataFrame, tns_df: pd.DataFrame,
+                         radius_arcsec: float = 5.0) -> Dict[str, Dict]:
+    """Match targets (diaObjectId, ra, dec) against the local TNS catalog.
+
+    Matches by internal name FIRST (exact — e.g. a ZTF oid listed in TNS
+    internal_names), then by coordinates within ``radius_arcsec``.
+    Returns {diaObjectId: {tns_name, tns_type, tns_redshift}}.
+    """
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+
+    out = {}
+    if targets is None or len(targets) == 0 or tns_df is None or len(tns_df) == 0:
+        return out
+
+    def _hit_dict(rec: dict) -> Dict:
+        prefix = rec.get('name_prefix')
+        typ = rec.get('type')
+        z = rec.get('redshift')
+        return {
+            'tns_name': f"{prefix if pd.notna(prefix) else 'AT'} {rec.get('name', '')}".strip(),
+            'tns_type': typ if (pd.notna(typ) and str(typ).strip()) else None,
+            'tns_redshift': float(z) if pd.notna(z) else None,
+        }
+
+    # Name index: internal_names is a comma-separated list of survey ids
+    name_idx = {}
+    has_names = tns_df['internal_names'].notna()
+    for rec in tns_df.loc[has_names].to_dict('records'):
+        for nm in str(rec['internal_names']).split(','):
+            nm = nm.strip()
+            if nm:
+                name_idx[nm] = rec
+
+    tns_sc = SkyCoord(ra=tns_df['ra'].values * u.deg,
+                      dec=tns_df['dec'].values * u.deg)
+    tgt_ra = pd.to_numeric(targets['ra'], errors='coerce')
+    tgt_dec = pd.to_numeric(targets['dec'], errors='coerce')
+    valid = tgt_ra.notna() & tgt_dec.notna()
+    if valid.any():
+        tgt_sc = SkyCoord(ra=tgt_ra[valid].values * u.deg,
+                          dec=tgt_dec[valid].values * u.deg)
+        idx, sep, _ = tgt_sc.match_to_catalog_sky(tns_sc)
+    pos = 0
+    for i, row in targets.iterrows():
+        did = str(row['diaObjectId'])
+        rec = name_idx.get(did)
+        if rec is None and valid.loc[i] and sep[pos].arcsec <= radius_arcsec:
+            rec = tns_df.iloc[idx[pos]].to_dict()
+        if valid.loc[i]:
+            pos += 1
+        if rec is not None:
+            out[did] = _hit_dict(rec)
+    logger.info("TNS local cross-match: %d/%d targets matched",
+                len(out), len(targets))
+    return out
+
+
 class TNSClient:
     """TNS client for cross-matching transient candidates."""
 

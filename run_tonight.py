@@ -1832,9 +1832,40 @@ def enrich_finalist_redshifts(summary, fit_results, use_salt=False):
     from astropy.cosmology import FlatLambdaCDM
     _cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
 
-    # --- TNS (spec-z + spectroscopic type when reported) ---
-    tns = None
+    # --- TNS: local cross-match against the cached daily dump (ONE download
+    # per night instead of per-object rate-limited cone searches); serial
+    # cone-search fallback only if the dump is unavailable. ---
+    n_tns = n_ned = 0
+    gained = {}  # idx -> (z, source_label)
+    tns_hits = {}
     if HAS_TNS:
+        try:
+            from broker_clients.tns_client import (fetch_tns_public_objects,
+                                                   crossmatch_tns_local)
+            dump = fetch_tns_public_objects()
+            if dump is not None:
+                tns_hits = crossmatch_tns_local(
+                    zless[['diaObjectId', 'ra', 'dec']], dump)
+        except Exception as e:
+            logger.warning("z-enrichment: TNS dump path failed: %s", e)
+
+    if tns_hits:
+        for idx, row in zless.iterrows():
+            hit = tns_hits.get(str(row['diaObjectId']))
+            if not hit:
+                continue
+            summary.at[idx, 'tns_name'] = hit['tns_name']
+            if hit['tns_type']:
+                summary.at[idx, 'tns_type'] = hit['tns_type']
+            summary.at[idx, 'tns_match'] = True
+            z = hit['tns_redshift']
+            if z is not None and z > 0:
+                summary.at[idx, 'tns_redshift'] = z
+                gained[idx] = (z, 'tns_specz')
+                n_tns += 1
+    elif HAS_TNS:
+        # Fallback: serial cone searches (rate-limited; finalists only)
+        tns = None
         try:
             tns = TNSClient()
             ok, msg = tns.verify_connection()
@@ -1844,30 +1875,27 @@ def enrich_finalist_redshifts(summary, fit_results, use_salt=False):
         except Exception as e:
             logger.warning("z-enrichment: TNS init failed: %s", e)
             tns = None
-
-    n_tns = n_ned = 0
-    gained = {}  # idx -> (z, source_label)
-    for idx, row in zless.iterrows():
-        if tns is None:
-            break
-        try:
-            matches = tns.search_by_coordinates(row['ra'], row['dec'],
-                                                radius_arcsec=5.0)
-        except Exception as e:
-            logger.warning("z-enrichment: TNS query failed (%s) — stopping TNS pass", e)
-            break
-        for m in (matches or []):
-            z = m.get('redshift')
-            if z is not None and np.isfinite(float(z)) and float(z) > 0:
-                gained[idx] = (float(z), 'tns_specz')
-                name = f"{m.get('prefix', 'AT')} {m.get('objname', '')}".strip()
-                summary.at[idx, 'tns_name'] = name
-                if m.get('type'):
-                    summary.at[idx, 'tns_type'] = m['type']
-                summary.at[idx, 'tns_redshift'] = float(z)
-                summary.at[idx, 'tns_match'] = True
-                n_tns += 1
+        for idx, row in zless.iterrows():
+            if tns is None:
                 break
+            try:
+                matches = tns.search_by_coordinates(row['ra'], row['dec'],
+                                                    radius_arcsec=5.0)
+            except Exception as e:
+                logger.warning("z-enrichment: TNS query failed (%s) — stopping TNS pass", e)
+                break
+            for m in (matches or []):
+                z = m.get('redshift')
+                if z is not None and np.isfinite(float(z)) and float(z) > 0:
+                    gained[idx] = (float(z), 'tns_specz')
+                    name = f"{m.get('prefix', 'AT')} {m.get('objname', '')}".strip()
+                    summary.at[idx, 'tns_name'] = name
+                    if m.get('type'):
+                        summary.at[idx, 'tns_type'] = m['type']
+                    summary.at[idx, 'tns_redshift'] = float(z)
+                    summary.at[idx, 'tns_match'] = True
+                    n_tns += 1
+                    break
 
     # --- NED host z for the remainder ---
     still = zless.index.difference(gained.keys())

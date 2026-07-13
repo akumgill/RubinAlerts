@@ -623,3 +623,45 @@ class TestZEnrichment:
         out = rt.enrich_finalist_redshifts(s.copy(), {}, use_salt=False)
         assert not (pd.to_numeric(out[out['diaObjectId'] == 'ZTFaaa']['redshift'],
                                   errors='coerce') > 0).any()
+
+
+class TestTNSDumpCrossmatch:
+    """Local cross-match against the daily TNS dump (no per-object API hits)."""
+
+    @staticmethod
+    def _tns_df():
+        return pd.DataFrame([
+            {'name_prefix': 'SN', 'name': '2026aaa', 'ra': 150.0, 'dec': -20.0,
+             'redshift': 0.07, 'type': 'SN Ia', 'internal_names': 'ZTF26xyz, ATLAS26x'},
+            {'name_prefix': 'AT', 'name': '2026bbb', 'ra': 200.0, 'dec': 10.0,
+             'redshift': np.nan, 'type': np.nan, 'internal_names': np.nan},
+        ])
+
+    def test_match_by_internal_name(self):
+        from broker_clients.tns_client import crossmatch_tns_local
+        # Coordinates deliberately WRONG: the ZTF oid in internal_names wins
+        targets = pd.DataFrame([{'diaObjectId': 'ZTF26xyz', 'ra': 10.0, 'dec': 50.0}])
+        hits = crossmatch_tns_local(targets, self._tns_df())
+        assert hits['ZTF26xyz']['tns_name'] == 'SN 2026aaa'
+        assert hits['ZTF26xyz']['tns_type'] == 'SN Ia'
+        assert hits['ZTF26xyz']['tns_redshift'] == pytest.approx(0.07)
+
+    def test_match_by_coordinates(self):
+        from broker_clients.tns_client import crossmatch_tns_local
+        targets = pd.DataFrame([{'diaObjectId': 'DIA123',
+                                 'ra': 200.0004, 'dec': 10.0}])  # ~1.4 arcsec
+        hits = crossmatch_tns_local(targets, self._tns_df())
+        assert hits['DIA123']['tns_name'] == 'AT 2026bbb'
+        assert hits['DIA123']['tns_redshift'] is None
+
+    def test_no_match_beyond_radius(self):
+        from broker_clients.tns_client import crossmatch_tns_local
+        targets = pd.DataFrame([{'diaObjectId': 'DIA999', 'ra': 300.0, 'dec': -60.0}])
+        assert crossmatch_tns_local(targets, self._tns_df()) == {}
+
+    def test_empty_inputs(self):
+        from broker_clients.tns_client import crossmatch_tns_local
+        assert crossmatch_tns_local(pd.DataFrame(), self._tns_df()) == {}
+        assert crossmatch_tns_local(
+            pd.DataFrame([{'diaObjectId': 'x', 'ra': 1.0, 'dec': 1.0}]),
+            pd.DataFrame()) == {}

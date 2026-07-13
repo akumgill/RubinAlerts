@@ -540,3 +540,86 @@ class TestWideFetchIntegration:
 
         assert len(out) == 0
         assert status['ALeRCE-ZTF']['responded'] is True
+
+
+class TestZEnrichment:
+    """Post-ranking TNS+NED redshift enrichment of finalists."""
+
+    @staticmethod
+    def _summary():
+        return pd.DataFrame([
+            {'diaObjectId': 'ZTFaaa', 'ra': 150.0, 'dec': -20.0,
+             'redshift': np.nan, 'distmod': np.nan, 'ned_name': '',
+             'tns_name': '', 'tns_type': np.nan, 'tns_redshift': np.nan,
+             'tns_match': False, 'peak_mag': 19.0, 'absolute_mag': np.nan,
+             'salt_chi2_dof': 0.5, 'salt_x1': 0.1, 'salt_c': 0.0,
+             'salt_z': np.nan, 'salt_peak_mag_B': np.nan},
+            {'diaObjectId': 'FK1', 'ra': 200.0, 'dec': 10.0,
+             'redshift': 0.2, 'distmod': 40.0, 'ned_name': 'payload',
+             'tns_name': '', 'tns_type': np.nan, 'tns_redshift': np.nan,
+             'tns_match': False, 'peak_mag': 20.5, 'absolute_mag': -19.4,
+             'salt_chi2_dof': 1.0, 'salt_x1': 0.0, 'salt_c': 0.0,
+             'salt_z': 0.2, 'salt_peak_mag_B': np.nan},
+        ])
+
+    def test_tns_specz_gained(self, monkeypatch):
+        import run_tonight as rt
+
+        class FakeTNS:
+            def verify_connection(self):
+                return True, 'ok'
+            def search_by_coordinates(self, ra, dec, radius_arcsec=5.0):
+                if abs(ra - 150.0) < 0.01:
+                    return [{'objname': '2026zz', 'prefix': 'SN',
+                             'type': 'SN Ia', 'redshift': 0.07}]
+                return []
+
+        monkeypatch.setattr(rt, 'HAS_TNS', True)
+        monkeypatch.setattr(rt, 'TNSClient', FakeTNS)
+        monkeypatch.setattr(rt, 'HAS_NED', False)
+
+        out = rt.enrich_finalist_redshifts(self._summary(), {}, use_salt=False)
+        row = out[out['diaObjectId'] == 'ZTFaaa'].iloc[0]
+        assert row['redshift'] == pytest.approx(0.07)
+        assert row['tns_name'] == 'SN 2026zz'
+        assert row['tns_type'] == 'SN Ia'
+        assert np.isfinite(row['distmod'])
+        # absolute mag computed from peak mag - distmod
+        assert row['absolute_mag'] == pytest.approx(19.0 - row['distmod'])
+        # the already-z'd row is untouched
+        fk = out[out['diaObjectId'] == 'FK1'].iloc[0]
+        assert fk['redshift'] == pytest.approx(0.2)
+
+    def test_ned_fallback(self, monkeypatch):
+        import run_tonight as rt
+
+        class NoTNS:
+            def verify_connection(self):
+                return False, 'down'
+
+        def fake_ned(df, cache=None, radius_arcsec=18.0):
+            df = df.copy()
+            df['ned_redshift'] = [0.05] * len(df)
+            df['ned_distmod'] = [36.7] * len(df)
+            df['ned_name'] = ['NGC 42'] * len(df)
+            df['ned_sep_arcsec'] = [2.0] * len(df)
+            return df
+
+        monkeypatch.setattr(rt, 'HAS_TNS', True)
+        monkeypatch.setattr(rt, 'TNSClient', NoTNS)
+        monkeypatch.setattr(rt, 'HAS_NED', True)
+        monkeypatch.setattr(rt, 'query_ned_batch', fake_ned)
+
+        out = rt.enrich_finalist_redshifts(self._summary(), {}, use_salt=False)
+        row = out[out['diaObjectId'] == 'ZTFaaa'].iloc[0]
+        assert row['redshift'] == pytest.approx(0.05)
+        assert 'ned:' in row['ned_name']
+
+    def test_no_sources_no_change(self, monkeypatch):
+        import run_tonight as rt
+        monkeypatch.setattr(rt, 'HAS_TNS', False)
+        monkeypatch.setattr(rt, 'HAS_NED', False)
+        s = self._summary()
+        out = rt.enrich_finalist_redshifts(s.copy(), {}, use_salt=False)
+        assert not (pd.to_numeric(out[out['diaObjectId'] == 'ZTFaaa']['redshift'],
+                                  errors='coerce') > 0).any()

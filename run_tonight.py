@@ -1801,6 +1801,127 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
     return summary
 
 
+def enrich_finalist_redshifts(summary, fit_results, use_salt=False):
+    """Fill in redshifts for FINAL candidates that lack one (TNS then NED).
+
+    Runs after ranking, on the ~30 finalists only — unlike the retired
+    every-candidate TNS crawl (320 rate-limited queries), this is a handful
+    of lookups for objects we might actually observe. Matters mostly for the
+    ZTF stream, whose payload carries no redshift: a gained z fixes the
+    exposure estimate (redshift table instead of magnitude scaling) and
+    enables the absolute-magnitude consistency check.
+
+    Precedence: TNS spectroscopic z > NED host z. When a z is gained and the
+    object has a good SALT fit, the SALT model is refit with the redshift
+    FIXED (typing/w_salt/abs-mag update only — the fitted peak/phase and the
+    ranking gates are deliberately left untouched to avoid re-gating loops).
+    """
+    if len(summary) == 0 or 'redshift' not in summary.columns:
+        return summary
+    # String columns we may write into can arrive all-NaN (float64); pandas>=3
+    # refuses silent object upcasts on assignment.
+    for col in ('tns_name', 'tns_type', 'ned_name'):
+        if col in summary.columns:
+            summary[col] = summary[col].astype(object)
+    zless = summary[~(pd.to_numeric(summary['redshift'], errors='coerce') > 0)]
+    if len(zless) == 0:
+        return summary
+    logger.info("Redshift enrichment: %d/%d finalists lack z — querying TNS + NED...",
+                len(zless), len(summary))
+
+    from astropy.cosmology import FlatLambdaCDM
+    _cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
+
+    # --- TNS (spec-z + spectroscopic type when reported) ---
+    tns = None
+    if HAS_TNS:
+        try:
+            tns = TNSClient()
+            ok, msg = tns.verify_connection()
+            if not ok:
+                logger.warning("z-enrichment: TNS unavailable (%s)", msg)
+                tns = None
+        except Exception as e:
+            logger.warning("z-enrichment: TNS init failed: %s", e)
+            tns = None
+
+    n_tns = n_ned = 0
+    gained = {}  # idx -> (z, source_label)
+    for idx, row in zless.iterrows():
+        if tns is None:
+            break
+        try:
+            matches = tns.search_by_coordinates(row['ra'], row['dec'],
+                                                radius_arcsec=5.0)
+        except Exception as e:
+            logger.warning("z-enrichment: TNS query failed (%s) — stopping TNS pass", e)
+            break
+        for m in (matches or []):
+            z = m.get('redshift')
+            if z is not None and np.isfinite(float(z)) and float(z) > 0:
+                gained[idx] = (float(z), 'tns_specz')
+                name = f"{m.get('prefix', 'AT')} {m.get('objname', '')}".strip()
+                summary.at[idx, 'tns_name'] = name
+                if m.get('type'):
+                    summary.at[idx, 'tns_type'] = m['type']
+                summary.at[idx, 'tns_redshift'] = float(z)
+                summary.at[idx, 'tns_match'] = True
+                n_tns += 1
+                break
+
+    # --- NED host z for the remainder ---
+    still = zless.index.difference(gained.keys())
+    if HAS_NED and len(still) > 0:
+        try:
+            from cache.alert_cache import AlertCache
+            ned_df = query_ned_batch(
+                summary.loc[still, ['diaObjectId', 'ra', 'dec']].copy(),
+                cache=AlertCache(), radius_arcsec=18.0)
+            for _, nrow in ned_df.iterrows():
+                z = nrow.get('ned_redshift')
+                if pd.notna(z) and z > 0:
+                    match = summary.index[summary['diaObjectId'] == nrow['diaObjectId']]
+                    if len(match):
+                        gained[match[0]] = (float(z), f"ned:{nrow.get('ned_name', '')}")
+                        n_ned += 1
+        except Exception as e:
+            logger.warning("z-enrichment: NED pass failed: %s", e)
+
+    # --- Apply: redshift, distmod, absolute mag, optional fixed-z SALT refit ---
+    n_refit = 0
+    for idx, (z, source) in gained.items():
+        summary.at[idx, 'redshift'] = z
+        distmod = float(_cosmo.distmod(z).value)
+        summary.at[idx, 'distmod'] = distmod
+        summary.at[idx, 'ned_name'] = source
+        peak_mag = summary.at[idx, 'peak_mag']
+        if np.isfinite(peak_mag):
+            summary.at[idx, 'absolute_mag'] = float(peak_mag) - distmod
+        if use_salt and HAS_SNCOSMO:
+            did = summary.at[idx, 'diaObjectId']
+            fit = fit_results.get(did, {})
+            lc = fit.get('light_curve_clean')
+            if lc is not None and len(lc) > 0:
+                try:
+                    refit = fit_salt(lc, z=z)
+                    if refit.get('status') == 'ok':
+                        summary.at[idx, 'salt_chi2_dof'] = refit.get('chi2_dof', np.nan)
+                        summary.at[idx, 'salt_x1'] = refit.get('x1', np.nan)
+                        summary.at[idx, 'salt_c'] = refit.get('c', np.nan)
+                        summary.at[idx, 'salt_z'] = z
+                        pmB = refit.get('peak_mag_B', np.nan)
+                        if np.isfinite(pmB):
+                            summary.at[idx, 'salt_peak_mag_B'] = pmB
+                            summary.at[idx, 'absolute_mag'] = float(pmB) - distmod
+                        n_refit += 1
+                except Exception as e:
+                    logger.debug("z-enrichment: SALT refit failed for %s: %s", did, e)
+
+    logger.info("Redshift enrichment: gained %d (TNS spec-z %d, NED host %d); "
+                "%d SALT fixed-z refits", len(gained), n_tns, n_ned, n_refit)
+    return summary
+
+
 def recompute_merit_with_moon(plan_df):
     """Fold the night's moon penalty into the ranking merit and re-sort.
 
@@ -2589,6 +2710,9 @@ def main():
     parser.add_argument('--fit-cap', type=int, default=WIDE_FIT_CAP,
                         help='Wide mode: max objects sent to photometry+fitting '
                              f'(default: {WIDE_FIT_CAP})')
+    parser.add_argument('--no-z-enrich', action='store_true',
+                        help='Skip the post-ranking TNS+NED redshift '
+                             'enrichment of finalists (wide mode)')
     parser.add_argument('--max-phase', type=float, default=25.0,
                         help='Max |days from fitted peak| to keep a candidate '
                              '(default: 25, matched to the tau=10d merit scale)')
@@ -2919,6 +3043,16 @@ def main():
     summary = build_summary_table(candidates, fit_results, mjd_now, host_info,
                                   redshifts=redshifts)
     logger.info("Summary table: %d rows", len(summary))
+
+    # --- Step 5a: redshift enrichment for the finalists (wide mode) ---
+    # ZTF-stream targets carry no payload z; a post-ranking TNS+NED pass over
+    # the ~30 finalists is cheap and fixes exposure estimates + abs-mag.
+    if args.sky_mode == 'wide' and not args.no_z_enrich and len(summary) > 0:
+        try:
+            summary = enrich_finalist_redshifts(summary, fit_results,
+                                                use_salt=do_salt)
+        except Exception as e:
+            logger.warning("Redshift enrichment failed (continuing): %s", e)
 
     if len(summary) == 0:
         logger.error("Empty summary table")

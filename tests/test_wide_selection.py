@@ -665,3 +665,110 @@ class TestTNSDumpCrossmatch:
         assert crossmatch_tns_local(
             pd.DataFrame([{'diaObjectId': 'x', 'ra': 1.0, 'dec': 1.0}]),
             pd.DataFrame()) == {}
+
+
+class TestRankingProfiles:
+    """Per-program merit profiles: IA == historical; EXOTIC is the strawman."""
+
+    @staticmethod
+    def _bd(profile=None, **kw):
+        from core.magellan_planning import compute_merit_breakdown
+        args = dict(delta_t=0.0, peak_mag=20.0)
+        args.update(kw)
+        return compute_merit_breakdown(profile=profile, **args)
+
+    def test_ia_profile_is_identity(self):
+        from core.magellan_planning import IA_PROFILE
+        base = self._bd(None, ia_evidence=1.0, absolute_mag=-19.3,
+                        salt_chi2_dof=1.0, host_morphology='spiral')
+        prof = self._bd(IA_PROFILE, ia_evidence=1.0, absolute_mag=-19.3,
+                        salt_chi2_dof=1.0, host_morphology='spiral')
+        assert float(base['merit']) == pytest.approx(float(prof['merit']))
+
+    def test_exotic_avoids_confirmed_ia(self):
+        from core.magellan_planning import EXOTIC_PROFILE
+        b = self._bd(EXOTIC_PROFILE, ia_evidence=1.0)
+        assert float(b['w_iaspec']) == pytest.approx(0.8)   # inverted
+        b2 = self._bd(EXOTIC_PROFILE, ia_evidence=0.0)
+        assert float(b2['w_iaspec']) == pytest.approx(1.2)  # confirmed non-Ia boosted
+
+    def test_exotic_prefers_rising(self):
+        from core.magellan_planning import EXOTIC_PROFILE
+        rising = self._bd(EXOTIC_PROFILE, delta_t=-7.0)
+        peak = self._bd(EXOTIC_PROFILE, delta_t=0.0)
+        assert float(rising['w_time']) > float(peak['w_time'])
+        assert float(rising['w_time']) == pytest.approx(1.0)
+
+    def test_exotic_ignores_ia_specific_factors(self):
+        from core.magellan_planning import EXOTIC_PROFILE
+        b = self._bd(EXOTIC_PROFILE, absolute_mag=-15.0, salt_chi2_dof=50.0)
+        assert float(b['w_absmag']) == pytest.approx(1.0)
+        assert float(b['w_salt']) == pytest.approx(1.0)
+
+    def test_exotic_prefers_starforming_hosts(self):
+        from core.magellan_planning import EXOTIC_PROFILE
+        sp = self._bd(EXOTIC_PROFILE, host_morphology='spiral')
+        el = self._bd(EXOTIC_PROFILE, host_morphology='elliptical')
+        assert float(sp['w_host']) > float(el['w_host'])
+
+
+class TestPerProgramQuartiles:
+    """Orchestrator: each program's P1-P4 from its OWN merit and cohort."""
+
+    def test_profile_column_and_cohort_quartiles(self, tmp_path):
+        from orchestrator.normalize import load_from_rubinalerts
+        rows = []
+        # 4 Ia-program targets, merit 0.4..0.1; 4 exotic targets whose SHARED
+        # merit is tiny (would all be P4 globally) but whose exotic merit
+        # ranks them properly within their own cohort.
+        for i in range(4):
+            rows.append({'object_id': f'ia{i}', 'ra': 150 + i, 'dec': -20,
+                         'merit': 0.4 - 0.1 * i, 'merit_exotic': 0.001,
+                         'program': 'P-IA'})
+        for i in range(4):
+            rows.append({'object_id': f'ex{i}', 'ra': 200 + i, 'dec': -20,
+                         'merit': 0.004 - 0.001 * i,
+                         'merit_exotic': 0.4 - 0.1 * i,
+                         'program': 'P-EXO'})
+        path = tmp_path / 'c.csv'
+        pd.DataFrame(rows).to_csv(path, index=False)
+        targets = load_from_rubinalerts(
+            str(path), default_program='P-IA',
+            program_profiles={'P-IA': 'ia', 'P-EXO': 'exotic'})
+        pr = {t.name: t.priority for t in targets}
+        ms = {t.name: t.merit_score for t in targets}
+        # exotic cohort gets its own P1 despite tiny shared merit
+        assert pr['ex0'] == 1 and pr['ex3'] == 4
+        assert pr['ia0'] == 1 and pr['ia3'] == 4
+        # exotic targets ranked by THEIR merit column
+        assert ms['ex0'] == pytest.approx(0.4)
+
+    def test_no_profiles_is_backward_compatible(self, tmp_path):
+        from orchestrator.normalize import load_from_rubinalerts
+        rows = [{'object_id': f't{i}', 'ra': 150, 'dec': -20,
+                 'merit': 0.4 - 0.05 * i} for i in range(8)]
+        path = tmp_path / 'c.csv'
+        pd.DataFrame(rows).to_csv(path, index=False)
+        targets = load_from_rubinalerts(str(path), default_program='X')
+        assert {t.priority for t in targets} == {1, 2, 3, 4}
+
+
+def test_allocations_yaml_ranking_profile(tmp_path):
+    from orchestrator.accounting import TimeAccountant
+    y = tmp_path / 'a.yaml'
+    y.write_text("""
+semester: "T"
+default_program: "A"
+programs:
+  - program: "A"
+    pi: "x"
+    allocated_hours: {dark: 1.0, grey: 1.0, bright: 1.0}
+  - program: "B"
+    pi: "y"
+    ranking_profile: "exotic"
+    allocated_hours: {dark: 1.0, grey: 1.0, bright: 1.0}
+""")
+    acc = TimeAccountant.from_yaml(str(y), state_path=str(tmp_path / 's.json'))
+    assert acc.get_ranking_profile('A') == 'ia'
+    assert acc.get_ranking_profile('B') == 'exotic'
+    assert acc.get_ranking_profile('missing') == 'ia'

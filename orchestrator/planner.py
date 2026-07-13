@@ -35,6 +35,14 @@ DEFAULT_STANDARDS_PATH = (
 # NOT a full path optimizer — just a greedy nudge toward the current pointing.
 SLEW_PENALTY = 0.5
 
+# Value-density nudge: a greedy scheduler that ranks purely by score packs
+# fewer total-merit minutes than one that (gently) prefers shorter exposures —
+# classic knapsack. The bonus is bounded (<= 15 points, less than one
+# priority tier) so it reorders near-ties but cannot leapfrog science
+# priority: score += BONUS * min(REF/exposure, 3).
+EXPOSURE_DENSITY_BONUS = 5.0
+EXPOSURE_DENSITY_REF_MIN = 45.0
+
 
 # ---------------------------------------------------------------------------
 # Twilight
@@ -501,6 +509,23 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
     reserved_blocks = []
     unschedulable_mandatory = []
 
+    # Standards are selected UP FRONT so mid-night standards get real reserved
+    # blocks the greedy fill must work around — previously they were floating
+    # anchors and science was scheduled over them. Start/end standards sit in
+    # twilight (before evening / after morning) and consume no dark time.
+    std_start, std_end, std_mid = select_standards(
+        standards_path, evening, morning, config)
+    for smid in (std_mid or []):
+        t_mid = smid.get('time')
+        if t_mid is None:
+            continue
+        half = config.std_block_minutes / 2.0 * u.minute
+        blk_start = max(evening, t_mid - half)
+        blk_end = min(morning, t_mid + half)
+        if blk_end > blk_start:
+            reserved_blocks.append((blk_start, blk_end))
+            smid['start'], smid['end'] = blk_start, blk_end
+
     def _make_entry(t, start, end):
         """Build a ScheduledEntry for ``t`` over [start, end] (used by the
         mandatory reservation pass). Mirrors the greedy loop's exposure split
@@ -637,6 +662,7 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
 
         best = None
         best_score = -np.inf
+        best_ops_min = 0.0
 
         for t in eligible:
             if t.name in scheduled_names:
@@ -645,7 +671,17 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             exp_min = t.exposure_minutes
             if not math.isfinite(exp_min):
                 exp_min = config.fallback_exposure_minutes
-            dur = (exp_min + config.overhead_minutes) * u.minute
+
+            # Per-target operations time: acquisition buffer + slew from the
+            # previous pointing (wide-sky plans jump across the hemisphere;
+            # the clustered-DDF negligible-slew assumption no longer holds).
+            slew_min = 0.0
+            sep_deg = 0.0
+            if prev_coord is not None:
+                sep_deg = prev_coord.separation(t.coord).deg
+                slew_min = sep_deg / config.slew_rate_deg_per_min
+            ops_min = config.acquisition_buffer_minutes + slew_min
+            dur = (exp_min + config.overhead_minutes + ops_min) * u.minute
 
             # Check target is observable now
             if t.window_start is None or t.window_end is None:
@@ -664,28 +700,30 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             if am > config.max_airmass:
                 continue
 
-            # Slew penalty: angular separation from the previously-placed
-            # target. The 1-min overhead excludes slew, so this term
-            # compensates (modest, tie-breaks only — see SLEW_PENALTY).
-            slew_pen = 0.0
-            if prev_coord is not None:
-                sep_deg = prev_coord.separation(t.coord).deg
-                slew_pen = sep_deg * SLEW_PENALTY
+            # Slew score penalty (tie-breaker; the slew TIME is charged in
+            # ops_min above).
+            slew_pen = sep_deg * SLEW_PENALTY
+
+            # Value density: gently prefer targets that deliver their science
+            # in less time (bounded; cannot leapfrog a priority tier).
+            density = EXPOSURE_DENSITY_BONUS * min(
+                EXPOSURE_DENSITY_REF_MIN / max(exp_min, 1.0), 3.0)
 
             # Score: use prioritizer if available, else priority-based
             if prioritizer_scores and t.name in prioritizer_scores:
-                score = prioritizer_scores[t.name] - am * 10 - slew_pen
+                score = prioritizer_scores[t.name] - am * 10 - slew_pen + density
             else:
-                score = (5 - t.priority) * 100 - am * 10 - slew_pen
+                score = (5 - t.priority) * 100 - am * 10 - slew_pen + density
             if score > best_score:
                 best_score = score
                 best = t
+                best_ops_min = ops_min
 
         if best is not None:
             exp_min = best.exposure_minutes
             if not math.isfinite(exp_min):
                 exp_min = config.fallback_exposure_minutes
-            dur = (exp_min + config.overhead_minutes) * u.minute
+            dur = (exp_min + config.overhead_minutes + best_ops_min) * u.minute
 
             # Gap fill: check if next target's window_start leaves a small gap
             next_ws = None
@@ -717,7 +755,8 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             # Calculate exposure parameters
             # Split total into sub-exposures of at most max_single_exposure_sec
             # each (CR mitigation), per-frame rounded to exposure_round_sec.
-            total_exp_min = dur.to(u.minute).value - config.overhead_minutes
+            total_exp_min = (dur.to(u.minute).value
+                             - config.overhead_minutes - best_ops_min)
             total_exp_sec = int(total_exp_min * 60)
             max_single_sec = config.max_single_exposure_sec
             n_exp = max(1, math.ceil(total_exp_sec / max_single_sec))
@@ -843,12 +882,9 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                               required_seconds=required_seconds,
                               phase=bucket, program=t.program)
 
-    # 6. Select standard stars (start, end, and mid-night on long nights).
-    # Standards are calibration overhead: like the existing start/end ones,
-    # they are recorded on the plan but NOT billed to any science PROGRAM
-    # budget via the accountant. Mid standards follow the same convention.
-    std_start, std_end, std_mid = select_standards(
-        standards_path, evening, morning, config)
+    # 6. Standards were selected up front (step before the reservation pass)
+    # so their mid-night blocks are reserved; they remain calibration
+    # overhead, recorded on the plan but never billed to a science budget.
 
     # 7. Build and return ObsPlan
     # Record which scoring path ran (R18) and gather per-target breakdowns

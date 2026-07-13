@@ -20,6 +20,15 @@ class LLAMASConfig:
 
     # LLAMAS instrument
     overhead_minutes: float = 1.0        # IFU advantage — no slit alignment
+    # Per-target operations time beyond the IFU overhead: acquisition/guiding
+    # setup, plus slew charged from the previous pointing. The 1-min overhead
+    # assumption was justified for CLUSTERED DDF targets; wide-sky plans slew
+    # across the whole hemisphere, so slew must be modeled (2026-07 review).
+    acquisition_buffer_minutes: float = 2.0
+    slew_rate_deg_per_min: float = 60.0  # ~1 deg/s incl. settle, coarse model
+    # Wall-clock block reserved for each MID-NIGHT standard (2x30s + acquire).
+    # Start/end standards live in twilight and consume no dark time.
+    std_block_minutes: float = 6.0
     max_airmass: float = 1.6
     gap_fill_max_minutes: float = 5.0
 

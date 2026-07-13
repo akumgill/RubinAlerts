@@ -54,6 +54,7 @@ class TimeAccountant:
                 }),
                 used_hours={'dark': 0.0, 'grey': 0.0, 'bright': 0.0},
                 phase_preference=prog.get('phase_preference', 'peak'),
+                ranking_profile=prog.get('ranking_profile', 'ia'),
             )
             allocations[alloc.program] = alloc
 
@@ -219,6 +220,12 @@ class TimeAccountant:
         elif frac > 0.0:
             return 0.5
         return 0.1
+
+    def get_ranking_profile(self, program: str) -> str:
+        """The program's configured ranking profile ('ia' default)."""
+        if program in self.allocations:
+            return getattr(self.allocations[program], 'ranking_profile', 'ia') or 'ia'
+        return 'ia'
 
     def get_phase_preference(self, program: str) -> str:
         """Light-curve phase the program wants its SNe at.

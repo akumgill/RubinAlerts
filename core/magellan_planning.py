@@ -12,6 +12,7 @@ Includes:
 """
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Tuple, Dict
 
@@ -318,13 +319,61 @@ def compute_merit(delta_t, peak_mag,
     return merit
 
 
+@dataclass
+class RankingProfile:
+    """Per-program merit configuration.
+
+    Different science programs want different rankings over the SAME
+    candidate list (PI requirement, 2026-07-13). A profile parameterizes the
+    program-specific factors of the merit; survey-physics factors
+    (magnitude window, extinction, moon, broker coverage, SN-ness
+    probability) are shared by construction.
+
+    ``ia_evidence_mode``:
+      'prefer' — positive Ia evidence boosts (w = 0.8 + 0.4*e); the Ia
+                 program's setting.
+      'avoid'  — positive Ia evidence demotes (w = 0.8 + 0.4*(1-e)): a
+                 spectroscopically confirmed Ia is exactly what an
+                 exotic-transients program does not want to spend time on.
+      'off'    — neutral (1.0).
+    """
+    name: str = 'ia'
+    tau: float = 10.0            # phase width (days)
+    dt_pref: float = 0.0         # preferred days-from-peak (<0 = rising)
+    ia_evidence_mode: str = 'prefer'
+    host_weights: dict = field(default_factory=lambda: dict(HOST_MORPHOLOGY_WEIGHTS))
+    use_absmag: bool = True      # M_B ~ -19.3 standard-candle consistency
+    use_salt: bool = True        # SALT2 Ia-template fit-quality factor
+
+
+# The Ia program's profile IS the historical merit — defaults match exactly.
+IA_PROFILE = RankingProfile(name='ia')
+
+# Dummy exotic-transients profile — STRAWMAN values for the exotic-science
+# group to tune (rising-phase preference matches the orchestrator's -7 d;
+# star-forming hosts host CSM/SLSN/SESNe; Ia-specific standard-candle and
+# template-consistency factors are meaningless for non-Ia science; confirmed
+# Ia are actively avoided). A future refinement could INVERT w_salt — a bad
+# Ia-template fit is weak evidence FOR exotic.
+EXOTIC_PROFILE = RankingProfile(
+    name='exotic',
+    dt_pref=-7.0,
+    ia_evidence_mode='avoid',
+    host_weights={'elliptical': 0.6, 'spiral': 1.0, 'unknown': 0.8},
+    use_absmag=False,
+    use_salt=False,
+)
+
+RANKING_PROFILES = {'ia': IA_PROFILE, 'exotic': EXOTIC_PROFILE}
+
+
 def compute_merit_breakdown(delta_t, peak_mag,
                             ia_prob=None, host_morphology=None,
                             extinction_ebv=None, num_brokers=None,
                             max_possible_brokers=None,
                             moon_penalty=None,
                             salt_chi2_dof=None, absolute_mag=None,
-                            ia_evidence=None,
+                            ia_evidence=None, profile=None,
                             tau=10.0, mag_optimal=20.5,
                             mag_bright=18.0, mag_faint=23.0):
     """Compute merit score and return individual component weights.
@@ -362,7 +411,17 @@ def compute_merit_breakdown(delta_t, peak_mag,
     delta_t = np.asarray(delta_t, dtype=float)
     peak_mag = np.asarray(peak_mag, dtype=float)
 
-    w_time = np.exp(-delta_t**2 / (2.0 * tau**2))
+    # Per-program profile: phase center/width, host preference, and the
+    # Ia-specific factor toggles. profile=None == IA_PROFILE == the
+    # historical merit (defaults identical).
+    dt_pref = 0.0
+    host_w = HOST_MORPHOLOGY_WEIGHTS
+    if profile is not None:
+        tau = profile.tau
+        dt_pref = profile.dt_pref
+        host_w = profile.host_weights
+
+    w_time = np.exp(-(delta_t - dt_pref)**2 / (2.0 * tau**2))
     w_mag = _mag_weight(peak_mag)
 
     # Initialize all weights to 1.0
@@ -381,13 +440,13 @@ def compute_merit_breakdown(delta_t, peak_mag,
 
     if host_morphology is not None:
         if isinstance(host_morphology, str):
-            w_host = np.full_like(delta_t, HOST_MORPHOLOGY_WEIGHTS.get(host_morphology, 0.7))
+            w_host = np.full_like(delta_t, host_w.get(host_morphology, 0.7))
         elif np.ndim(host_morphology) == 0:
             # Scalar non-string (e.g., nan or single value)
-            w_host = np.full_like(delta_t, HOST_MORPHOLOGY_WEIGHTS.get(str(host_morphology), 0.7))
+            w_host = np.full_like(delta_t, host_w.get(str(host_morphology), 0.7))
         else:
             # Array of morphology strings
-            w_host = np.array([HOST_MORPHOLOGY_WEIGHTS.get(str(m), 0.7)
+            w_host = np.array([host_w.get(str(m), 0.7)
                               for m in host_morphology], dtype=float)
 
     if extinction_ebv is not None:
@@ -405,7 +464,11 @@ def compute_merit_breakdown(delta_t, peak_mag,
         w_moon = np.clip(moon_penalty, 0.3, 1.0)
         w_moon = np.where(np.isfinite(moon_penalty), w_moon, 1.0)
 
-    if salt_chi2_dof is not None:
+    use_salt_f = profile.use_salt if profile is not None else True
+    use_absmag_f = profile.use_absmag if profile is not None else True
+    ia_mode = profile.ia_evidence_mode if profile is not None else 'prefer'
+
+    if salt_chi2_dof is not None and use_salt_f:
         salt_chi2_dof = np.asarray(salt_chi2_dof, dtype=float)
         # chi2/dof < 1.5 is excellent (bonus), 1.5-3 is acceptable (neutral),
         # > 3 is poor fit (penalty)
@@ -413,7 +476,7 @@ def compute_merit_breakdown(delta_t, peak_mag,
         w_salt = np.clip(w_salt, 0.5, 1.2)
         w_salt = np.where(np.isfinite(salt_chi2_dof), w_salt, 1.0)
 
-    if absolute_mag is not None:
+    if absolute_mag is not None and use_absmag_f:
         absolute_mag = np.asarray(absolute_mag, dtype=float)
         # SNe Ia have M_B ~ -19.3. Gaussian penalty for deviations.
         M_Ia = -19.3
@@ -423,11 +486,15 @@ def compute_merit_breakdown(delta_t, peak_mag,
         w_absmag = np.where(np.isfinite(absolute_mag), w_absmag, 1.0)
 
     w_iaspec = np.ones_like(delta_t)
-    if ia_evidence is not None:
+    if ia_evidence is not None and ia_mode != 'off':
         ia_evidence = np.asarray(ia_evidence, dtype=float)
-        # Preference, not a filter: known non-Ia 0.8, spectro-Ia 1.2,
-        # no Ia-specific information -> neutral 1.0.
-        w_iaspec = 0.8 + 0.4 * np.clip(ia_evidence, 0.0, 1.0)
+        # Preference, not a filter. 'prefer' (Ia program): known non-Ia 0.8,
+        # spectro-Ia 1.2. 'avoid' (exotic program): mirrored — a confirmed Ia
+        # is what that program does NOT want. No information -> neutral 1.0.
+        e = np.clip(ia_evidence, 0.0, 1.0)
+        if ia_mode == 'avoid':
+            e = 1.0 - e
+        w_iaspec = 0.8 + 0.4 * e
         w_iaspec = np.where(np.isfinite(ia_evidence), w_iaspec, 1.0)
 
     merit = (w_time * w_mag * w_prob * w_host * w_ext * w_broker * w_moon

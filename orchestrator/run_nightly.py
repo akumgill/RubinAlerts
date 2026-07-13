@@ -183,6 +183,8 @@ def run_nightly(date: str,
         targets = load_from_rubinalerts(
             candidates_path,
             default_program=accountant.default_program,
+            program_profiles={p: accountant.get_ranking_profile(p)
+                              for p in accountant.allocations},
         )
     else:
         try:

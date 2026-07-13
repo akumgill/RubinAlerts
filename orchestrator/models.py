@@ -123,6 +123,12 @@ class ProgramAllocation:
     # flash spectroscopy, early ejecta). Maps to a preferred delta_t offset via
     # LLAMASConfig.phase_preference_offsets in the prioritizer.
     phase_preference: str = 'peak'
+    # Which RankingProfile scores this program's targets ('ia' or 'exotic';
+    # see core.magellan_planning.RANKING_PROFILES). Selects the
+    # merit_<profile> column from candidates.csv and scopes the P1-P4
+    # quartiles to the program's own cohort -- a 50/50 budget split only
+    # binds when each program ranks by its own science.
+    ranking_profile: str = 'ia'
 
     @property
     def remaining_hours(self) -> float:

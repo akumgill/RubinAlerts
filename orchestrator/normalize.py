@@ -371,7 +371,8 @@ def load_targets_csv(path: str, night_mjd: float = float('nan'),
 
 
 def load_from_rubinalerts(path: str, max_targets: int = 30,
-                          default_program: str = 'default') -> list:
+                          default_program: str = 'default',
+                          program_profiles: dict = None) -> list:
     """Load targets from the RubinAlerts pipeline candidates.csv.
 
     Maps merit_score to priority via quartiles:
@@ -385,6 +386,13 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
         Maximum number of targets to return.
     default_program : str
         Program to assign targets to (from allocations.yaml default_program).
+    program_profiles : dict, optional
+        {program_name: ranking_profile_name} from allocations.yaml. When a
+        target's program uses a non-'ia' profile and the candidates CSV
+        carries the matching merit_<profile> column, that merit ranks the
+        target, and P1-P4 quartiles are computed WITHIN each program's own
+        cohort — each program ranks by its own science, so a budget split
+        actually binds.
 
     Returns
     -------
@@ -414,31 +422,47 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
     # weaker than a P4 on a richer night. (R8; the summary header repeats this
     # caveat.) Absolute thresholds were deliberately deferred by the architect.
     merit_col = 'merit' if 'merit' in df.columns else 'merit_score'
+    # Per-target ranking merit: the program's own profile column when
+    # configured and present, else the shared (Ia) merit.
     if merit_col in df.columns:
-        n = len(df)
+        df['_rank_merit'] = df[merit_col]
+        if program_profiles and 'program' in df.columns:
+            for prog, prof in program_profiles.items():
+                col = f'merit_{prof}'
+                if prof and prof != 'ia' and col in df.columns:
+                    sel = df['program'].fillna('').astype(str).str.strip() == prog
+                    df.loc[sel, '_rank_merit'] = df.loc[sel, col]
+
+    def _quartile_priority(sub):
+        """P1-P4 within one cohort; <4 targets falls back to sorted rank
+        (quartile bins degenerate) so it cannot collapse every target into
+        one tier."""
+        n = len(sub)
         if n < 4:
-            # Quartile bins degenerate (np.percentile collapses) with <4
-            # targets. Assign P-labels by sorted rank instead so it cannot
-            # crash or collapse every target into one tier: best→P1, etc.
-            order = df[merit_col].rank(method='first', ascending=False)
-            df['_priority'] = order.astype(int).clip(upper=4)
+            order = sub.rank(method='first', ascending=False)
+            return order.astype(int).clip(upper=4)
+        q75, q50, q25 = np.percentile(sub.values, [75, 50, 25])
+        return sub.apply(
+            lambda m: 1 if m >= q75 else 2 if m >= q50 else 3 if m >= q25 else 4)
+
+    if merit_col in df.columns:
+        if program_profiles and 'program' in df.columns:
+            # Quartiles WITHIN each program's cohort: a program's best
+            # targets are its own P1s, whatever the other program's merit
+            # scale looks like.
+            grp_key = df['program'].fillna(default_program).astype(str).str.strip()
+            df['_priority'] = (
+                df.groupby(grp_key)['_rank_merit']
+                  .transform(lambda sub: _quartile_priority(sub)))
         else:
-            q75, q50, q25 = np.percentile(df[merit_col].values, [75, 50, 25])
-            def _priority(m):
-                if m >= q75:
-                    return 1
-                elif m >= q50:
-                    return 2
-                elif m >= q25:
-                    return 3
-                return 4
-            df['_priority'] = df[merit_col].apply(_priority)
+            df['_priority'] = _quartile_priority(df['_rank_merit'])
+        df['_priority'] = df['_priority'].astype(int)
     else:
         df['_priority'] = 3
 
-    # Sort by merit descending, limit to max_targets
+    # Sort by ranking merit descending, limit to max_targets
     if merit_col in df.columns:
-        df = df.sort_values(merit_col, ascending=False)
+        df = df.sort_values('_rank_merit', ascending=False)
     df = df.head(max_targets)
 
     # Resolve name column
@@ -497,7 +521,7 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
             mag=mag_val,
             mag_filter=mag_filt,
             redshift=float(row['redshift']) if 'redshift' in df.columns and pd.notna(row.get('redshift')) else float('nan'),
-            merit_score=float(row[merit_col]) if merit_col in df.columns else float('nan'),
+            merit_score=float(row['_rank_merit']) if '_rank_merit' in df.columns else float('nan'),
             keywords=keywords,
             mandatory=mandatory,
             source='rubinalerts',

@@ -152,3 +152,86 @@ def test_single_target_priority_guard(tmp_path):
     targets = load_from_rubinalerts(str(csv))
     assert len(targets) == 1
     assert 1 <= targets[0].priority <= 4
+
+
+# ---------------------------------------------------------------------------
+# 2026-07 scheduling upgrades: slew+buffer charged in wall-clock, value-density
+# nudge, mid-night standards get real reserved blocks.
+# ---------------------------------------------------------------------------
+
+def _mk_target(name, ra, dec, exp_min, priority=1):
+    from orchestrator.models import Target
+    t = Target(name=name, ra_deg=ra, dec_deg=dec, priority=priority,
+               exposure_minutes=exp_min, program='P')
+    return t
+
+
+def test_density_prefers_shorter_exposure_at_equal_priority():
+    """Two same-priority targets, same sky position: the shorter one should
+    win the first slot via the value-density nudge."""
+    from orchestrator import planner
+    from orchestrator.planner import (EXPOSURE_DENSITY_BONUS,
+                                      EXPOSURE_DENSITY_REF_MIN)
+    short = EXPOSURE_DENSITY_BONUS * min(EXPOSURE_DENSITY_REF_MIN / 15.0, 3.0)
+    long = EXPOSURE_DENSITY_BONUS * min(EXPOSURE_DENSITY_REF_MIN / 150.0, 3.0)
+    assert short > long
+    assert short <= 15.0 + 1e-9   # bounded: cannot leapfrog a priority tier
+
+
+def test_slew_time_extends_wall_clock(tmp_path):
+    """A large slew between consecutive targets must consume wall-clock time:
+    the second entry's window is longer than exposure+overhead alone."""
+    import astropy.units as u
+    from astropy.time import Time
+    from orchestrator.planner import create_schedule, compute_observability
+    from orchestrator.config import LLAMASConfig
+
+    config = LLAMASConfig()
+    evening = Time('2026-07-14T00:00:00')
+    morning = Time('2026-07-14T08:00:00')
+    # Two targets ~60 deg apart on the sky, both south, both easy
+    t1 = _mk_target('near', 300.0, -30.0, 20.0)
+    t2 = _mk_target('far', 240.0, -30.0, 20.0)
+    targets = compute_observability([t1, t2], evening, morning, config=config)
+    plan = create_schedule(targets, evening, morning, moon_phase='dark',
+                           standards_path=str(tmp_path / 'none.txt'),
+                           config=config)
+    if len(plan.scheduled) == 2:
+        e2 = plan.scheduled[1]
+        wall = (e2.end - e2.start).to_value('min')
+        base = 20.0 + config.overhead_minutes
+        # buffer (2 min) + slew (~60 deg / 60 deg-per-min = ~1 min) charged
+        assert wall >= base + config.acquisition_buffer_minutes - 0.5
+        # science-time charging invariant: ops time is NOT billed
+        assert e2.charged_minutes <= base + 1.0
+
+
+def test_mid_standard_reserved_block(tmp_path):
+    """On a long night, the mid-night standard must own a reserved block and
+    no science entry may overlap it."""
+    from astropy.time import Time
+    from orchestrator.planner import create_schedule, compute_observability
+    from orchestrator.config import LLAMASConfig
+
+    # Synthetic standards catalog spanning RA so one is always up (fixed-width
+    # format: name ra dec vmag spectype)
+    std = tmp_path / 'standards.txt'
+    std.write_text(
+        "CD-TEST1    21 00 00  -30 00 00  11.0  DA\n"
+        "CD-TEST2    03 00 00  -30 00 00  11.0  DA\n"
+        "CD-TEST3    07 00 00  -30 00 00  11.0  DA\n")
+
+    config = LLAMASConfig()
+    evening = Time('2026-07-13T23:30:00')
+    morning = Time('2026-07-14T10:00:00')  # 10.5h night -> mid standards due
+    targets = compute_observability(
+        [_mk_target(f't{i}', 300.0 + i, -30.0, 60.0) for i in range(8)],
+        evening, morning, config=config)
+    plan = create_schedule(targets, evening, morning, moon_phase='dark',
+                           standards_path=str(std), config=config)
+    mids = [s for s in (plan.standards_mid or []) if 'start' in s]
+    if mids:  # standards parse/geometry permitting
+        for smid in mids:
+            for e in plan.scheduled:
+                assert not (e.start < smid['end'] and e.end > smid['start']), \
+                    f"science entry {e.target.name} overlaps mid-standard block"

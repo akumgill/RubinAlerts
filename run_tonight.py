@@ -51,7 +51,7 @@ from core.peak_fitting import (
 # (single scheduling authority; see Step 9 in main()).
 from core.magellan_planning import (
     compute_merit, compute_merit_breakdown, filter_observable_targets,
-    radec_to_sexagesimal,
+    radec_to_sexagesimal, EXOTIC_PROFILE,
 )
 from core.ddf_fields import DDF_FIELDS, is_in_ddf, max_possible_brokers
 from core.fink_breaker import (
@@ -1720,6 +1720,22 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
                 absolute_mag=absmag_arg,
                 ia_evidence=ia_evidence,
             )
+            # Per-program ranking: the same candidate scored under the
+            # exotic-transients profile (rising-preferring, Ia-evidence
+            # avoided, Ia-specific factors off). Programs rank the SAME
+            # list differently; see RankingProfile.
+            breakdown_x = compute_merit_breakdown(
+                delta_t, peak_mag,
+                ia_prob=prob_arg,
+                host_morphology=host_morph,
+                extinction_ebv=ext_arg,
+                num_brokers=num_brokers,
+                max_possible_brokers=max_brokers,
+                salt_chi2_dof=salt_arg,
+                absolute_mag=absmag_arg,
+                ia_evidence=ia_evidence,
+                profile=EXOTIC_PROFILE,
+            )
             merit = float(breakdown['merit'])
             w_time = float(breakdown['w_time'])
             w_mag = float(breakdown['w_mag'])
@@ -1806,6 +1822,8 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
             'ia_evidence': ia_evidence,
             'prob_source': cand.get('prob_source', 'ml'),
             'needs_classification': bool(cand.get('needs_classification', False)),
+            # Same candidate under the exotic-transients ranking profile
+            'merit_exotic': float(breakdown_x['merit']),
             'object_id': did,  # alias for magellan_planning
         })
 
@@ -1992,8 +2010,9 @@ def recompute_merit_with_moon(plan_df):
 
     # Ensure the columns we overwrite are float-typed so in-place assignment
     # of recomputed weights never hits a dtype (int->float) cast error.
-    merit_cols = ['merit', 'w_time', 'w_mag', 'w_prob', 'w_host', 'w_ext',
-                  'w_broker', 'w_moon', 'w_salt', 'w_absmag', 'w_iaspec']
+    merit_cols = ['merit', 'merit_exotic', 'w_time', 'w_mag', 'w_prob',
+                  'w_host', 'w_ext', 'w_broker', 'w_moon', 'w_salt',
+                  'w_absmag', 'w_iaspec']
     for col in merit_cols:
         if col in df.columns:
             df[col] = df[col].astype(float)
@@ -2030,6 +2049,26 @@ def recompute_merit_with_moon(plan_df):
                     'w_broker', 'w_moon', 'w_salt', 'w_absmag', 'w_iaspec'):
             if key in df.columns:
                 df.at[idx, key] = float(breakdown[key])
+        # Exotic-profile merit gets the same moon treatment
+        if 'merit_exotic' in df.columns:
+            breakdown_x = compute_merit_breakdown(
+                delta_t, peak_mag,
+                ia_prob=_arg(row, 'sn_score') if (
+                    pd.notna(row.get('sn_score')) and float(row.get('sn_score', 0)) > 0
+                ) else (_arg(row, 'mean_ia_prob')
+                        if _arg(row, 'mean_ia_prob') is not None
+                        else _arg(row, 'effective_prob')),
+                host_morphology=row.get('host_morphology', 'unknown'),
+                extinction_ebv=_arg(row, 'E_BV'),
+                num_brokers=row.get('num_brokers', 1),
+                max_possible_brokers=row.get('max_possible_brokers'),
+                moon_penalty=moon_pen if np.isfinite(moon_pen) else None,
+                salt_chi2_dof=_arg(row, 'salt_chi2_dof'),
+                absolute_mag=_arg(row, 'absolute_mag'),
+                ia_evidence=_arg(row, 'ia_evidence'),
+                profile=EXOTIC_PROFILE,
+            )
+            df.at[idx, 'merit_exotic'] = float(breakdown_x['merit'])
 
     df = df.sort_values('merit', ascending=False, na_position='last')
     return df.reset_index(drop=True)
@@ -3139,8 +3178,9 @@ def main():
 
     # Propagate the moon-aware merit/breakdown back onto the summary frame so
     # candidates.csv and the PDF report rank/report identically to the plan.
-    moon_cols = ['merit', 'w_time', 'w_mag', 'w_prob', 'w_host', 'w_ext',
-                 'w_broker', 'w_moon', 'w_salt', 'w_absmag', 'w_iaspec',
+    moon_cols = ['merit', 'merit_exotic', 'w_time', 'w_mag', 'w_prob',
+                 'w_host', 'w_ext', 'w_broker', 'w_moon', 'w_salt',
+                 'w_absmag', 'w_iaspec',
                  'moon_penalty', 'moon_separation', 'moon_illumination']
     avail_cols = [c for c in moon_cols if c in plan.columns]
     if avail_cols and 'diaObjectId' in plan.columns:
@@ -3163,6 +3203,9 @@ def main():
                                            / (n_ranked - 1) * 100).clip(0, 100).round(1)
         else:
             summary['merit_percentile'] = np.where(m.notna(), 100.0, np.nan)
+        if 'merit_exotic' in summary.columns:
+            summary['merit_exotic_rank'] = summary['merit_exotic'].rank(
+                ascending=False, method='min', na_option='bottom').astype(int)
 
     # --- Step 7: Generate light curve plots ---
     plot_paths = generate_light_curve_plots(fit_results, lc_dir, summary)

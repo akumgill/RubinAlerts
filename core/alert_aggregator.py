@@ -335,6 +335,18 @@ class AlertAggregator:
                 ztf_oid = alert.get('object_id', '')
                 if ztf_oid:
                     merged['ztf_oid'] = str(ztf_oid)
+                # Class-level ML confidence fallback: wide mode sets the ZTF
+                # frame's sn_ia_prob to NaN for non-Ia classes (its per-class
+                # probability is a Ia probability only for SNIa), but keeps
+                # the raw class probability in sn_score as a selection /
+                # confidence signal. Carry it onto the merged row so a
+                # ZTF-only SNII still has an ML score downstream. Fink's
+                # block above overwrites this whenever a Fink score exists
+                # (order-independent: it sets sn_score unconditionally).
+                if 'sn_score' not in merged:
+                    ztf_score = alert.get('sn_score')
+                    if pd.notna(ztf_score):
+                        merged['sn_score'] = float(ztf_score)
 
         # --- Passthrough columns: reduce over ALL alerts of this object ---
         for col, reducer in PASSTHROUGH_COLUMNS.items():

@@ -637,22 +637,23 @@ def fetch_ztf_wide_candidates(mjd_now, min_prob=0.3, days_back=30,
     bmag = pd.to_numeric(g['brightest_mag'], errors='coerce')
     g = g[bmag <= min(max_mag, hostless_max_mag)]
 
-    # Normalize to the wide-candidate schema
+    # Normalize to the wide-candidate schema (aggregator input)
     g = g.copy()
     g['diaObjectId'] = g['oid'].astype(str)
     g['object_id'] = g['diaObjectId']
+    # sn_score: the raw lc_classifier class probability for ALL classes — a
+    # selection/confidence signal, whatever the class.
     g['sn_score'] = g['probability']
-    g['sn_ia_prob'] = g['probability']
-    g['mean_ia_prob'] = g['probability']
+    # sn_ia_prob: ONLY meaningful as a Ia probability when the classified
+    # class IS SNIa. For other classes the probability says "probably a
+    # SNII", which must never be pooled into mean_ia_prob as if it were
+    # P(Ia) — leave it NaN so the aggregator skips it.
+    g['sn_ia_prob'] = np.where(g['alerce_class'] == 'SNIa',
+                               g['probability'], np.nan)
     g['early_ia_score'] = np.nan
     g['broker'] = 'ALeRCE-ZTF'
-    g['brokers_detected'] = 'ALeRCE-ZTF'
-    g['num_brokers'] = 1
-    g['known_variable'] = False
     g['z_phot'] = np.nan
     g['z_tns'] = np.nan
-    g['z_best'] = np.nan
-    g['z_source'] = 'none'
     g['ddf_field'] = g.apply(
         lambda r: is_in_ddf(r['ra'], r['dec']), axis=1)
 
@@ -662,46 +663,6 @@ def fetch_ztf_wide_candidates(mjd_now, min_prob=0.3, days_back=30,
                 len(g), min_gal_b, min(max_mag, hostless_max_mag),
                 dict(g['alerce_class'].value_counts()))
     return g, status
-
-
-def merge_wide_streams(fink_df, ztf_df, tol_arcsec=2.0):
-    """Merge the Fink and ALeRCE-ZTF wide candidate streams.
-
-    A bright nearby SN is often alerted by BOTH surveys; a coordinate match
-    within ``tol_arcsec`` collapses the pair into the Fink/Rubin row (which
-    carries photo-z and TNS cross-match), credited with both brokers. The
-    lightweight merge here exists because the full cross-broker aggregator
-    predates wide mode and drops the payload selection columns.
-    """
-    if fink_df is None or len(fink_df) == 0:
-        return ztf_df if ztf_df is not None else pd.DataFrame()
-    if ztf_df is None or len(ztf_df) == 0:
-        return fink_df
-
-    from astropy.coordinates import SkyCoord
-    import astropy.units as u
-    fink_sc = SkyCoord(ra=pd.to_numeric(fink_df['ra']).values * u.deg,
-                       dec=pd.to_numeric(fink_df['dec']).values * u.deg)
-    ztf_sc = SkyCoord(ra=pd.to_numeric(ztf_df['ra']).values * u.deg,
-                      dec=pd.to_numeric(ztf_df['dec']).values * u.deg)
-    idx, sep, _ = ztf_sc.match_to_catalog_sky(fink_sc)
-    matched = sep.arcsec <= tol_arcsec
-
-    fink_df = fink_df.copy()
-    for zpos in np.where(matched)[0]:
-        fpos = fink_df.index[idx[zpos]]
-        fink_df.loc[fpos, 'num_brokers'] = 2
-        fink_df.loc[fpos, 'brokers_detected'] = 'ALeRCE-ZTF,Fink'
-        fink_df.loc[fpos, 'ztf_oid'] = ztf_df.iloc[zpos]['diaObjectId']
-        if 'alerce_class' in ztf_df.columns:
-            fink_df.loc[fpos, 'alerce_class'] = ztf_df.iloc[zpos]['alerce_class']
-
-    unmatched = ztf_df.iloc[np.where(~matched)[0]]
-    combined = pd.concat([fink_df, unmatched], ignore_index=True)
-    logger.info("Wide merge: %d Fink + %d ZTF -> %d unique "
-                "(%d seen by both surveys)",
-                len(fink_df), len(ztf_df), len(combined), int(matched.sum()))
-    return combined
 
 
 def format_broker_status_lines(broker_status, prefix=''):
@@ -751,6 +712,102 @@ def write_broker_status(broker_status, night_dir):
     return path
 
 
+def _coalesce_effective_prob(screened, min_prob):
+    """Coalesced effective probability + filter (shared DDF/wide post-merge).
+
+    mean_ia_prob stays ML-only (never polluted by the heuristic proxy). The
+    coalescing chain for the filter is:
+
+      1. mean_ia_prob      — cross-broker pooled ML P(Ia)          -> 'ml'
+      2. sn_score          — single-classifier ML score (Fink SN-vs-other, or
+                             the ALeRCE class probability for non-Ia classes,
+                             whose Ia prob is deliberately NaN). Still ML,
+                             class-level, so a ZTF SNII survives the filter
+                             instead of being wrongly dropped        -> 'ml'
+      3. antares_proxy_prob — capped heuristic; the object survives,
+                             down-ranked, flagged needs_classification so the
+                             observer knows a spectrum is a typing
+                             observation, not a confirmed-Ia follow-up
+                                                          -> 'antares_proxy'
+
+    Critical during the Rubin downtime when ZTF-fed brokers are primary.
+    Returns the frame filtered to effective_prob >= min_prob, with
+    effective_prob / prob_source / needs_classification columns attached.
+    """
+    if 'mean_ia_prob' not in screened.columns:
+        return screened
+    ml = pd.to_numeric(screened['mean_ia_prob'], errors='coerce')
+    score = pd.to_numeric(
+        screened.get('sn_score', pd.Series(np.nan, index=screened.index)),
+        errors='coerce')
+    proxy = pd.to_numeric(
+        screened.get('antares_proxy_prob',
+                     pd.Series(np.nan, index=screened.index)),
+        errors='coerce')
+    screened = screened.copy()
+    screened['effective_prob'] = ml.where(
+        ml.notna(), score.where(score.notna(), proxy))
+    screened['prob_source'] = np.where(
+        ml.notna() | score.notna(), 'ml',
+        np.where(proxy.notna(), 'antares_proxy', 'none'))
+    screened['needs_classification'] = screened['prob_source'] != 'ml'
+    before = len(screened)
+    screened = screened[screened['effective_prob'] >= min_prob].copy()
+    n_proxy = int((screened['prob_source'] == 'antares_proxy').sum())
+    logger.info("After effective P(Ia) >= %.2f: %d (dropped %d; "
+                "%d kept on ANTARES proxy, flagged needs_classification)",
+                min_prob, len(screened), before - len(screened), n_proxy)
+    return screened
+
+
+def _normalize_merged_candidates(screened):
+    """Normalize aggregator output columns for downstream compatibility.
+
+    Shared by the DDF and wide paths. Ensures diaObjectId, sn_score and
+    ddf_field exist — the merged row is built from scratch by the aggregator,
+    so broker-specific ID/field columns must be coalesced back into the
+    pipeline-wide schema.
+    """
+    if len(screened) == 0:
+        return screened
+
+    if 'diaObjectId' not in screened.columns:
+        # Build diaObjectId from available ID columns, preferring Rubin IDs
+        def _get_best_id(row):
+            # Priority: rubin_dia_object_id > object_id_ANTARES > object_id > unique_id > coord-based
+            for col in ['rubin_dia_object_id', 'object_id_ANTARES', 'object_id_Fink',
+                        'object_id_ALeRCE', 'object_id_ALeRCE-ZTF', 'object_id',
+                        'unique_id']:
+                if col in row.index:
+                    val = row.get(col)
+                    if pd.notna(val) and str(val).strip():
+                        return str(val).strip()
+            # Fallback: coordinate-based ID
+            ra, dec = row.get('ra'), row.get('dec')
+            if pd.notna(ra) and pd.notna(dec):
+                return f"coord_{ra:.5f}_{dec:.5f}"
+            return f"obj_{row.name}"
+
+        screened['diaObjectId'] = screened.apply(_get_best_id, axis=1)
+        logger.debug("Created diaObjectId for %d candidates", len(screened))
+
+    if 'sn_score' not in screened.columns:
+        screened['sn_score'] = screened.get('mean_ia_prob', np.nan)
+
+    # ddf_field: the aggregator only carries it for brokers that set it
+    # (ANTARES/ALeRCE blocks), so fill any missing rows from coordinates.
+    if 'ddf_field' not in screened.columns:
+        screened['ddf_field'] = None
+    missing_field = screened['ddf_field'].isna()
+    if missing_field.any():
+        screened.loc[missing_field, 'ddf_field'] = screened.loc[missing_field].apply(
+            lambda r: is_in_ddf(r['ra'], r['dec']) if pd.notna(r.get('ra')) else None,
+            axis=1,
+        )
+
+    return screened
+
+
 def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
                                 sky_mode='ddf', mjd_now=None, wide_kwargs=None,
                                 fink_only=False):
@@ -783,24 +840,20 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
         logger.info("Fink API unavailable — skipping Fink candidate discovery")
         fink_df = pd.DataFrame()
 
-    # --- Wide mode: Fink + live ALeRCE-ZTF, bypassing the DDF-cone brokers ---
-    # The monitor/aggregator path is skipped: ANTARES and ALeRCE-LSST are
-    # still DDF-restricted, and the aggregator drops the payload selection
-    # columns. ZTF is queried directly with the same wide cuts instead.
+    # --- Wide mode: Fink + live ALeRCE-ZTF through the real aggregator ---
+    # ANTARES and ALeRCE-LSST are still DDF-restricted, so they are not
+    # queried here; ZTF is queried directly with the same wide cuts. Since
+    # phase 1 the aggregator carries the payload selection columns
+    # (PASSTHROUGH_COLUMNS), so the cross-broker merge — coordinate dedup
+    # with per-broker bookkeeping (num_brokers, brokers_detected,
+    # object_id_<broker>) and cross-survey agreement stats — replaces the
+    # old lightweight merge_wide_streams.
     if sky_mode == 'wide':
-        if len(fink_df) > 0:
-            fink_df['brokers_detected'] = 'Fink'
-            fink_df['num_brokers'] = 1
-            fink_df['mean_ia_prob'] = fink_df['sn_score']
-            fink_df['known_variable'] = False
-
         wk = wide_kwargs or {}
         ztf_df, ztf_status = fetch_ztf_wide_candidates(
             mjd_now, min_prob=min_prob, days_back=days_back,
             dec_limit=wk.get('dec_limit', WIDE_DEC_LIMIT),
             max_mag=wk.get('max_mag', WIDE_MAX_MAG))
-
-        combined = merge_wide_streams(fink_df, ztf_df)
 
         status = {
             'Fink': {'queried': fink is not None,
@@ -816,6 +869,28 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
                             'n_returned': 0,
                             'error': 'not queried (wide mode; DDF-cone only)'},
         }
+
+        # Cross-broker merge. 2" tolerance matches the old wide merge;
+        # extinction lookup off (network) — wide merit treats E_BV as neutral.
+        # Local import: the aggregator is otherwise only reached through the
+        # optional SupernovaMonitor, and DDF-only runs must not require it.
+        from core.alert_aggregator import AlertAggregator
+        aggregator = AlertAggregator(cache_dir='./cache/data',
+                                     match_tolerance_arcsec=2.0,
+                                     apply_extinction=False)
+        combined = aggregator.merge_alerts({'Fink': fink_df,
+                                            'ALeRCE-ZTF': ztf_df})
+        logger.info("Wide merge: %d Fink + %d ZTF -> %d unique",
+                    len(fink_df), len(ztf_df), len(combined))
+        if len(combined) == 0:
+            return pd.DataFrame(), status
+
+        # NOTE: no monitor.variable_screener here — it needs SupernovaMonitor
+        # and its catalogs only cover the DDFs. Wide mode's variable screens
+        # are the payload cross-matches (select_wide_candidates) and the
+        # SQL-level baseline cut in fetch_ztf_wide_candidates.
+        combined = _coalesce_effective_prob(combined, min_prob)
+        combined = _normalize_merged_candidates(combined)
         return combined, status
 
     # The non-Fink brokers we *intend* to query in multi-broker mode. Used to
@@ -952,59 +1027,12 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
             except Exception as e:
                 logger.warning("Fink classification enrichment failed: %s", e)
 
-    # --- Coalesced effective probability + filter ---
-    # mean_ia_prob stays ML-only (never polluted by the heuristic), but an
-    # ANTARES-only object with NO ML classification anywhere falls back to
-    # the capped proxy instead of being silently discarded: it survives,
-    # down-ranked, flagged needs_classification so the observer knows a
-    # spectrum is a typing observation, not a confirmed-Ia follow-up.
-    # Critical during the Rubin downtime when ZTF-fed brokers are primary.
-    if 'mean_ia_prob' in screened.columns:
-        ml = pd.to_numeric(screened['mean_ia_prob'], errors='coerce')
-        proxy = pd.to_numeric(
-            screened.get('antares_proxy_prob',
-                         pd.Series(np.nan, index=screened.index)),
-            errors='coerce')
-        screened['effective_prob'] = ml.where(ml.notna(), proxy)
-        screened['prob_source'] = np.where(
-            ml.notna(), 'ml', np.where(proxy.notna(), 'antares_proxy', 'none'))
-        screened['needs_classification'] = screened['prob_source'] != 'ml'
-        before = len(screened)
-        screened = screened[screened['effective_prob'] >= min_prob].copy()
-        n_proxy = int((screened['prob_source'] == 'antares_proxy').sum())
-        logger.info("After effective P(Ia) >= %.2f: %d (dropped %d; "
-                    "%d kept on ANTARES proxy, flagged needs_classification)",
-                    min_prob, len(screened), before - len(screened), n_proxy)
+    # --- Coalesced effective probability + filter (shared with wide mode) ---
+    screened = _coalesce_effective_prob(screened, min_prob)
 
     # --- Normalize output columns for downstream compatibility ---
-    # Need: diaObjectId, ra, dec, ddf_field, sn_score
-    if 'diaObjectId' not in screened.columns:
-        # Build diaObjectId from available ID columns, preferring Rubin IDs
-        def _get_best_id(row):
-            # Priority: rubin_dia_object_id > object_id_ANTARES > object_id > unique_id > coord-based
-            for col in ['rubin_dia_object_id', 'object_id_ANTARES', 'object_id_Fink',
-                        'object_id_ALeRCE', 'object_id', 'unique_id']:
-                if col in row.index:
-                    val = row.get(col)
-                    if pd.notna(val) and str(val).strip():
-                        return str(val).strip()
-            # Fallback: coordinate-based ID
-            ra, dec = row.get('ra'), row.get('dec')
-            if pd.notna(ra) and pd.notna(dec):
-                return f"coord_{ra:.5f}_{dec:.5f}"
-            return f"obj_{row.name}"
-
-        screened['diaObjectId'] = screened.apply(_get_best_id, axis=1)
-        logger.debug("Created diaObjectId for %d candidates", len(screened))
-
-    if 'sn_score' not in screened.columns:
-        screened['sn_score'] = screened.get('mean_ia_prob', np.nan)
-
-    if 'ddf_field' not in screened.columns:
-        screened['ddf_field'] = screened.apply(
-            lambda r: is_in_ddf(r['ra'], r['dec']) if pd.notna(r.get('ra')) else None,
-            axis=1,
-        )
+    # Need: diaObjectId, ra, dec, ddf_field, sn_score (shared with wide mode)
+    screened = _normalize_merged_candidates(screened)
 
     logger.info("Final candidates: %d from %s",
                 len(screened),

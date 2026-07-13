@@ -479,6 +479,16 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
         if 'keywords' in df.columns and pd.notna(row.get('keywords')):
             keywords, mandatory = parse_keywords(row.get('keywords'), name)
 
+        # Optional per-target program (classification-based routing — the
+        # alert-target ownership question, operating model (b)): honored when
+        # a 'program' column is present and non-blank; otherwise the default
+        # program owns alert-stream targets (operating model (a)).
+        program = default_program
+        if 'program' in df.columns:
+            pv = row.get('program')
+            if pd.notna(pv) and str(pv).strip():
+                program = str(pv).strip()
+
         t = Target(
             name=name,
             ra_deg=float(row['ra']),
@@ -491,7 +501,7 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
             keywords=keywords,
             mandatory=mandatory,
             source='rubinalerts',
-            program=default_program,
+            program=program,
             phase_weight=phase_w,
             delta_t=delta_t,
         )

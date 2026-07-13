@@ -123,13 +123,15 @@ loop — R17 Baade docstring, R3 state path, R8 quartile docs, etc. See
    agreement stats; TNS xm first-non-null across alerts.
 
 ### NEXT UP
-- **Scheduler reconciliation (one authority per night)** — the pipeline's
-  greedy schedule (time-critical > setting-soon > merit, soft airmass) and
-  the orchestrator (quartile weights, hard airmass<=1.6, standards, budgets)
-  diverge substantially on the same candidate list (2026-07-13: orchestrator
-  kept 8/16 of the pipeline's picks, promoted 7 of its backups). Decide:
-  pipeline ranks, orchestrator schedules — demote the pipeline's
-  observing_schedule.txt to an explicit preview or remove it.
+- ~~**Scheduler reconciliation (one authority per night)**~~ — DONE
+  (2026-07-13): the pipeline RANKS, the orchestrator SCHEDULES.
+  `run_tonight.py` now calls `orchestrator.run_nightly` at the end (Step 9;
+  `--allocations`, `--moon-phase` auto-derived, `--no-orchestrate` to skip)
+  and writes the executable plan to `nights/.../llamas/`. The pipeline's own
+  observing_schedule.txt / magellan_plan.cat / optimized_sequence.csv are
+  retired (generate_observing_schedule kept as deprecated dead code for one
+  release cycle). NOTE: default allocations are the EXAMPLE file — replace
+  with real MAGNETS budgets when agreed.
 - ~~**TNS daily-dump cross-match**~~ — DONE (2026-07-13):
   `fetch_tns_public_objects` + `crossmatch_tns_local` (1 cached download,
   202k objects, internal-name-then-coordinate match); serial cone-search is

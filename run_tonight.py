@@ -7,10 +7,16 @@ Usage:
     python run_tonight.py 61100 --min-prob 0.3 --days-back 30
 
 Creates a night directory (e.g., nights/ut20260301/) containing:
-    - candidates.csv          Summary table of all candidates
-    - magellan_plan.cat       Magellan TCS catalog (RA-ordered)
+    - candidates.csv          Ranked candidate table (the pipeline's product)
+    - llamas/                 Executable LLAMAS plan from the orchestrator —
+                              timeline, TCS catalog, summary, time accounting
+                              (the single scheduling authority)
     - report_{ut_stamp}.pdf   Multi-page PDF with light curves and summary
     - lightcurves/            Per-candidate magnitude plots (PNG)
+
+The pipeline RANKS; the LLAMAS orchestrator SCHEDULES. The pipeline's own
+schedule/catalog/sequence outputs were retired 2026-07 (duplicate scheduling
+implementations with divergent rules).
 """
 
 import argparse
@@ -39,10 +45,13 @@ from core.peak_fitting import (
     AB_ZP_NJY, BAND_PRIORITY, HAS_SNCOSMO,
     load_salt_model, salt_z_policy, choose_best_fit,
 )
+# NOTE: write_magellan_catalog / prioritize_targets /
+# optimize_observing_sequence are no longer imported — the pipeline's own
+# scheduling tail was retired 2026-07 in favor of the LLAMAS orchestrator
+# (single scheduling authority; see Step 9 in main()).
 from core.magellan_planning import (
     compute_merit, compute_merit_breakdown, filter_observable_targets,
-    write_magellan_catalog, radec_to_sexagesimal, prioritize_targets,
-    optimize_observing_sequence,
+    radec_to_sexagesimal,
 )
 from core.ddf_fields import DDF_FIELDS, is_in_ddf, max_possible_brokers
 from core.fink_breaker import (
@@ -1047,6 +1056,11 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
 
 
 ATLAS_BRIGHT_MAG_CUT = 20.0  # Only fetch ATLAS for candidates brighter than this
+
+# Allocations file for the LLAMAS orchestrator (the single scheduling
+# authority; the pipeline itself only ranks). The example file carries
+# ILLUSTRATIVE budgets until MAGNETS agrees real per-PI numbers.
+DEFAULT_ALLOCATIONS = 'ref/allocations_example.yaml'
 
 
 def _atlas_filter_to_nJy(by_filter):
@@ -2473,7 +2487,13 @@ W_absmag — Absolute Magnitude: Gaussian at M_B = −19.3, σ = 0.7
 
 def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path,
                                 broker_status=None, viability_floor=0.01):
-    """Generate a human-readable observing schedule ordered by priority.
+    """DEPRECATED (2026-07): no longer called by the nightly pipeline.
+
+    The pipeline's own greedy schedule was retired in favor of the LLAMAS
+    orchestrator, the single scheduling authority (see main() Step 9). Kept
+    temporarily for reference; remove after one clean release cycle.
+
+    Generate a human-readable observing schedule ordered by priority.
 
     Uses exposure time estimates if available, otherwise assumes 30 min.
     Lists targets in priority order with coordinates, magnitude, merit,
@@ -2741,6 +2761,19 @@ def main():
     parser.add_argument('--no-z-enrich', action='store_true',
                         help='Skip the post-ranking TNS+NED redshift '
                              'enrichment of finalists (wide mode)')
+
+    # Scheduling: the LLAMAS orchestrator is the single scheduling authority
+    parser.add_argument('--allocations', default=DEFAULT_ALLOCATIONS,
+                        help='allocations YAML for the LLAMAS orchestrator '
+                             f'(default: {DEFAULT_ALLOCATIONS} — EXAMPLE budgets)')
+    parser.add_argument('--moon-phase', choices=['dark', 'grey', 'bright'],
+                        default=None,
+                        help='Override the moon phase passed to the '
+                             'orchestrator (default: derived from tonight\'s '
+                             'moon illumination)')
+    parser.add_argument('--no-orchestrate', action='store_true',
+                        help='Stop after candidates.csv; do not generate the '
+                             'LLAMAS observing plan')
     parser.add_argument('--max-phase', type=float, default=25.0,
                         help='Max |days from fitted peak| to keep a candidate '
                              '(default: 25, matched to the tau=10d merit scale)')
@@ -3131,24 +3164,6 @@ def main():
         else:
             summary['merit_percentile'] = np.where(m.notna(), 100.0, np.nan)
 
-    # Prioritize targets by time-criticality, setting time, and merit
-    plan = prioritize_targets(plan)
-    plan = plan.reset_index(drop=True)
-    logger.info("Observing plan: %d targets (priority-ordered)", len(plan))
-
-    # Generate optimized single-night observing sequence (minimizes slew)
-    logger.info("Computing optimized observing sequence...")
-    observing_sequence = optimize_observing_sequence(
-        plan, obs_date,
-        max_targets=min(20, len(plan)),  # Realistic for one night
-        slew_weight=0.4,
-        merit_weight=0.6,
-        exposure_minutes=30,
-    )
-    logger.info("Optimized sequence: %d targets, %.1f deg total slew",
-                len(observing_sequence),
-                observing_sequence['slew_deg'].sum() if len(observing_sequence) > 0 else 0)
-
     # --- Step 7: Generate light curve plots ---
     plot_paths = generate_light_curve_plots(fit_results, lc_dir, summary)
 
@@ -3158,24 +3173,42 @@ def main():
     summary.to_csv(csv_path, index=False)
     logger.info("Candidates CSV: %s", csv_path)
 
-    # Magellan catalog
-    cat_path = os.path.join(night_dir, 'magellan_plan.cat')
-    write_magellan_catalog(
-        plan, cat_path,
-        instrument=args.instrument,
-        obs_date=obs_date,
-    )
+    # --- Step 9: THE schedule — the LLAMAS orchestrator (single authority) ---
+    # The pipeline RANKS; the orchestrator SCHEDULES. The pipeline's own
+    # greedy schedule / TCS catalog / slew-optimized sequence outputs were
+    # retired 2026-07: they re-implemented exposure estimation, observability
+    # and sequencing with rules that diverged from the orchestrator's
+    # (hard airmass limit, quartile weights, standards, time accounting).
+    orch_dir = None
+    if not args.no_orchestrate and len(summary) > 0:
+        try:
+            from orchestrator.run_nightly import run_nightly as orch_run_nightly
+            moon_illum = (summary['moon_illumination'].iloc[0]
+                          if 'moon_illumination' in summary.columns else np.nan)
+            moon_phase = args.moon_phase or (
+                'dark' if (np.isfinite(moon_illum) and moon_illum < 0.25) else
+                'grey' if (np.isfinite(moon_illum) and moon_illum < 0.65) else
+                'bright' if np.isfinite(moon_illum) else 'grey')
+            if args.allocations == DEFAULT_ALLOCATIONS:
+                logger.warning("Using EXAMPLE allocations (%s) — budgets are "
+                               "illustrative until MAGNETS agrees real numbers",
+                               args.allocations)
+            orch_dir = os.path.join(night_dir, 'llamas')
+            orch_run_nightly(date=obs_date, candidates_path=csv_path,
+                             allocations_path=args.allocations,
+                             moon_phase=moon_phase, output_dir=orch_dir)
+            logger.info("LLAMAS plan (scheduling authority): %s", orch_dir)
+        except Exception as e:
+            logger.error("Orchestrator scheduling failed: %s "
+                         "(candidates.csv is still valid; run "
+                         "`python -m orchestrator run-nightly` manually)", e)
+            orch_dir = None
 
-    # Human-readable schedule
-    sched_path = os.path.join(night_dir, 'observing_schedule.txt')
-    generate_observing_schedule(plan, mjd_now, obs_date, sched_path,
-                                broker_status=broker_status)
-
-    # PDF report
+    # PDF report (ranking + light curves; the executable plan lives in llamas/)
     pdf_path = os.path.join(night_dir, f'report_{ut_stamp}.pdf')
     generate_pdf_report(summary, fit_results, plot_paths,
                         pdf_path, mjd_now, obs_date,
-                        observing_sequence=observing_sequence,
+                        observing_sequence=None,
                         broker_status=broker_status)
 
     # --- Done ---
@@ -3183,9 +3216,10 @@ def main():
     logger.info("PIPELINE COMPLETE")
     logger.info("=" * 70)
     logger.info("Night directory: %s", night_dir)
-    logger.info("  candidates.csv         %d candidates", len(summary))
-    logger.info("  magellan_plan.cat      %d targets (priority-ordered)", len(plan))
-    logger.info("  observing_schedule.txt readable schedule")
+    logger.info("  candidates.csv         %d ranked candidates", len(summary))
+    if orch_dir:
+        logger.info("  llamas/                executable LLAMAS plan "
+                    "(timeline, catalog, summary, accounting)")
     logger.info("  report_%s.pdf       summary + light curves", ut_stamp)
     logger.info("  lightcurves/           %d plots", len(plot_paths))
 
@@ -3229,9 +3263,9 @@ def main():
             logger.info("  SALT2 fits: %d successful (%d with chi2/dof < 2)",
                        n_salt_ok, len(good_chi2))
 
-    # Print top 5 by merit
-    if len(plan) > 0:
-        top = plan.sort_values('merit', ascending=False).head(5)
+    # Print top 5 by merit (ranking preview; the schedule lives in llamas/)
+    if len(summary) > 0:
+        top = summary.sort_values('merit', ascending=False).head(5)
         logger.info("\nTop 5 by merit:")
         for _, r in top.iterrows():
             ra_s, dec_s = radec_to_sexagesimal(r['ra'], r['dec'])
@@ -3241,42 +3275,6 @@ def main():
                         r['delta_t'] if np.isfinite(r['delta_t']) else 0,
                         r['merit'] if np.isfinite(r['merit']) else 0,
                         r.get('ddf_field', ''))
-
-    # Print priority-ordered schedule summary
-    if len(plan) > 0:
-        has_exp = 'exposure_minutes' in plan.columns
-        total_exp = plan['exposure_minutes'].sum() / 60 if has_exp else len(plan) * 0.5
-        logger.info("\nPriority-ordered schedule (%d targets, ~%.1f hours):",
-                    len(plan), total_exp)
-        for i, (_, r) in enumerate(plan.iterrows()):
-            ra_s, _ = radec_to_sexagesimal(r['ra'], r['dec'])
-            exp_str = f"{r['exposure_minutes']:.0f}m" if has_exp and np.isfinite(r.get('exposure_minutes', np.nan)) else "30m"
-            opt_ut = r.get('optimal_time_ut', '--') or '--'
-            logger.info("  %2d. %s  RA=%s  mag=%.1f  merit=%.3f  exp=%s  opt=%s",
-                        i + 1, str(r['diaObjectId'])[-12:], ra_s,
-                        r['peak_mag'] if np.isfinite(r['peak_mag']) else 0,
-                        r['merit'] if np.isfinite(r['merit']) else 0,
-                        exp_str, opt_ut)
-
-    # Print optimized observing sequence (slew-minimized)
-    if len(observing_sequence) > 0:
-        total_slew = observing_sequence['slew_deg'].sum()
-        logger.info("\nOptimized single-night sequence (%d targets, %.1f deg total slew):",
-                    len(observing_sequence), total_slew)
-        for _, r in observing_sequence.iterrows():
-            ra_s, _ = radec_to_sexagesimal(r['ra'], r['dec'])
-            logger.info("  %2d. %s  UT=%s  RA=%s  slew=%4.1f°  merit=%.3f",
-                        int(r['obs_order']), str(r['diaObjectId'])[-12:],
-                        r['obs_time_ut'], ra_s,
-                        r['slew_deg'], r['merit'] if np.isfinite(r['merit']) else 0)
-
-        # Save optimized sequence to file
-        seq_path = os.path.join(night_dir, 'optimized_sequence.csv')
-        seq_cols = ['obs_order', 'obs_time_ut', 'diaObjectId', 'ra', 'dec',
-                    'peak_mag', 'merit', 'slew_deg', 'cumulative_time_hr', 'ddf_field']
-        observing_sequence[[c for c in seq_cols if c in observing_sequence.columns]].to_csv(
-            seq_path, index=False)
-        logger.info("Optimized sequence saved: %s", seq_path)
 
 
 if __name__ == '__main__':

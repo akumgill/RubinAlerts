@@ -122,3 +122,30 @@ def test_phase_weight_from_peak_matches_gaussian():
     # Non-finite inputs -> NaN.
     nan = phase_weight_from_peak(float('nan'), night)
     assert nan != nan
+
+
+def test_rubinalerts_program_column_routes_targets(tmp_path):
+    """Classification-based routing: an optional 'program' column on
+    candidates.csv assigns each alert target to its science program;
+    blank/missing falls back to the default program."""
+    import pandas as pd
+    from orchestrator.normalize import load_from_rubinalerts
+
+    df = pd.DataFrame([
+        {'object_id': 'ZTFia', 'ra': 150.0, 'dec': -20.0, 'merit': 0.5,
+         'program': 'MAGNETS-Ia'},
+        {'object_id': 'ZTFslsn', 'ra': 151.0, 'dec': -21.0, 'merit': 0.4,
+         'program': 'MAGNETS-Exotic'},
+        {'object_id': 'DIAnew', 'ra': 152.0, 'dec': -22.0, 'merit': 0.3,
+         'program': ''},
+        {'object_id': 'DIAold', 'ra': 153.0, 'dec': -23.0, 'merit': 0.2,
+         'program': None},
+    ])
+    path = tmp_path / 'candidates.csv'
+    df.to_csv(path, index=False)
+    targets = load_from_rubinalerts(str(path), default_program='MAGNETS-Ia')
+    by_name = {t.name: t.program for t in targets}
+    assert by_name['ZTFia'] == 'MAGNETS-Ia'
+    assert by_name['ZTFslsn'] == 'MAGNETS-Exotic'
+    assert by_name['DIAnew'] == 'MAGNETS-Ia'   # blank -> default
+    assert by_name['DIAold'] == 'MAGNETS-Ia'   # missing -> default

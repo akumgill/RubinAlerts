@@ -37,6 +37,7 @@ from broker_clients.fink_client import FinkLSSTClient
 from core.peak_fitting import (
     fit_parabola, fit_villar_multiband, fit_salt, plot_mag, clean_light_curve,
     AB_ZP_NJY, BAND_PRIORITY, HAS_SNCOSMO,
+    load_salt_model, salt_z_policy, choose_best_fit,
 )
 from core.magellan_planning import (
     compute_merit, compute_merit_breakdown, filter_observable_targets,
@@ -1087,11 +1088,24 @@ def _atlas_filter_to_nJy(by_filter):
     return None
 
 
+def resolve_salt_mode(sky_mode, use_salt_flag, no_salt_flag,
+                      has_sncosmo=HAS_SNCOSMO):
+    """SALT2 default policy (pure, testable).
+
+    SALT is ON by default in wide sky mode (typing matters most there),
+    opt-in via --use-salt in ddf mode, and --no-salt always wins.
+    Requires sncosmo regardless.
+    """
+    want = (use_salt_flag or sky_mode == 'wide') and not no_salt_flag
+    return bool(want and has_sncosmo)
+
+
 def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True,
                   min_snr_points=5, min_bands=2, min_fit_bands=2,
                   prefilter_min_sources=0, use_salt=False, redshifts=None,
                   max_rise_time=30.0, max_phase_days=25.0,
-                  max_baseline_days=150.0):
+                  max_baseline_days=150.0, ebv_lookup=None,
+                  salt_rescue_cap=30):
     """Fetch light curves from all surveys and run peak fitting for each candidate.
 
     Two-pass approach:
@@ -1108,10 +1122,34 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
       prefilter_min_sources: If > 0, batch pre-filter to candidates with at least
                              this many Fink sources (saves API calls). Default 0 (disabled).
       use_salt: If True and sncosmo is available, run SALT2 template fits.
-      redshifts: Dict mapping diaObjectId -> redshift for SALT fitting.
-      max_rise_time: Maximum rise time in days (default 30). SNe Ia rise in ~17-20d.
+      redshifts: Redshift info for SALT fitting keyed by diaObjectId. New style:
+                 {did: {'z': float-or-nan, 'source': 'tns_specz'|'legacy_photz'|'none'}}.
+                 Old style {did: float} is still accepted (treated as an
+                 external spec-z, i.e. fixed in the fit).
+      ebv_lookup: Optional {did: E(B-V)} for the SALT MW-dust component.
+      salt_rescue_cap: Max number of SALT "rescue" fits per run — objects that
+                 FAILED the generic Villar/parabola gate still get a SALT
+                 attempt (in encounter order) up to this cap; a good template
+                 fit rescues them into the results (salt_rescued=True).
+      max_rise_time: Maximum rise time in days (default 30). SNe Ia rise in
+                 ~17-20d. Not applied to SALT-anchored fits (the template
+                 already enforces an Ia rise).
     """
-    redshifts = redshifts or {}
+    # Normalize redshift info to {did: {'z': ..., 'source': ...}}
+    z_info = {}
+    for _did, _v in (redshifts or {}).items():
+        if isinstance(_v, dict):
+            z_info[_did] = {'z': _v.get('z', np.nan),
+                            'source': _v.get('source', 'none')}
+        else:
+            try:
+                _zval = float(_v)
+            except (TypeError, ValueError):
+                _zval = np.nan
+            # Backward compat: a bare float was historically a NED host
+            # spec-z passed as a fixed z — keep that behavior.
+            z_info[_did] = {'z': _zval, 'source': 'tns_specz'}
+    ebv_lookup = ebv_lookup or {}
     dia_ids = candidates_df['diaObjectId'].unique()
     logger.info("Fitting %d candidates...", len(dia_ids))
 
@@ -1305,6 +1343,7 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
 
     # ---- Pass 2: Combine photometry and fit ----
     results = {}
+    n_salt_rescues = 0  # tier-2 SALT attempts spent (capped at salt_rescue_cap)
     for i, did in enumerate(dia_ids):
         logger.info("[%d/%d] Fitting %s", i + 1, len(dia_ids), did)
         ra, dec = coord_lookup.get(did, (np.nan, np.nan))
@@ -1378,41 +1417,56 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
         vil = fit_villar_multiband(combined)
         par = fit_parabola(combined)
 
-        # --- Optional SALT2 template fit ---
+        mjd_min = float(lc_clean['mjd'].min())
+        mjd_max = float(lc_clean['mjd'].max())
+
+        # Would Villar/parabola alone pass the generic gate? Decides whether
+        # a SALT fit is tier 1 (cross-check on a passing object) or tier 2
+        # (a "rescue" attempt on a failing one, subject to salt_rescue_cap).
+        _, generic_method = choose_best_fit(vil, par, None, min_fit_bands,
+                                            mjd_min, mjd_max)
+
+        # --- SALT2 template fit (tier 1 always; tier 2 up to the cap) ---
         salt_result = None
         if use_salt and HAS_SNCOSMO:
-            z = redshifts.get(did)
-            salt_result = fit_salt(combined, model_name='salt2', z=z)
-            if salt_result.get('status') == 'ok':
-                logger.info("  SALT2: x1=%.2f, c=%.2f, chi2/dof=%.1f, z=%.3f",
-                           salt_result.get('x1', np.nan),
-                           salt_result.get('c', np.nan),
-                           salt_result.get('chi2_dof', np.nan),
-                           salt_result.get('z', np.nan))
-
-        # Extract peak info
-        vil_best = vil.get('best')
-        par_best = par.get('best')
-        n_bands_fit = vil.get('n_bands_fit', 0)
-
-        # Require fit to converge in min_fit_bands — quality gate (relax for sparse data)
-        if vil_best and vil_best.get('status') == 'ok' and n_bands_fit >= min_fit_bands:
-            best = vil_best
-            fit_method = 'villar_mb'
-        elif par_best and par_best.get('status') == 'ok':
-            # Accept parabola only if it fit in at least min_fit_bands
-            par_bands_ok = sum(1 for b, info in par.get('per_band', {}).items()
-                               if info.get('status') == 'ok')
-            if par_bands_ok >= min_fit_bands:
-                best = par_best
-                fit_method = 'parabola'
+            is_rescue = (generic_method == 'none')
+            if is_rescue and n_salt_rescues >= salt_rescue_cap:
+                logger.debug("  SALT rescue cap (%d) reached — not attempting",
+                             salt_rescue_cap)
             else:
-                logger.warning("  Fits failed: Villar %s (%d bands), parabola %d bands ok",
-                              vil_best.get('status', 'none') if vil_best else 'none',
-                              n_bands_fit, par_bands_ok)
-                continue
-        else:
-            logger.warning("  No acceptable multiband fit — skipping")
+                if is_rescue:
+                    n_salt_rescues += 1
+                zi = z_info.get(did) or {}
+                z_fixed, z_bounds = salt_z_policy(zi.get('z', np.nan),
+                                                  zi.get('source'))
+                salt_result = fit_salt(combined, model_name='salt2-extended',
+                                       z=z_fixed, z_bounds=z_bounds,
+                                       mwebv=ebv_lookup.get(did))
+                if salt_result.get('status') == 'ok':
+                    logger.info("  SALT2: x1=%.2f, c=%.2f, chi2/dof=%.1f, "
+                                "z=%.3f%s, t0_err=%.1fd",
+                                salt_result.get('x1', np.nan),
+                                salt_result.get('c', np.nan),
+                                salt_result.get('chi2_dof', np.nan),
+                                salt_result.get('z', np.nan),
+                                ' (railed)' if salt_result.get('z_railed')
+                                else '',
+                                salt_result.get('t0_err', np.nan))
+
+        # --- Final decision: SALT (if trustworthy) > Villar > parabola ---
+        best, fit_method = choose_best_fit(vil, par, salt_result,
+                                           min_fit_bands, mjd_min, mjd_max)
+        salt_rescued = (fit_method == 'salt' and generic_method == 'none')
+        if best is None:
+            vil_best = vil.get('best')
+            par_bands_ok = sum(1 for info in par.get('per_band', {}).values()
+                               if info.get('status') == 'ok')
+            logger.warning("  No acceptable fit (Villar %s in %d bands, "
+                           "parabola %d bands ok, SALT %s) — skipping",
+                           vil_best.get('status', 'none') if vil_best else 'none',
+                           vil.get('n_bands_fit', 0), par_bands_ok,
+                           salt_result.get('status', 'not_run')
+                           if salt_result else 'not_run')
             continue
 
         peak_mag = best.get('peak_mag', np.nan)
@@ -1450,9 +1504,11 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
             if np.isfinite(first_mjd) and np.isfinite(peak_mjd):
                 rise_time = peak_mjd - first_mjd
 
-        # Rise time filter: SNe Ia rise in ~17-20 days, reject slow risers
+        # Rise time filter: SNe Ia rise in ~17-20 days, reject slow risers.
+        # Skipped for SALT-anchored fits — the template already enforces an
+        # Ia rise, and the first-detection proxy is meaningless there.
         MIN_RISE_TIME = 5.0   # days (reject if peak is before first detection)
-        if np.isfinite(rise_time):
+        if fit_method != 'salt' and np.isfinite(rise_time):
             if rise_time > max_rise_time:
                 logger.warning("  Slow riser (%.1f days > %.0f) — likely not SN Ia, skipping",
                               rise_time, max_rise_time)
@@ -1480,6 +1536,7 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
             'delta_t': delta_t,
             'rise_time': rise_time,
             'fit_method': fit_method,
+            'salt_rescued': salt_rescued,
             'n_points': len(lc_clean),
             'n_bands': lc_clean['band'].nunique(),
             'surveys': surveys_present,
@@ -1598,19 +1655,32 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
         ned_name = z_info.get('ned_name', '') if z_info else ''
         ned_sep = z_info.get('separation_arcsec', np.nan) if z_info else np.nan
 
-        # Compute absolute magnitude if we have redshift
-        absolute_mag = np.nan
-        if np.isfinite(peak_mag) and np.isfinite(distmod):
-            absolute_mag = peak_mag - distmod
-
         # Get SALT fit results
         salt = fit.get('salt')
         salt_status = salt.get('status', '') if salt else ''
-        salt_x1 = salt.get('x1', np.nan) if salt and salt.get('status') == 'ok' else np.nan
-        salt_c = salt.get('c', np.nan) if salt and salt.get('status') == 'ok' else np.nan
-        salt_chi2_dof = salt.get('chi2_dof', np.nan) if salt and salt.get('status') == 'ok' else np.nan
-        salt_z = salt.get('z', np.nan) if salt and salt.get('status') == 'ok' else np.nan
-        salt_peak_mag_B = salt.get('peak_mag_B', np.nan) if salt and salt.get('status') == 'ok' else np.nan
+        salt_ok = bool(salt) and salt.get('status') == 'ok'
+        salt_x1 = salt.get('x1', np.nan) if salt_ok else np.nan
+        salt_c = salt.get('c', np.nan) if salt_ok else np.nan
+        salt_chi2_dof = salt.get('chi2_dof', np.nan) if salt_ok else np.nan
+        salt_z = salt.get('z', np.nan) if salt_ok else np.nan
+        salt_peak_mag_B = salt.get('peak_mag_B', np.nan) if salt_ok else np.nan
+        salt_t0 = salt.get('t0', np.nan) if salt_ok else np.nan
+        salt_t0_err = salt.get('t0_err', np.nan) if salt_ok else np.nan
+        salt_z_railed = bool(salt.get('z_railed', False)) if salt_ok else False
+        salt_rescued = bool(fit.get('salt_rescued', False))
+
+        # Compute absolute magnitude if we have redshift. Prefer the SALT
+        # rest-frame B peak — but ONLY when the redshift came from an
+        # external source (TNS spec-z / Legacy photo-z). When SALT floated
+        # z freely, M_B ≈ −19.4 is baked into the template–distance
+        # degeneracy, so using it would be circular.
+        cand_z_source = str(cand.get('z_source', '') or '')
+        absolute_mag = np.nan
+        if (salt_ok and np.isfinite(salt_peak_mag_B) and np.isfinite(distmod)
+                and cand_z_source in ('tns_specz', 'legacy_photz')):
+            absolute_mag = salt_peak_mag_B - distmod
+        elif np.isfinite(peak_mag) and np.isfinite(distmod):
+            absolute_mag = peak_mag - distmod
 
         # Merit score with all factors. Moon penalty is NOT applied here — it
         # depends on the observing night and is folded in after
@@ -1696,6 +1766,10 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
             'salt_chi2_dof': salt_chi2_dof,
             'salt_z': salt_z,
             'salt_peak_mag_B': salt_peak_mag_B,
+            'salt_t0': salt_t0,
+            'salt_t0_err': salt_t0_err,
+            'salt_z_railed': salt_z_railed,
+            'salt_rescued': salt_rescued,
             # Merit breakdown
             'merit': merit,
             'w_time': w_time,
@@ -2484,7 +2558,14 @@ def main():
     parser.add_argument('--fink-only', action='store_true',
                         help='Only query Fink (skip ANTARES/ALeRCE brokers)')
     parser.add_argument('--use-salt', action='store_true',
-                        help='Enable SALT2 template fitting (requires sncosmo)')
+                        help='Enable SALT2 template fitting (requires sncosmo). '
+                             'Default: ON in --sky-mode wide, opt-in in ddf mode')
+    parser.add_argument('--no-salt', action='store_true',
+                        help='Disable SALT2 template fitting (overrides the '
+                             'wide-mode default and --use-salt)')
+    parser.add_argument('--salt-rescue-cap', type=int, default=30,
+                        help='Max SALT rescue fits per run for objects that '
+                             'failed the Villar/parabola gate (default: 30)')
     parser.add_argument('--no-redshift', action='store_true',
                         help='Skip NED redshift queries')
 
@@ -2661,13 +2742,30 @@ def main():
     if args.prefilter_min_sources > 0:
         logger.info("Pre-filter: enabled (min %d Fink sources)", args.prefilter_min_sources)
 
-    # SALT fitting requires redshifts, so query NED first if SALT is requested
-    do_salt = args.use_salt and HAS_SNCOSMO
+    # SALT2 fitting: ON by default in wide mode, opt-in (--use-salt) in ddf
+    # mode, --no-salt always wins. NED redshifts feed SALT, so resolve first.
+    want_salt = (args.use_salt or args.sky_mode == 'wide') and not args.no_salt
+    do_salt = resolve_salt_mode(args.sky_mode, args.use_salt, args.no_salt)
     do_redshift = not args.no_redshift and HAS_NED
-    if args.use_salt and not HAS_SNCOSMO:
-        logger.warning("--use-salt requested but sncosmo not installed — skipping SALT fits")
-    if args.use_salt:
-        logger.info("SALT2 fitting: %s", "enabled" if do_salt else "disabled (sncosmo not available)")
+    if want_salt and not HAS_SNCOSMO:
+        logger.warning("SALT2 fitting requested but sncosmo not installed — skipping SALT fits")
+    if do_salt:
+        # Preflight: constructing the model may trigger a one-time template
+        # download. Do it exactly once here; per-object fits reuse the cache.
+        if load_salt_model() is None:
+            logger.warning("*" * 70)
+            logger.warning("SALT2 model 'salt2-extended' UNAVAILABLE — proceeding "
+                           "with SALT fitting DISABLED. If this machine is "
+                           "offline, pre-warm the cache with "
+                           "`python -c \"import sncosmo; "
+                           "sncosmo.Model(source='salt2-extended')\"` or point "
+                           "SNCOSMO_DATA_DIR at a warmed data directory.")
+            logger.warning("*" * 70)
+            do_salt = False
+    if want_salt:
+        logger.info("SALT2 fitting: %s (rescue cap %d)",
+                    "enabled" if do_salt else "disabled",
+                    args.salt_rescue_cap)
 
     # --- Step 3a: Query NED redshifts (needed for SALT fitting and absolute mag) ---
     redshifts = {}  # did -> {redshift, distmod, ned_name, separation_arcsec}
@@ -2711,9 +2809,32 @@ def main():
     elif not args.no_redshift:
         logger.info("NED redshifts: SKIPPED (ned_query not available)")
 
-    # Build redshift lookup for SALT fitting (just the z values)
-    z_for_salt = {did: info['redshift'] for did, info in redshifts.items()
-                  if info.get('redshift') is not None and info['redshift'] > 0}
+    # Build redshift info for SALT fitting: z + provenance. The provenance
+    # (z_source) decides fixed-z vs bounded free-z via salt_z_policy().
+    zsrc_lookup = {}
+    if 'z_source' in candidates.columns:
+        zsrc_lookup = {d: str(s or '') for d, s in
+                       zip(candidates['diaObjectId'],
+                           candidates['z_source'].fillna(''))}
+    z_info_for_salt = {}
+    for did, info in redshifts.items():
+        zv = info.get('redshift')
+        if zv is None or not np.isfinite(zv) or zv <= 0:
+            continue
+        src = zsrc_lookup.get(did, '')
+        if not src:
+            # DDF mode: z came from a NED host association (spec-z) — fix it.
+            src = 'tns_specz'
+        z_info_for_salt[did] = {'z': float(zv), 'source': src}
+
+    # E(B-V) lookup for the SALT MW-dust component
+    ebv_lookup = {}
+    ebv_col = next((c for c in ('E_BV', 'ebv') if c in candidates.columns), None)
+    if ebv_col is not None:
+        for did, ebv in zip(candidates['diaObjectId'],
+                            pd.to_numeric(candidates[ebv_col], errors='coerce')):
+            if np.isfinite(ebv):
+                ebv_lookup[did] = float(ebv)
 
     fit_results = fetch_and_fit(fink if fink_available else None,
                                 candidates, mjd_now,
@@ -2724,10 +2845,12 @@ def main():
                                 min_fit_bands=args.min_fit_bands,
                                 prefilter_min_sources=args.prefilter_min_sources,
                                 use_salt=do_salt,
-                                redshifts=z_for_salt,
+                                redshifts=z_info_for_salt,
                                 max_rise_time=args.max_rise_time,
                                 max_phase_days=args.max_phase,
-                                max_baseline_days=args.max_baseline)
+                                max_baseline_days=args.max_baseline,
+                                ebv_lookup=ebv_lookup,
+                                salt_rescue_cap=args.salt_rescue_cap)
     if not fit_results:
         logger.error("No successful fits")
         sys.exit(1)

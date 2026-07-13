@@ -13,7 +13,7 @@ psycopg2-binary>=2.9.0
 pyvo>=1.5.0
 jupyter>=1.0.0
 jupyterlab>=4.0.0
-# Optional: sncosmo for SALT2/SALT3 template light curve fitting
-# pip install sncosmo
+# Optional: sncosmo + iminuit for SALT2/SALT3 template light curve fitting
+# pip install sncosmo iminuit
 # Testing
 pytest>=8.0.0

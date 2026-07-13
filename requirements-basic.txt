@@ -14,5 +14,5 @@ astroquery>=0.4.6
 alerce>=2.0.0
 jupyter>=1.0.0
 jupyterlab>=4.0.0
-# Optional: sncosmo for SALT2/SALT3 template light curve fitting
-# pip install sncosmo
+# Optional: sncosmo + iminuit for SALT2/SALT3 template light curve fitting
+# pip install sncosmo iminuit

@@ -123,10 +123,24 @@ loop — R17 Baade docstring, R3 state path, R8 quartile docs, etc. See
    agreement stats; TNS xm first-non-null across alerts.
 
 ### NEXT UP
+- **Scheduler reconciliation (one authority per night)** — the pipeline's
+  greedy schedule (time-critical > setting-soon > merit, soft airmass) and
+  the orchestrator (quartile weights, hard airmass<=1.6, standards, budgets)
+  diverge substantially on the same candidate list (2026-07-13: orchestrator
+  kept 8/16 of the pipeline's picks, promoted 7 of its backups). Decide:
+  pipeline ranks, orchestrator schedules — demote the pipeline's
+  observing_schedule.txt to an explicit preview or remove it.
+- ~~**TNS daily-dump cross-match**~~ — DONE (2026-07-13):
+  `fetch_tns_public_objects` + `crossmatch_tns_local` (1 cached download,
+  202k objects, internal-name-then-coordinate match); serial cone-search is
+  the fallback. Needs bot_id/bot_name in ~/.tns_credentials.
 - **ANTARES wide-sky query mode** — its client is a DDF-cone search; a
   dec-strip/all-sky query would let ANTARES join wide mode (~1 day).
-- **TNS/host-z enrichment for ZTF-stream targets** (currently z-less,
-  kept only if ≤20.5 mag; SALT2 free-z fits mitigate).
+- **Pipeline-side cross-night memory** — feed the orchestrator's target
+  ledger back into nightly ranking (`observed_recently` flag / completeness
+  in merit) so run_tonight doesn't re-rank an observed target #1; epoch
+  cadence policy (per-program, on top of phase buckets) is a science
+  decision for the collaboration.
 - **Absolute cross-night merit thresholds** once statistics accumulate.
 - **S/N-based exposure + w_mag replacement** (TODO(S/N-feasibility) marker).
 

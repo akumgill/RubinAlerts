@@ -333,12 +333,23 @@ def mjd_to_isodate(mjd):
     return t.datetime.strftime('%Y-%m-%d')
 
 
-def fetch_fink_candidates(fink, min_sn_score=0.3, n_fetch=500):
-    """Fetch SN candidates from Fink and format for the multi-broker merger."""
+def fetch_fink_candidates(fink, min_sn_score=0.3, n_fetch=500, sky_mode='ddf'):
+    """Fetch SN candidates from Fink and format for the multi-broker merger.
+
+    In ``wide`` sky mode the bright-transient tag is added and the returned
+    frame carries payload-level selection columns (magnitude, photo-z, TNS
+    cross-match, variable-star/AGN cross-matches) so that
+    ``select_wide_candidates`` can cut cheaply *before* any per-object work.
+    """
     logger.info("Querying Fink LSST API...")
 
+    tags = ['sn_near_galaxy_candidate', 'extragalactic_new_candidate']
+    if sky_mode == 'wide':
+        # Bright extragalactic stream: exactly the wide-mode target population
+        tags.append('extragalactic_lt20mag_candidate')
+
     frames = []
-    for tag in ['sn_near_galaxy_candidate', 'extragalactic_new_candidate']:
+    for tag in tags:
         result = fink.query_sn_candidates(tag=tag, n=n_fetch)
         if result is not None and len(result) > 0:
             result['fink_tag'] = tag
@@ -360,13 +371,51 @@ def fetch_fink_candidates(fink, min_sn_score=0.3, n_fetch=500):
         errors='coerce',
     )
 
-    # Filter by SN score
-    good = raw[raw['sn_score'] >= min_sn_score].copy()
+    # --- Payload-level enrichment (selection inputs; one row per alert) ---
+    def _num(col):
+        return pd.to_numeric(raw.get(col, pd.Series(dtype=float, index=raw.index)),
+                             errors='coerce')
 
-    # Deduplicate by diaObjectId
-    good['diaObjectId'] = good['r:diaObjectId'].astype(str)
-    good = good.sort_values('sn_score', ascending=False)
+    psf = _num('r:psfFlux')  # nJy
+    with np.errstate(invalid='ignore', divide='ignore'):
+        raw['mag_ab'] = 31.4 - 2.5 * np.log10(psf.where(psf > 0))
+    raw['alert_mjd'] = _num('r:midpointMjdTai')
+    raw['z_phot'] = _num('f:xm_legacydr8_zphot')
+    raw['z_tns'] = _num('f:xm_tns_redshift')
+    for src, dst in [('f:xm_tns_fullname', 'tns_name_xm'),
+                     ('f:xm_tns_type', 'tns_type_xm'),
+                     ('f:xm_gcvs_type', 'gcvs_type_xm'),
+                     ('f:xm_vsx_Type', 'vsx_type_xm'),
+                     ('f:xm_simbad_otype', 'simbad_otype_xm'),
+                     ('f:xm_gaiadr3_VarFlag', 'gaia_varflag_xm')]:
+        raw[dst] = raw.get(src, pd.Series('', index=raw.index, dtype=object))
+    raw['gaia_plx'] = _num('f:xm_gaiadr3_Plx')
+    raw['gaia_plx_err'] = _num('f:xm_gaiadr3_e_Plx')
+
+    raw['diaObjectId'] = raw['r:diaObjectId'].astype(str)
+
+    # Per-object aggregates across ALL alerts of the object (pre score filter):
+    # the brightest detection tells us if it is followable; the latest tells
+    # us if it is fresh.
+    grp = raw.groupby('diaObjectId')
+    brightest = grp['mag_ab'].min()
+    latest = grp['alert_mjd'].max()
+    best_score = grp['sn_score'].max()
+    best_early_ia = grp['early_ia_score'].max()
+
+    # Filter by SN score (object passes if ANY of its alerts scored well)
+    raw['_obj_best_score'] = raw['diaObjectId'].map(best_score)
+    good = raw[raw['_obj_best_score'] >= min_sn_score].copy()
+
+    # Deduplicate by diaObjectId, keeping the MOST RECENT alert (freshest
+    # magnitude/state); per-object best scores are re-attached below.
+    good = good.sort_values('alert_mjd', ascending=False)
     good = good.drop_duplicates(subset='diaObjectId', keep='first')
+    good['sn_score'] = good['diaObjectId'].map(best_score)
+    good['early_ia_score'] = good['diaObjectId'].map(best_early_ia)
+    good['brightest_mag'] = good['diaObjectId'].map(brightest)
+    good['last_mjd'] = good['diaObjectId'].map(latest)
+    good = good.drop(columns=['_obj_best_score'])
 
     # Normalize columns for the aggregator
     good['object_id'] = good['diaObjectId']
@@ -383,6 +432,112 @@ def fetch_fink_candidates(fink, min_sn_score=0.3, n_fetch=500):
 
     logger.info("Fink: %d candidates (score >= %.2f)", len(good), min_sn_score)
     return good
+
+
+# Simbad otypes that indicate a persistent nuclear source, not a SN
+_AGN_OTYPE_KEYWORDS = ('qso', 'agn', 'sy1', 'sy2', 'seyfert', 'blazar',
+                       'bl lac', 'bllac', 'liner')
+
+# Wide-mode selection defaults (Stubbs 2026B proposal target space)
+WIDE_DEC_LIMIT = 22.0        # deg; airmass 1.6 at transit from LCO (lat -29.01)
+WIDE_MAX_MAG = 21.5          # proposal: 18.0 <= r <= 21.5
+WIDE_MAX_Z = 0.4             # proposal: 0.1 < z < 0.4
+WIDE_HOSTLESS_MAX_MAG = 20.5 # keep no-redshift objects only if clearly bright
+WIDE_FIT_CAP = 150           # max objects sent to per-object photometry+fit
+
+
+def select_wide_candidates(df, mjd_now, days_back=30,
+                           dec_limit=WIDE_DEC_LIMIT, max_mag=WIDE_MAX_MAG,
+                           max_z=WIDE_MAX_Z,
+                           hostless_max_mag=WIDE_HOSTLESS_MAX_MAG,
+                           fit_cap=WIDE_FIT_CAP):
+    """Payload-level selection for wide (non-DDF-restricted) sky mode.
+
+    Applies the proposal's target-space cuts using columns already present in
+    the Fink alert payload — magnitude (psfFlux), Legacy DR8 photo-z / TNS
+    spec-z, declination, recency, and variable-star/AGN cross-matches — so
+    that expensive per-object photometry fetching and light-curve fitting only
+    runs on objects we could actually follow up. The DDF variable catalogs do
+    not cover the wide sky, so the payload cross-matches (GCVS, VSX, Simbad,
+    Gaia) stand in as the variable screen here.
+
+    Returns the selected frame with ``z_best``/``z_source`` columns, sorted by
+    SN score and capped at ``fit_cap`` rows.
+    """
+    if len(df) == 0:
+        return df
+    n0 = len(df)
+
+    def _blank(col):
+        s = df.get(col, pd.Series('', index=df.index, dtype=object))
+        return s.fillna('').astype(str).str.strip()
+
+    # 1. Magellan-visible declination
+    df = df[pd.to_numeric(df['dec'], errors='coerce') <= dec_limit]
+    n_dec = len(df)
+
+    # 2. Freshness: last alert within days_back (finally makes --days-back
+    #    real for the Fink stream; unknown MJD is kept, not fabricated-fresh)
+    last = pd.to_numeric(df.get('last_mjd', pd.Series(dtype=float, index=df.index)),
+                         errors='coerce')
+    df = df[(last >= mjd_now - days_back) | last.isna()]
+    n_fresh = len(df)
+
+    # 3. Payload variable/AGN screen (wide-sky stand-in for the DDF catalogs)
+    gcvs = _blank('gcvs_type_xm')
+    vsx = _blank('vsx_type_xm')
+    otype = _blank('simbad_otype_xm').str.lower()
+    gaia_var = _blank('gaia_varflag_xm').str.upper()
+    plx = pd.to_numeric(df.get('gaia_plx', pd.Series(dtype=float, index=df.index)),
+                        errors='coerce')
+    plx_err = pd.to_numeric(df.get('gaia_plx_err', pd.Series(dtype=float, index=df.index)),
+                            errors='coerce')
+    is_var_star = (gcvs.reindex(df.index, fill_value='') != '') | \
+                  (vsx.reindex(df.index, fill_value='') != '') | \
+                  (gaia_var.reindex(df.index, fill_value='') == 'VARIABLE')
+    is_agn = otype.reindex(df.index, fill_value='').apply(
+        lambda t: any(k in t for k in _AGN_OTYPE_KEYWORDS)).astype(bool)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        is_star = (plx / plx_err) > 5.0  # significant Gaia parallax
+    is_star = is_star.fillna(False)
+    df = df[~(is_var_star | is_agn | is_star)]
+    n_screen = len(df)
+
+    # 4. Brightness: the object's brightest detection must be followable
+    bmag = pd.to_numeric(df.get('brightest_mag', pd.Series(dtype=float, index=df.index)),
+                         errors='coerce')
+    df = df[bmag <= max_mag]
+    n_bright = len(df)
+
+    # 5. Redshift: TNS spec-z preferred, else Legacy photo-z. Objects with no
+    #    redshift at all are kept only if clearly bright (a nearby SN in a
+    #    faint/uncatalogued host must not be discarded), and flagged.
+    z_tns = pd.to_numeric(df.get('z_tns', pd.Series(dtype=float, index=df.index)),
+                          errors='coerce')
+    z_phot = pd.to_numeric(df.get('z_phot', pd.Series(dtype=float, index=df.index)),
+                           errors='coerce')
+    z_best = z_tns.where(z_tns.notna(), z_phot)
+    df = df.copy()
+    df['z_best'] = z_best
+    df['z_source'] = np.where(z_tns.notna(), 'tns_specz',
+                              np.where(z_phot.notna(), 'legacy_photz', 'none'))
+    bmag = pd.to_numeric(df['brightest_mag'], errors='coerce')
+    keep = (df['z_best'] <= max_z) | (df['z_best'].isna() & (bmag <= hostless_max_mag))
+    df = df[keep]
+    n_z = len(df)
+
+    # 6. Cap for per-object runtime, best ML score first
+    df = df.sort_values('sn_score', ascending=False)
+    dropped = max(0, len(df) - fit_cap)
+    df = df.head(fit_cap)
+
+    logger.info("Wide selection: %d -> dec<=%+.0f: %d -> fresh(%dd): %d -> "
+                "var/AGN screen: %d -> r<=%.1f: %d -> z<=%.1f|hostless<=%.1f: %d"
+                "%s",
+                n0, dec_limit, n_dec, days_back, n_fresh, n_screen,
+                max_mag, n_bright, max_z, hostless_max_mag, n_z,
+                f" -> capped at {fit_cap} (dropped {dropped})" if dropped else "")
+    return df
 
 
 def format_broker_status_lines(broker_status, prefix=''):
@@ -433,6 +588,7 @@ def write_broker_status(broker_status, night_dir):
 
 
 def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
+                                sky_mode='ddf', mjd_now=None, wide_kwargs=None,
                                 fink_only=False):
     """Query all brokers for SN candidates, merge, deduplicate, screen variables.
 
@@ -452,7 +608,13 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
     """
     # --- Query Fink (if available) ---
     if fink is not None:
-        fink_df = fetch_fink_candidates(fink, min_sn_score=min_prob, n_fetch=n_fetch)
+        fink_df = fetch_fink_candidates(fink, min_sn_score=min_prob,
+                                        n_fetch=n_fetch, sky_mode=sky_mode)
+        if sky_mode == 'wide' and len(fink_df) > 0:
+            # Payload-level target-space selection BEFORE any per-object work
+            fink_df = select_wide_candidates(fink_df, mjd_now,
+                                             days_back=days_back,
+                                             **(wide_kwargs or {}))
     else:
         logger.info("Fink API unavailable — skipping Fink candidate discovery")
         fink_df = pd.DataFrame()
@@ -684,7 +846,8 @@ def _atlas_filter_to_nJy(by_filter):
 def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True,
                   min_snr_points=5, min_bands=2, min_fit_bands=2,
                   prefilter_min_sources=0, use_salt=False, redshifts=None,
-                  max_rise_time=30.0):
+                  max_rise_time=30.0, max_phase_days=25.0,
+                  max_baseline_days=150.0):
     """Fetch light curves from all surveys and run peak fitting for each candidate.
 
     Two-pass approach:
@@ -948,6 +1111,21 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
             logger.warning("  Single-epoch event (%.1f day span) — skipping", mjd_span)
             continue
 
+        # Long-baseline check: a SN's significant detections span weeks-months;
+        # a source detected across >max_baseline_days is a long-lived variable
+        # (AGN/QSO) — reject BEFORE spending a fit on it. This generalizes what
+        # the ZTF cross-match catches incidentally for the few objects with
+        # archival ZTF data, and stands in for the DDF-only variable catalogs
+        # in wide sky mode. Uses high-SNR points so a long forced-photometry
+        # (non-detection) baseline does not trigger it.
+        det_span = (high_snr['mjd'].max() - high_snr['mjd'].min()
+                    if len(high_snr) > 1 else 0.0)
+        if det_span > max_baseline_days:
+            logger.warning("  Long-lived source (%.0fd detection baseline > %.0fd)"
+                           " — likely AGN/variable, skipping", det_span,
+                           max_baseline_days)
+            continue
+
         logger.info("  %d pts (%d SNR>5) in %d bands (%.0fd span): %s",
                     len(lc_clean), n_high_snr, n_bands_detected, mjd_span,
                     ', '.join(f"{b}={n}" for b, n in band_counts.items()))
@@ -1006,8 +1184,13 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
         if peak_mag > 26.0:
             logger.warning("  Unphysical peak mag %.1f (>26) — skipping", peak_mag)
             continue
-        if abs(delta_t) > 60:
-            logger.warning("  Peak too far from now (dt=%.0fd, limit 60d) — skipping", delta_t)
+        # Phase gate matched to the merit timescale (w_time, tau=10d): beyond
+        # ~2.5*tau the merit is <~0.05 and the target is spectroscopically
+        # stale anyway. The old +/-60d gate admitted targets whose merit then
+        # rounded to 0.000, filling the plan with unrankable objects.
+        if abs(delta_t) > max_phase_days:
+            logger.warning("  Peak too far from now (dt=%.0fd, limit %.0fd) — skipping",
+                           delta_t, max_phase_days)
             continue
 
         # Compute rise time (explosion to peak)
@@ -1775,13 +1958,19 @@ W_absmag — Absolute Magnitude: Gaussian at M_B = −19.3, σ = 0.7
 
 
 def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path,
-                                broker_status=None):
+                                broker_status=None, viability_floor=0.01):
     """Generate a human-readable observing schedule ordered by priority.
 
     Uses exposure time estimates if available, otherwise assumes 30 min.
     Lists targets in priority order with coordinates, magnitude, merit,
     optimal observing time, and estimated exposure. Includes merit breakdown
     and a per-broker liveness block.
+
+    The schedule is capped to the night: targets are listed as TONIGHT only
+    while cumulative exposure fits within the dark hours; the remainder — and
+    any target below ``viability_floor`` in merit — is listed under BACKUP.
+    If nothing clears the floor, the schedule says so explicitly instead of
+    dressing up unviable targets as a plan.
     """
     if len(plan_df) == 0:
         return
@@ -1789,20 +1978,49 @@ def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path,
     # Use the priority ordering from plan_df (don't re-sort)
     df = plan_df.reset_index(drop=True)
 
+    # Dark hours available tonight (nautical twilight to twilight)
+    dark_hours = None
+    try:
+        from core.magellan_planning import _get_twilight_times
+        evening, morning = _get_twilight_times(obs_date)
+        if evening is not None and morning is not None:
+            dark_hours = float((morning - evening).to_value('hr'))
+    except Exception as e:
+        logger.warning("Twilight calculation failed (%s); schedule not "
+                       "night-capped", e)
+
     # Calculate total observing time from exposure estimates or 30 min default
     has_exp = 'exposure_minutes' in df.columns
     if has_exp:
         exp_vals = df['exposure_minutes'].fillna(30).values
-        total_hours = exp_vals.sum() / 60
     else:
-        total_hours = len(df) * 0.5
+        exp_vals = np.full(len(df), 30.0)
+    total_hours = exp_vals.sum() / 60
+
+    # Partition into TONIGHT (viable + fits in the night) and BACKUP
+    merit_vals = pd.to_numeric(df.get('merit', pd.Series(np.nan, index=df.index)),
+                               errors='coerce').values
+    viable = np.isfinite(merit_vals) & (merit_vals >= viability_floor)
+    tonight_mask = np.zeros(len(df), dtype=bool)
+    cum_hours = 0.0
+    cap_hours = dark_hours if dark_hours is not None else np.inf
+    for i in range(len(df)):
+        if not viable[i]:
+            continue
+        if cum_hours + exp_vals[i] / 60 <= cap_hours:
+            tonight_mask[i] = True
+            cum_hours += exp_vals[i] / 60
+    n_tonight = int(tonight_mask.sum())
 
     # Check for merit breakdown columns
     has_breakdown = all(c in df.columns for c in ['w_time', 'w_mag', 'w_prob'])
 
     lines = []
     lines.append(f'# Magellan Observing Schedule — {obs_date} UT')
-    lines.append(f'# MJD {mjd_now:.1f} | {len(df)} targets | ~{total_hours:.1f} hours total')
+    dark_s = f'{dark_hours:.1f}h dark' if dark_hours is not None else 'dark hours n/a'
+    lines.append(f'# MJD {mjd_now:.1f} | {len(df)} candidates | {dark_s} | '
+                 f'{n_tonight} scheduled tonight (~{cum_hours:.1f}h) | '
+                 f'{len(df) - n_tonight} backup/overflow')
     lines.append(f'# Sorted by priority: time-critical > setting soon > merit')
     lines.append('#')
 
@@ -1811,35 +2029,63 @@ def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path,
         for line in format_broker_status_lines(broker_status, prefix='# '):
             lines.append(line)
         lines.append('#')
-    lines.append(f'# {"#":>3s}  {"Object":20s}  {"RA":>11s}  {"Dec":>10s}  '
-                 f'{"PkMag":>6s}  {"dt":>6s}  {"Merit":>6s}  '
-                 f'{"OptUT":>5s}  {"Exp":>5s}  {"DDF":>8s}')
-    lines.append(f'# {"---":>3s}  {"----":20s}  {"--":>11s}  {"---":>10s}  '
-                 f'{"-----":>6s}  {"--":>6s}  {"-----":>6s}  '
-                 f'{"-----":>5s}  {"---":>5s}  {"---":>8s}')
 
-    for i, (_, row) in enumerate(df.iterrows()):
+    if n_tonight == 0:
+        lines.append('# *** NO VIABLE TARGETS TONIGHT ***')
+        lines.append(f'# No candidate clears the merit floor ({viability_floor}).')
+        lines.append('# Consider standards, manual/ToO targets, or standing down.')
+        lines.append('# All candidates are listed below as BACKUP for reference.')
+        lines.append('#')
+
+    header = (f'# {"#":>3s}  {"Object":20s}  {"RA":>11s}  {"Dec":>10s}  '
+              f'{"PkMag":>6s}  {"dt":>6s}  {"Merit":>6s}  {"Rank":>4s}  '
+              f'{"OptUT":>5s}  {"Exp":>5s}  {"DDF":>8s}')
+    rule = (f'# {"---":>3s}  {"----":20s}  {"--":>11s}  {"---":>10s}  '
+            f'{"-----":>6s}  {"--":>6s}  {"-----":>6s}  {"----":>4s}  '
+            f'{"-----":>5s}  {"---":>5s}  {"---":>8s}')
+
+    def _row_line(i, row):
         ra_s, dec_s = radec_to_sexagesimal(row['ra'], row['dec'])
-
         pmag = f"{row['peak_mag']:.1f}" if np.isfinite(row.get('peak_mag', np.nan)) else '--'
         dt = f"{row['delta_t']:+.0f}d" if np.isfinite(row.get('delta_t', np.nan)) else '--'
         merit = f"{row['merit']:.3f}" if np.isfinite(row.get('merit', np.nan)) else '--'
+        rank = (f"{int(row['merit_rank'])}" if np.isfinite(row.get('merit_rank', np.nan))
+                else '--')
         ddf = str(row.get('ddf_field', '') or '')
         did = str(row['diaObjectId'])[-12:]
-
-        # Optimal observing time
         opt_ut = str(row.get('optimal_time_ut', '--') or '--')
-
-        # Exposure time estimate
         exp_min = row.get('exposure_minutes', np.nan)
         exp_str = f"{exp_min:.0f}m" if np.isfinite(exp_min) else '30m'
+        return (f'  {i:3d}  {did:20s}  {ra_s:>11s}  {dec_s:>10s}  '
+                f'{pmag:>6s}  {dt:>6s}  {merit:>6s}  {rank:>4s}  '
+                f'{opt_ut:>5s}  {exp_str:>5s}  {ddf:>8s}')
 
-        lines.append(f'  {i+1:3d}  {did:20s}  {ra_s:>11s}  {dec_s:>10s}  '
-                     f'{pmag:>6s}  {dt:>6s}  {merit:>6s}  '
-                     f'{opt_ut:>5s}  {exp_str:>5s}  {ddf:>8s}')
+    if n_tonight > 0:
+        lines.append('# === TONIGHT ===')
+        lines.append(header)
+        lines.append(rule)
+        k = 0
+        for i, (_, row) in enumerate(df.iterrows()):
+            if tonight_mask[i]:
+                k += 1
+                lines.append(_row_line(k, row))
+
+    if (~tonight_mask).any():
+        lines.append('#')
+        reason = ('below merit floor or beyond tonight\'s dark hours'
+                  if n_tonight > 0 else 'all below merit floor')
+        lines.append(f'# === BACKUP / OVERFLOW ({reason}) ===')
+        lines.append(header)
+        lines.append(rule)
+        k = 0
+        for i, (_, row) in enumerate(df.iterrows()):
+            if not tonight_mask[i]:
+                k += 1
+                lines.append(_row_line(k, row))
 
     lines.append('#')
-    lines.append(f'# Total estimated observing time: ~{total_hours:.1f} hours')
+    lines.append(f'# Scheduled tonight: ~{cum_hours:.1f}h of {dark_s}; '
+                 f'full candidate list would need ~{total_hours:.1f}h')
 
     # Add moon info if available
     if 'moon_illumination' in df.columns:
@@ -1858,7 +2104,7 @@ def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path,
         else:
             lines.append('# Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker × W_moon')
         lines.append('#   W_time  : exp(-dt²/200)      Gaussian decay from peak (tau=10d)')
-        lines.append('#   W_mag   : exp(-(m-20.5)²/σ²) Optimal mag ~20.5 AB')
+        lines.append('#   W_mag   : soft top-hat       Full weight 18<=m<=21, gentle roll-offs')
         lines.append('#   W_prob  : P(Ia) clipped      ML classifier probability [0.1-1.0]')
         lines.append('#   W_host  : morphology weight  Elliptical=1.0, Spiral=0.6, Unknown=0.7')
         lines.append('#   W_ext   : exp(-E(B-V)/0.15)  Galactic extinction penalty')
@@ -1952,6 +2198,29 @@ def main():
     parser.add_argument('--no-redshift', action='store_true',
                         help='Skip NED redshift queries')
 
+    # Sky mode: 'ddf' = legacy latest-N alert sampling (DDF-cone secondary
+    # brokers); 'wide' = payload-level target-space selection across the whole
+    # Magellan-visible sky (proposal: r<=21.5, z<=0.4, dec<=+22)
+    parser.add_argument('--sky-mode', choices=['ddf', 'wide'], default='ddf',
+                        help='Candidate selection mode (default: ddf)')
+    parser.add_argument('--max-mag', type=float, default=WIDE_MAX_MAG,
+                        help='Wide mode: faint limit on brightest detection '
+                             f'(default: {WIDE_MAX_MAG})')
+    parser.add_argument('--max-z', type=float, default=WIDE_MAX_Z,
+                        help=f'Wide mode: max redshift (default: {WIDE_MAX_Z})')
+    parser.add_argument('--dec-limit', type=float, default=WIDE_DEC_LIMIT,
+                        help='Wide mode: max declination in deg '
+                             f'(default: +{WIDE_DEC_LIMIT}, airmass 1.6 from LCO)')
+    parser.add_argument('--fit-cap', type=int, default=WIDE_FIT_CAP,
+                        help='Wide mode: max objects sent to photometry+fitting '
+                             f'(default: {WIDE_FIT_CAP})')
+    parser.add_argument('--max-phase', type=float, default=25.0,
+                        help='Max |days from fitted peak| to keep a candidate '
+                             '(default: 25, matched to the tau=10d merit scale)')
+    parser.add_argument('--max-baseline', type=float, default=150.0,
+                        help='Reject objects whose high-SNR detections span more '
+                             'days than this (long-lived variable/AGN; default: 150)')
+
     # Quality cuts (relax for sparse early Rubin data)
     parser.add_argument('--min-snr-points', type=int, default=5,
                         help='Min points with SNR>5 (default: 5, try 3 for sparse data)')
@@ -2009,11 +2278,29 @@ def main():
         logger.info("Mode: All brokers (Fink + ANTARES + ALeRCE-ZTF + ALeRCE-LSST)")
     else:
         logger.info("Mode: Non-Fink brokers only (ANTARES + ALeRCE-ZTF + ALeRCE-LSST)")
+    if args.sky_mode == 'wide':
+        logger.info("Sky mode: WIDE (r<=%.1f, z<=%.1f, dec<=%+.0f, fit cap %d)",
+                    args.max_mag, args.max_z, args.dec_limit, args.fit_cap)
+        if not args.fink_only:
+            # The secondary brokers are still DDF-cone-restricted and the
+            # cross-broker aggregator does not carry the payload selection
+            # columns (z_best, brightest_mag, xm_tns_*). Until their wide-sky
+            # selection exists, wide mode is Fink-only by construction.
+            logger.info("Wide mode implies --fink-only for now "
+                        "(ALeRCE/ANTARES wide-sky selection is future work)")
+            args.fink_only = True
     candidates, broker_status = fetch_all_broker_candidates(
         fink if fink_available else None,
         min_prob=args.min_prob,
         days_back=args.days_back,
-        n_fetch=args.max_candidates,
+        # Wide mode needs a deep slice of the whole-sky stream to select from;
+        # the legacy default only skims the latest few hundred alerts.
+        n_fetch=max(args.max_candidates, 2000) if args.sky_mode == 'wide'
+                else args.max_candidates,
+        sky_mode=args.sky_mode,
+        mjd_now=mjd_now,
+        wide_kwargs={'dec_limit': args.dec_limit, 'max_mag': args.max_mag,
+                     'max_z': args.max_z, 'fit_cap': args.fit_cap},
         fink_only=args.fink_only,
     )
 
@@ -2030,6 +2317,24 @@ def main():
 
     # --- Step 2a: TNS cross-match (identify already-reported transients) ---
     do_tns = not args.no_tns if hasattr(args, 'no_tns') else True
+    if do_tns and args.sky_mode == 'wide':
+        # Fink already cross-matches TNS server-side (f:xm_tns_*). Reusing the
+        # payload avoids the standalone client's one-by-one rate-limited
+        # queries (~100/min, 60s penalty sleeps) for identical information.
+        def _xm(col):
+            return candidates.get(col, pd.Series('', index=candidates.index))
+        candidates['tns_name'] = _xm('tns_name_xm')
+        candidates['tns_type'] = _xm('tns_type_xm').replace('', np.nan)
+        candidates['tns_redshift'] = pd.to_numeric(
+            candidates.get('z_tns', pd.Series(dtype=float, index=candidates.index)),
+            errors='coerce')
+        candidates['tns_match'] = (
+            _xm('tns_name_xm').fillna('').astype(str).str.strip() != '')
+        logger.info("TNS via Fink payload: %d/%d already reported, "
+                    "%d spectroscopically classified",
+                    int(candidates['tns_match'].sum()), len(candidates),
+                    int(candidates['tns_type'].notna().sum()))
+        do_tns = False
     if do_tns and HAS_TNS:
         logger.info("TNS cross-match: checking %d candidates...", len(candidates))
         try:
@@ -2082,6 +2387,25 @@ def main():
 
     # --- Step 3a: Query NED redshifts (needed for SALT fitting and absolute mag) ---
     redshifts = {}  # did -> {redshift, distmod, ned_name, separation_arcsec}
+    if args.sky_mode == 'wide' and 'z_best' in candidates.columns:
+        # Wide mode: redshifts come from the Fink payload (TNS spec-z when
+        # available, else Legacy DR8 host photo-z) — no NED nearest-neighbor
+        # guessing, no per-object NED queries.
+        from astropy.cosmology import FlatLambdaCDM
+        _cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
+        for _, row in candidates.iterrows():
+            z = row.get('z_best')
+            if pd.notna(z) and 0.001 < z < 3.0:
+                redshifts[row['diaObjectId']] = {
+                    'redshift': float(z),
+                    'distmod': float(_cosmo.distmod(float(z)).value),
+                    'ned_name': f"payload:{row.get('z_source', 'unknown')}",
+                    'separation_arcsec': np.nan,
+                }
+        logger.info("Payload redshifts: %d/%d candidates have z "
+                    "(TNS spec-z or Legacy photo-z)",
+                    len(redshifts), len(candidates))
+        do_redshift = False
     if do_redshift:
         logger.info("Querying NED for host galaxy redshifts (with caching)...")
         # Use batch function which handles caching
@@ -2117,7 +2441,9 @@ def main():
                                 prefilter_min_sources=args.prefilter_min_sources,
                                 use_salt=do_salt,
                                 redshifts=z_for_salt,
-                                max_rise_time=args.max_rise_time)
+                                max_rise_time=args.max_rise_time,
+                                max_phase_days=args.max_phase,
+                                max_baseline_days=args.max_baseline)
     if not fit_results:
         logger.error("No successful fits")
         sys.exit(1)
@@ -2217,6 +2543,20 @@ def main():
             summary[col] = summary['diaObjectId'].map(moon_lookup[col])
         summary = summary.sort_values('merit', ascending=False, na_position='last')
         summary = summary.reset_index(drop=True)
+
+    # Within-night merit rank/percentile: absolute merit values are products
+    # of many sub-1 factors and hard to read; rank is what the observer acts
+    # on. 1 = best. Percentile is the fraction of tonight's targets this one
+    # beats (100 = best), meaningful only relative to tonight's list.
+    if 'merit' in summary.columns and len(summary) > 0:
+        m = summary['merit']
+        summary['merit_rank'] = m.rank(ascending=False, method='min', na_option='bottom').astype(int)
+        n_ranked = m.notna().sum()
+        if n_ranked > 1:
+            summary['merit_percentile'] = ((n_ranked - summary['merit_rank'])
+                                           / (n_ranked - 1) * 100).clip(0, 100).round(1)
+        else:
+            summary['merit_percentile'] = np.where(m.notna(), 100.0, np.nan)
 
     # Prioritize targets by time-criticality, setting time, and merit
     plan = prioritize_targets(plan)

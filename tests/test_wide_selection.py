@@ -1,0 +1,181 @@
+"""Tests for wide-sky payload-level candidate selection (run_tonight).
+
+Covers select_wide_candidates() cuts (declination, freshness, variable/AGN
+payload screen, brightness, redshift coalescing, fit cap) — all offline on
+synthetic payload frames.
+"""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from run_tonight import (
+    select_wide_candidates,
+    WIDE_DEC_LIMIT, WIDE_MAX_MAG, WIDE_MAX_Z, WIDE_HOSTLESS_MAX_MAG,
+)
+
+MJD_NOW = 61234.0
+
+
+def make_payload(n=1, **overrides):
+    """One good wide-mode candidate per row unless overridden."""
+    base = {
+        'diaObjectId': [f'obj{i}' for i in range(n)],
+        'ra': [150.0] * n,
+        'dec': [-20.0] * n,
+        'sn_score': [0.9] * n,
+        'early_ia_score': [0.5] * n,
+        'brightest_mag': [19.5] * n,
+        'last_mjd': [MJD_NOW - 3.0] * n,
+        'z_tns': [np.nan] * n,
+        'z_phot': [0.2] * n,
+        'tns_name_xm': [''] * n,
+        'tns_type_xm': [''] * n,
+        'gcvs_type_xm': [''] * n,
+        'vsx_type_xm': [''] * n,
+        'simbad_otype_xm': [''] * n,
+        'gaia_varflag_xm': [''] * n,
+        'gaia_plx': [np.nan] * n,
+        'gaia_plx_err': [np.nan] * n,
+    }
+    base.update(overrides)
+    return pd.DataFrame(base)
+
+
+class TestDeclinationCut:
+    def test_magellan_visible_kept(self):
+        df = make_payload(1, dec=[-30.0])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 1
+
+    def test_too_far_north_dropped(self):
+        df = make_payload(1, dec=[WIDE_DEC_LIMIT + 5.0])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 0
+
+    def test_custom_dec_limit(self):
+        df = make_payload(1, dec=[10.0])
+        assert len(select_wide_candidates(df, MJD_NOW, dec_limit=0.0)) == 0
+
+
+class TestFreshnessCut:
+    def test_recent_kept(self):
+        df = make_payload(1, last_mjd=[MJD_NOW - 10.0])
+        assert len(select_wide_candidates(df, MJD_NOW, days_back=30)) == 1
+
+    def test_stale_dropped(self):
+        df = make_payload(1, last_mjd=[MJD_NOW - 100.0])
+        assert len(select_wide_candidates(df, MJD_NOW, days_back=30)) == 0
+
+    def test_unknown_mjd_kept(self):
+        # Unknown recency must not be silently treated as stale
+        df = make_payload(1, last_mjd=[np.nan])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 1
+
+
+class TestVariableAGNScreen:
+    def test_gcvs_variable_dropped(self):
+        df = make_payload(1, gcvs_type_xm=['RRAB'])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 0
+
+    def test_vsx_variable_dropped(self):
+        df = make_payload(1, vsx_type_xm=['EW'])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 0
+
+    def test_simbad_agn_dropped(self):
+        for otype in ['QSO', 'Seyfert_1', 'BLLac']:
+            df = make_payload(1, simbad_otype_xm=[otype])
+            assert len(select_wide_candidates(df, MJD_NOW)) == 0, otype
+
+    def test_simbad_galaxy_kept(self):
+        # A plain galaxy cross-match is a HOST, not a variable source
+        df = make_payload(1, simbad_otype_xm=['Galaxy'])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 1
+
+    def test_gaia_variable_flag_dropped(self):
+        df = make_payload(1, gaia_varflag_xm=['VARIABLE'])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 0
+
+    def test_significant_parallax_dropped(self):
+        df = make_payload(1, gaia_plx=[5.0], gaia_plx_err=[0.5])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 0
+
+    def test_insignificant_parallax_kept(self):
+        df = make_payload(1, gaia_plx=[0.5], gaia_plx_err=[0.5])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 1
+
+
+class TestBrightnessCut:
+    def test_bright_kept(self):
+        df = make_payload(1, brightest_mag=[18.0])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 1
+
+    def test_faint_dropped(self):
+        df = make_payload(1, brightest_mag=[WIDE_MAX_MAG + 1.0])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 0
+
+    def test_no_mag_dropped(self):
+        # Cannot claim followable without a magnitude
+        df = make_payload(1, brightest_mag=[np.nan])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 0
+
+
+class TestRedshiftCoalescing:
+    def test_tns_specz_preferred_over_photz(self):
+        df = make_payload(1, z_tns=[0.1], z_phot=[0.9])
+        out = select_wide_candidates(df, MJD_NOW)
+        assert len(out) == 1
+        assert out['z_best'].iloc[0] == pytest.approx(0.1)
+        assert out['z_source'].iloc[0] == 'tns_specz'
+
+    def test_photz_fallback(self):
+        df = make_payload(1, z_tns=[np.nan], z_phot=[0.3])
+        out = select_wide_candidates(df, MJD_NOW)
+        assert out['z_source'].iloc[0] == 'legacy_photz'
+
+    def test_high_z_dropped(self):
+        df = make_payload(1, z_phot=[WIDE_MAX_Z + 0.3])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 0
+
+    def test_no_z_kept_only_if_bright(self):
+        kept = make_payload(1, z_phot=[np.nan],
+                            brightest_mag=[WIDE_HOSTLESS_MAX_MAG - 0.5])
+        dropped = make_payload(1, z_phot=[np.nan],
+                               brightest_mag=[WIDE_HOSTLESS_MAX_MAG + 0.5])
+        assert len(select_wide_candidates(kept, MJD_NOW)) == 1
+        out = select_wide_candidates(kept, MJD_NOW)
+        assert out['z_source'].iloc[0] == 'none'
+        assert len(select_wide_candidates(dropped, MJD_NOW)) == 0
+
+    def test_high_photz_overridden_by_low_specz(self):
+        # A wrong photo-z must not kill a TNS-confirmed low-z object
+        df = make_payload(1, z_tns=[0.05], z_phot=[1.5])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 1
+
+
+class TestFitCap:
+    def test_cap_keeps_best_scores(self):
+        df = make_payload(10, sn_score=list(np.linspace(0.5, 0.95, 10)))
+        out = select_wide_candidates(df, MJD_NOW, fit_cap=3)
+        assert len(out) == 3
+        assert out['sn_score'].min() >= 0.85
+
+    def test_empty_frame_passthrough(self):
+        df = make_payload(0)
+        out = select_wide_candidates(df, MJD_NOW)
+        assert len(out) == 0
+
+
+class TestCombined:
+    def test_mixed_population(self):
+        """One passing object among assorted rejects."""
+        df = pd.concat([
+            make_payload(1),                                   # good
+            make_payload(1, dec=[40.0]),                       # too north
+            make_payload(1, brightest_mag=[23.0]),             # too faint
+            make_payload(1, z_phot=[0.9]),                     # too distant
+            make_payload(1, simbad_otype_xm=['QSO']),          # AGN
+            make_payload(1, last_mjd=[MJD_NOW - 200.0]),       # stale
+        ], ignore_index=True)
+        df['diaObjectId'] = [f'obj{i}' for i in range(len(df))]
+        out = select_wide_candidates(df, MJD_NOW)
+        assert len(out) == 1
+        assert out['diaObjectId'].iloc[0] == 'obj0'

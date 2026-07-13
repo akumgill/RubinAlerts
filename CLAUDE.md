@@ -24,8 +24,12 @@ Full architecture doc: `docs/design/architecture.md`
 ## Running
 
 ```bash
-# Alert pipeline
+# Alert pipeline — legacy DDF-centric mode
 python run_tonight.py 61101 --min-prob 0.3 --days-back 30
+
+# Alert pipeline — wide sky mode (payload-level selection: r<=21.5, z<=0.4,
+# dec<=+22, fresh, variable/AGN-screened; Fink-only; ~3 min/night)
+python run_tonight.py 61101 --sky-mode wide --output-dir nights/wide
 
 # LLAMAS orchestrator — basic plan
 python -m orchestrator plan --date 2026-10-15 --targets targets.csv --moon grey --output-dir output/
@@ -91,15 +95,32 @@ When making significant changes to RubinAlerts architecture or methods, update t
 
 ## Roadmap / Next Steps
 
-### HIGH PRIORITY
-1. **Fix `orchestrator/config.py` docstring** — says "Magellan/Clay" but LLAMAS is on Magellan/Baade
-2. **Document quartile priority mapping** — merit_score → P1-P4 via quartiles not in architecture.md
-3. **State file path consistency** — `run-nightly` writes to `output_dir/time_accounting.json`, but `reconcile` defaults to `./time_accounting.json`
+(Items 1–6 of the old roadmap were resolved by the June 2026 design-review
+loop — R17 Baade docstring, R3 state path, R8 quartile docs, etc. See
+`docs/design/review-loop-log.md`.)
+
+### HIGH PRIORITY (post wide-sky pivot, July 2026)
+1. **ALeRCE-ZTF wide-sky reuse** — the DB client already queries the full ZTF
+   footprint (~3k candidates) then discards 99.9% via the DDF filter; apply
+   the wide-mode cuts instead. Second survey for the bright/nearby sample and
+   the primary alert source during the August 2026 Rubin downtime.
+2. **ANTARES proxy coalescing** — use its heuristic P(Ia) as a fallback only
+   when no ML score exists (`effective_prob` + `prob_source` column,
+   down-ranked, flagged `needs_classification`). Never average into ML probs.
+3. **Ia-specific probability** — fold `f:clf_earlySNIa_score` / CATS class
+   into w_prob (currently SN-vs-other only); scores are already fetched.
 
 ### MEDIUM PRIORITY
-4. Add weight scaling comments in `prioritizer.py` (explain 100.0/20.0/50.0 constants)
-5. Document sub-exposure splitting (auto-splits at 900s for cosmic ray mitigation)
-6. Expand keyword documentation in architecture.md (list all 12 keywords)
+4. **Rubin RSP/TAP** — verify whether the token grants live Prompt Products;
+   if so, direct DiaObject queries give an owned selection function and a
+   Fink-outage fallback. Currently plumbed but never queried in the run path.
+5. **SALT2-driven phase/typing** — replace parabola/Villar phase estimates
+   with sncosmo SALT2 fits when a redshift exists (`--use-salt` exists but is
+   effectively unused).
+6. **Wide-mode multi-broker** — the aggregator drops payload selection
+   columns (z_best, brightest_mag, xm_tns_*); carry them through so wide mode
+   need not imply --fink-only. Also: per-object TNS xm should take the first
+   non-null across alerts, not the most recent alert's value.
 
 ### PLANNED FEATURES
 7. **Google Sheet integration** — Allow PIs to manually enqueue targets not sourced from alerts (gspread + service account). Design spec exists in `docs/design/spectroscopic-orchestration-review.tex` §"Planned: Google-Sheet manual-request front end".

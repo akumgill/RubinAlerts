@@ -41,6 +41,11 @@ def query_ned_redshift(ra: float, dec: float,
         logger.warning("astroquery.ipac.ned not available")
         return None
 
+    # Bound each query: astroquery's default NED timeout is long enough that
+    # a batch of slow/unresponsive lookups can stall a nightly run for tens
+    # of minutes (observed 2026-07-13). 20 s per object is generous.
+    Ned.TIMEOUT = 20
+
     try:
         coord = SkyCoord(ra=ra, dec=dec, unit=(u.deg, u.deg), frame='fk5')
         radius = radius_arcsec * u.arcsec

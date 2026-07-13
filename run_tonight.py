@@ -2000,6 +2000,9 @@ def generate_observing_schedule(plan_df, mjd_now, obs_date, output_path,
     # Partition into TONIGHT (viable + fits in the night) and BACKUP
     merit_vals = pd.to_numeric(df.get('merit', pd.Series(np.nan, index=df.index)),
                                errors='coerce').values
+    if 'merit_rank' not in df.columns:
+        df['merit_rank'] = pd.Series(merit_vals, index=df.index).rank(
+            ascending=False, method='min', na_option='bottom')
     viable = np.isfinite(merit_vals) & (merit_vals >= viability_floor)
     tonight_mask = np.zeros(len(df), dtype=bool)
     cum_hours = 0.0

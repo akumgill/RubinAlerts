@@ -21,6 +21,72 @@ ANTARES_PROCESSING_TAGS = {'superphot_plus_classified', 'SN_candies'}
 ANTARES_TRANSIENT_TAGS = {'high_amplitude_transient_candidate'}
 
 
+# ---------------------------------------------------------------------------
+# Passthrough column carriage
+#
+# The merged row is built from scratch, so any column not explicitly copied is
+# dropped. Wide-sky mode selects on payload-level columns (magnitudes,
+# photo-z, TNS and variable-star cross-matches) that must survive the merge.
+# Each column gets a REDUCER combining its values across ALL alerts of the
+# merged object — unlike the per-broker loop, which reduces over brokers and
+# takes only the first alert per broker.
+# ---------------------------------------------------------------------------
+
+def _is_blank(v) -> bool:
+    """True for None/NaN/empty-or-whitespace string."""
+    if v is None:
+        return True
+    if isinstance(v, float) and np.isnan(v):
+        return True
+    return isinstance(v, str) and v.strip() == ''
+
+
+def _first_notblank(s: pd.Series):
+    """First non-blank value in the series' given order (None if all blank)."""
+    for v in s:
+        if not _is_blank(v):
+            return v
+    return None
+
+
+def _min_num(s: pd.Series):
+    vals = pd.to_numeric(s, errors='coerce')
+    return None if vals.isna().all() else float(vals.min())
+
+
+def _max_num(s: pd.Series):
+    vals = pd.to_numeric(s, errors='coerce')
+    return None if vals.isna().all() else float(vals.max())
+
+
+def _join_unique(s: pd.Series):
+    """'A|B' union of non-blank strings, order-stable (None if all blank)."""
+    seen = []
+    for v in s:
+        if not _is_blank(v):
+            v = str(v).strip()
+            if v not in seen:
+                seen.append(v)
+    return '|'.join(seen) if seen else None
+
+
+PASSTHROUGH_COLUMNS = {
+    'brightest_mag':    _min_num,        # brightest detection wins
+    'last_mjd':         _max_num,        # freshest detection wins
+    'z_phot':           _first_notblank,
+    'z_tns':            _first_notblank,
+    'tns_name_xm':      _first_notblank,
+    'tns_type_xm':      _first_notblank,
+    'gcvs_type_xm':     _first_notblank,
+    'vsx_type_xm':      _first_notblank,
+    'simbad_otype_xm':  _first_notblank,
+    'gaia_varflag_xm':  _first_notblank,
+    'early_ia_score':   _max_num,        # per-object best, matches fetch side
+    'alerce_class':     _join_unique,    # keep every broker's class tag
+    'fink_tag':         _join_unique,
+}
+
+
 class AlertAggregator:
     """Aggregate and merge alerts from multiple brokers."""
 
@@ -230,16 +296,14 @@ class AlertAggregator:
             merged[f'object_id_{broker}'] = alert.get('object_id')
             merged[f'magnitude_{broker}'] = alert.get('magnitude') or alert.get('brightest_mag')
 
-            # Carry Fink-specific classifier scores (preserved separately from mean_ia_prob)
+            # Carry Fink-specific classifier scores (preserved separately from
+            # mean_ia_prob). early_ia_score is handled by the passthrough
+            # max-reducer below (identical result for a single Fink alert).
             if broker == 'Fink':
                 # sn_score is the primary Fink SN classifier score
                 sn_score = alert.get('sn_score') or alert.get('sn_ia_prob')
                 if pd.notna(sn_score):
                     merged['sn_score'] = float(sn_score)
-                # early_ia_score is Fink's early SN Ia classifier
-                early_score = alert.get('early_ia_score')
-                if pd.notna(early_score):
-                    merged['early_ia_score'] = float(early_score)
                 # Preserve Fink's diaObjectId
                 fink_did = alert.get('diaObjectId') or alert.get('object_id')
                 if pd.notna(fink_did) and str(fink_did).strip():
@@ -257,7 +321,7 @@ class AlertAggregator:
                 if rubin_id:
                     merged['rubin_dia_object_id'] = rubin_id
 
-            if broker in ('ALeRCE', 'ALeRCE-LSST'):
+            if broker in ('ALeRCE', 'ALeRCE-LSST', 'ALeRCE-ZTF'):
                 merged['ddf_field'] = merged.get('ddf_field') or alert.get('ddf_field', '')
 
             if broker == 'ALeRCE-LSST':
@@ -265,6 +329,45 @@ class AlertAggregator:
                 lsst_oid = alert.get('object_id', '')
                 if lsst_oid:
                     merged['rubin_dia_object_id'] = str(lsst_oid)
+
+            if broker == 'ALeRCE-ZTF':
+                # Wide-schema alias for the ZTF object id
+                ztf_oid = alert.get('object_id', '')
+                if ztf_oid:
+                    merged['ztf_oid'] = str(ztf_oid)
+
+        # --- Passthrough columns: reduce over ALL alerts of this object ---
+        for col, reducer in PASSTHROUGH_COLUMNS.items():
+            if col in alert_group.columns:
+                val = reducer(alert_group[col])
+                if val is not None:
+                    merged[col] = val
+
+        # Gaia parallax must stay PAIRED with its error (mixing plx from one
+        # alert with err from another corrupts the significance test), so both
+        # are taken from the first alert whose plx is present.
+        if 'gaia_plx' in alert_group.columns:
+            plx_num = pd.to_numeric(alert_group['gaia_plx'], errors='coerce')
+            if plx_num.notna().any():
+                row = alert_group.loc[plx_num.notna()].iloc[0]
+                merged['gaia_plx'] = float(row['gaia_plx'])
+                err = pd.to_numeric(pd.Series([row.get('gaia_plx_err')]),
+                                    errors='coerce').iloc[0]
+                if pd.notna(err):
+                    merged['gaia_plx_err'] = float(err)
+
+        # Derived redshift columns are recomputed, never passed through:
+        # first-non-null could pair one alert's z_best with another's z_source.
+        z_tns = pd.to_numeric(pd.Series([merged.get('z_tns')]),
+                              errors='coerce').iloc[0]
+        z_phot = pd.to_numeric(pd.Series([merged.get('z_phot')]),
+                               errors='coerce').iloc[0]
+        if pd.notna(z_tns):
+            merged['z_best'], merged['z_source'] = float(z_tns), 'tns_specz'
+        elif pd.notna(z_phot):
+            merged['z_best'], merged['z_source'] = float(z_phot), 'legacy_photz'
+        elif 'z_tns' in alert_group.columns or 'z_phot' in alert_group.columns:
+            merged['z_best'], merged['z_source'] = np.nan, 'none'
 
         # Ensure rubin_dia_object_id exists even if only ALeRCE detected it
         if 'rubin_dia_object_id' not in merged:

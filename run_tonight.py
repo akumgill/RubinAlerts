@@ -415,6 +415,33 @@ def fetch_fink_candidates(fink, min_sn_score=0.3, n_fetch=500, sky_mode='ddf'):
     good['early_ia_score'] = good['diaObjectId'].map(best_early_ia)
     good['brightest_mag'] = good['diaObjectId'].map(brightest)
     good['last_mjd'] = good['diaObjectId'].map(latest)
+
+    # Cross-match columns: an xm hit (TNS report, GCVS/VSX entry, ...) may be
+    # attached to earlier alerts of an object and blank on the freshest one —
+    # the kept (most recent) row must not lose it. Take the most-recent
+    # NON-BLANK value per object instead. Most-recent ordering is the right
+    # tiebreak: TNS xm appears on alerts only after the TNS report exists.
+    raw_recent = raw.sort_values('alert_mjd', ascending=False)
+    grp_recent = raw_recent.groupby('diaObjectId')
+
+    def _first_nonblank(s):
+        for v in s:
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                continue
+            if str(v).strip() != '':
+                return v
+        return ''
+
+    for col in ['tns_name_xm', 'tns_type_xm', 'gcvs_type_xm', 'vsx_type_xm',
+                'simbad_otype_xm', 'gaia_varflag_xm']:
+        good[col] = good['diaObjectId'].map(grp_recent[col].apply(_first_nonblank))
+    # Numeric cross-match values: most-recent finite value per object. (Gaia
+    # plx/err come from the same catalog match, so they stay consistent.)
+    for col in ['z_tns', 'z_phot', 'gaia_plx', 'gaia_plx_err']:
+        first_valid = grp_recent[col].apply(
+            lambda s: s.dropna().iloc[0] if s.notna().any() else np.nan)
+        good[col] = good['diaObjectId'].map(first_valid)
+
     good = good.drop(columns=['_obj_best_score'])
 
     # Normalize columns for the aggregator
@@ -1494,6 +1521,10 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
         # TNS spectroscopic Ia is definitive; ALeRCE lc_classifier gives a
         # per-class prob (SNIa positive, other SN classes explicit non-Ia);
         # Fink earlySNIa applies to young objects. NaN = no info = neutral.
+        # Evidence 0.5 maps to the neutral factor (w_iaspec = 1.0), so any
+        # POSITIVE Ia classification is placed in [0.5, 1] — a predicted Ia
+        # must never rank below an unclassified object, however weak the
+        # classifier confidence (PI requirement: prefer Ia where possible).
         ia_evidence = np.nan
         tns_type = str(cand.get('tns_type') or '')
         alerce_cls = str(cand.get('alerce_class') or '')
@@ -1502,13 +1533,15 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
         if tns_type.startswith('SN Ia'):
             ia_evidence = 1.0
         elif alerce_cls == 'SNIa':
-            ia_evidence = float(pd.to_numeric(
+            p = float(pd.to_numeric(
                 pd.Series([cand.get('mean_ia_prob')]), errors='coerce'
             ).fillna(0.5).iloc[0])
+            ia_evidence = 0.5 + 0.5 * min(max(p, 0.0), 1.0)
         elif alerce_cls in ('SNII', 'SNIbc', 'SLSN'):
             ia_evidence = 0.0  # positively classified non-Ia -> mild demotion
         if pd.notna(early_ia) and early_ia > 0:
-            ia_evidence = np.nanmax([ia_evidence, float(early_ia)])
+            ia_evidence = np.nanmax([ia_evidence,
+                                     0.5 + 0.5 * min(float(early_ia), 1.0)])
 
         # Get host galaxy info (handle both dict and string formats for backwards compat)
         host_data = host_info.get(did, {})

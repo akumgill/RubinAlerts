@@ -272,3 +272,37 @@ class TestCombined:
         out = select_wide_candidates(df, MJD_NOW)
         assert len(out) == 1
         assert out['diaObjectId'].iloc[0] == 'obj0'
+
+
+class TestXmFirstNonBlank:
+    """TNS/xm cross-match must survive dedup even when only an OLDER alert
+    carries it (the kept row is the most recent alert)."""
+
+    def test_tns_from_older_alert_survives(self, monkeypatch):
+        import run_tonight as rt
+
+        # Two alerts of one object: older one has the TNS name, newest blank.
+        payload = pd.DataFrame({
+            'r:diaObjectId': ['obj1', 'obj1'],
+            'r:ra': [150.0, 150.0],
+            'r:dec': [-20.0, -20.0],
+            'r:psfFlux': [10000.0, 8000.0],
+            'r:midpointMjdTai': [61200.0, 61230.0],
+            'f:clf_snnSnVsOthers_score': [0.9, 0.9],
+            'f:clf_earlySNIa_score': [-1.0, -1.0],
+            'f:xm_tns_fullname': ['AT 2026zz', ''],
+            'f:xm_tns_redshift': [0.08, np.nan],
+        })
+
+        class FakeFink:
+            def query_sn_candidates(self, tag, n):
+                return payload.copy() if tag == 'sn_near_galaxy_candidate' else None
+
+        out = rt.fetch_fink_candidates(FakeFink(), min_sn_score=0.3, n_fetch=10)
+        assert len(out) == 1
+        row = out.iloc[0]
+        # Kept row is the most recent alert (mjd 61230)...
+        assert row['alert_mjd'] == pytest.approx(61230.0)
+        # ...but the TNS name and spec-z from the older alert survive.
+        assert row['tns_name_xm'] == 'AT 2026zz'
+        assert row['z_tns'] == pytest.approx(0.08)

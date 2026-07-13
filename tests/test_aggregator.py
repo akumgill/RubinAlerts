@@ -109,3 +109,115 @@ def test_southern_dec_dedup_uses_angular_separation(aggregator):
     # Separation-based matching collapses them into one object.
     assert len(merged) == 1
     assert merged.iloc[0]['num_brokers'] == 2
+
+
+# ---------------------------------------------------------------------------
+# Passthrough column carriage (wide-mode payload columns surviving the merge)
+# ---------------------------------------------------------------------------
+
+def _fink_row(**ov):
+    row = {'ra': 150.0, 'dec': -20.0, 'sn_ia_prob': 0.8,
+           'object_id': 'FK1', 'diaObjectId': 'FK1'}
+    row.update(ov)
+    return row
+
+
+def _ztf_row(**ov):
+    row = {'ra': 150.0, 'dec': -20.0, 'sn_ia_prob': 0.5,
+           'object_id': 'ZTF26xx'}
+    row.update(ov)
+    return row
+
+
+class TestPassthroughColumns:
+    def test_brightest_mag_min_across_brokers(self, aggregator):
+        merged = aggregator.merge_alerts({
+            'Fink': pd.DataFrame([_fink_row(brightest_mag=19.5)]),
+            'ALeRCE-ZTF': pd.DataFrame([_ztf_row(brightest_mag=18.8)]),
+        })
+        assert len(merged) == 1
+        assert merged.iloc[0]['brightest_mag'] == pytest.approx(18.8)
+
+    def test_last_mjd_max_across_brokers(self, aggregator):
+        merged = aggregator.merge_alerts({
+            'Fink': pd.DataFrame([_fink_row(last_mjd=61230.0)]),
+            'ALeRCE-ZTF': pd.DataFrame([_ztf_row(last_mjd=61233.5)]),
+        })
+        assert merged.iloc[0]['last_mjd'] == pytest.approx(61233.5)
+
+    def test_z_best_prefers_specz_over_photz(self, aggregator):
+        merged = aggregator.merge_alerts({
+            'Fink': pd.DataFrame([_fink_row(z_phot=0.35, z_tns=0.12)]),
+        })
+        row = merged.iloc[0]
+        assert row['z_best'] == pytest.approx(0.12)
+        assert row['z_source'] == 'tns_specz'
+
+    def test_z_best_photz_fallback_and_none(self, aggregator):
+        merged = aggregator.merge_alerts({
+            'Fink': pd.DataFrame([_fink_row(z_phot=0.3, z_tns=np.nan)]),
+        })
+        assert merged.iloc[0]['z_source'] == 'legacy_photz'
+        merged2 = aggregator.merge_alerts({
+            'Fink': pd.DataFrame([_fink_row(z_phot=np.nan, z_tns=np.nan)]),
+        })
+        assert merged2.iloc[0]['z_source'] == 'none'
+
+    def test_tns_xm_first_nonblank_across_brokers(self, aggregator):
+        # TNS name blank on the Fink row, present on the ZTF row -> survives
+        merged = aggregator.merge_alerts({
+            'Fink': pd.DataFrame([_fink_row(tns_name_xm='')]),
+            'ALeRCE-ZTF': pd.DataFrame([_ztf_row(tns_name_xm='AT 2026xy')]),
+        })
+        assert merged.iloc[0]['tns_name_xm'] == 'AT 2026xy'
+
+    def test_alerce_class_join_not_overwrite(self, aggregator):
+        merged = aggregator.merge_alerts({
+            'Fink': pd.DataFrame([_fink_row(alerce_class='SNII')]),
+            'ALeRCE-ZTF': pd.DataFrame([_ztf_row(alerce_class='SNIa')]),
+        })
+        joined = merged.iloc[0]['alerce_class']
+        assert set(joined.split('|')) == {'SNIa', 'SNII'}
+
+    def test_ztf_oid_alias_set(self, aggregator):
+        merged = aggregator.merge_alerts({
+            'Fink': pd.DataFrame([_fink_row()]),
+            'ALeRCE-ZTF': pd.DataFrame([_ztf_row()]),
+        })
+        assert merged.iloc[0]['ztf_oid'] == 'ZTF26xx'
+
+    def test_gaia_plx_and_err_paired_from_same_alert(self, aggregator):
+        # Alert A: plx without err; alert B: both. Pairing must take both
+        # from the row whose plx is first present (A), leaving err unset,
+        # or from B if A's plx were missing.
+        fink = pd.DataFrame([
+            _fink_row(gaia_plx=np.nan, gaia_plx_err=0.1),
+            _fink_row(gaia_plx=2.0, gaia_plx_err=0.4),
+        ])
+        merged = aggregator.merge_alerts({'Fink': fink})
+        row = merged.iloc[0]
+        assert row['gaia_plx'] == pytest.approx(2.0)
+        assert row['gaia_plx_err'] == pytest.approx(0.4)
+
+    def test_ddf_mode_noop_without_wide_columns(self, aggregator):
+        # Frames lacking passthrough columns must not gain them (except the
+        # always-present derived defaults), and existing columns unchanged.
+        merged = aggregator.merge_alerts({
+            'Fink': pd.DataFrame([_fink_row()]),
+        })
+        row = merged.iloc[0]
+        for col in ('brightest_mag', 'last_mjd', 'z_best', 'z_source',
+                    'tns_name_xm', 'alerce_class', 'ztf_oid'):
+            assert col not in merged.columns or pd.isna(row.get(col)) or row.get(col) == ''
+        assert row['sn_score'] == pytest.approx(0.8)
+
+    def test_early_ia_score_max_and_not_pooled(self, aggregator):
+        # max across alerts; and must NOT leak into mean_ia_prob (R7 guard)
+        fink = pd.DataFrame([
+            _fink_row(early_ia_score=0.2, sn_ia_prob=0.8),
+            _fink_row(early_ia_score=0.6, sn_ia_prob=0.8),
+        ])
+        merged = aggregator.merge_alerts({'Fink': fink})
+        row = merged.iloc[0]
+        assert row['early_ia_score'] == pytest.approx(0.6)
+        assert row['mean_ia_prob'] == pytest.approx(0.8)

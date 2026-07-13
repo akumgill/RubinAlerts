@@ -114,9 +114,11 @@ loop — R17 Baade docstring, R3 state path, R8 quartile docs, etc. See
 4. **Rubin RSP/TAP** — verify whether the token grants live Prompt Products;
    if so, direct DiaObject queries give an owned selection function and a
    Fink-outage fallback. Currently plumbed but never queried in the run path.
-5. **SALT2-driven phase/typing** — replace parabola/Villar phase estimates
-   with sncosmo SALT2 fits when a redshift exists (`--use-salt` exists but is
-   effectively unused).
+5. ~~**SALT2-driven phase/typing**~~ — DONE (July 2026): survey-aware
+   `fit_salt` (salt2-extended + F99 MW dust), `salt_z_policy` (spec-z fixed /
+   photo-z bounded / free box), `choose_best_fit` (SALT wins on chi2/t0_err/
+   anchoring gates), tiered rescue fits (`--salt-rescue-cap`). Default ON in
+   wide mode, `--no-salt` to disable. Requires sncosmo + iminuit.
 6. **Wide-mode multi-broker** — the aggregator drops payload selection
    columns (z_best, brightest_mag, xm_tns_*); carry them through so wide mode
    need not imply --fink-only. Also: per-object TNS xm should take the first

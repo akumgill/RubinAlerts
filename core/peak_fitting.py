@@ -9,6 +9,7 @@ All fitting is done in flux space (nanoJanskys) to handle negative
 difference-imaging values naturally.
 """
 
+import copy
 import logging
 from typing import Optional, Dict, List
 
@@ -125,6 +126,71 @@ LSST_BAND_MAP = {
     'u': 'lsstu', 'g': 'lsstg', 'r': 'lsstr',
     'i': 'lssti', 'z': 'lsstz', 'y': 'lssty',
 }
+
+# Survey-aware band → sncosmo bandpass name maps. Light-curve frames from
+# combine_photometry() carry a 'survey' column ('Rubin', 'ZTF', 'ATLAS').
+SNCOSMO_BAND_MAPS = {
+    'rubin': LSST_BAND_MAP,
+    'lsst': LSST_BAND_MAP,
+    'ztf': {'g': 'ztfg', 'r': 'ztfr', 'i': 'ztfi'},
+    'atlas': {'ATLAS-c': 'atlasc', 'ATLAS-o': 'atlaso',
+              'c': 'atlasc', 'o': 'atlaso'},
+}
+
+
+def to_sncosmo_band(band, survey):
+    """Map a (band, survey) pair to an sncosmo bandpass name.
+
+    Rubin/LSST → lsst{ugrizy}; ZTF → ztf{gri}; ATLAS 'ATLAS-c'/'ATLAS-o'
+    (or bare 'c'/'o') → atlasc/atlaso. A missing/blank survey is assumed
+    to be Rubin. Unknown surveys or bands return None (point is dropped
+    from SALT fits rather than mislabelled).
+    """
+    if band is None or (isinstance(band, float) and not np.isfinite(band)):
+        return None
+    survey_key = str(survey).strip().lower() if survey is not None else ''
+    if survey_key in ('', 'nan', 'none'):
+        survey_key = 'rubin'
+    band_map = SNCOSMO_BAND_MAPS.get(survey_key)
+    if band_map is None:
+        return None
+    return band_map.get(str(band).strip())
+
+
+# Module-level SALT model cache: constructing an sncosmo.Model triggers a
+# one-time network download of the template, so we do it exactly once per
+# process and reuse the instance via copy.copy() in each per-object fit.
+_SALT_MODEL_CACHE: Dict[str, object] = {}
+
+
+def load_salt_model(model_name='salt2-extended'):
+    """Load (once) and cache an sncosmo SALT model with MW dust.
+
+    The returned model has an F99 Milky Way dust component in the observer
+    frame ('mw' effect, parameter 'mwebv'). The first call may trigger a
+    network download of the template files; failures (offline, bad
+    SNCOSMO_DATA_DIR) are cached and reported as None so callers can
+    disable SALT fitting cleanly.
+
+    Callers must NOT mutate the returned instance — take a copy.copy()
+    first (fit_salt does this).
+    """
+    if not HAS_SNCOSMO:
+        return None
+    if model_name not in _SALT_MODEL_CACHE:
+        try:
+            model = sncosmo.Model(
+                source=model_name,
+                effects=[sncosmo.F99Dust()],
+                effect_names=['mw'],
+                effect_frames=['obs'],
+            )
+        except Exception as e:
+            logger.warning("Could not load SALT model '%s' (offline? "
+                           "check SNCOSMO_DATA_DIR): %s", model_name, e)
+            model = None
+        _SALT_MODEL_CACHE[model_name] = model
+    return _SALT_MODEL_CACHE[model_name]
 
 
 # ---------------------------------------------------------------------------
@@ -337,30 +403,48 @@ def fit_parabola(lc_df, bands=None, extinction=None):
 # Optional SALT2 / SALT3 fit
 # ---------------------------------------------------------------------------
 
-def fit_salt(lc_df, model_name='salt2', z=None, z_range=(0.01, 1.2)):
+def fit_salt(lc_df, model_name='salt2-extended', z=None, z_bounds=None,
+             mwebv=None, clean=True):
     """Multi-band SN Ia template fit using sncosmo.
+
+    Survey-aware: points from Rubin, ZTF and ATLAS (per the light curve's
+    'survey' column) are mapped to the corresponding sncosmo bandpasses;
+    bands the model does not cover at the trial redshift(s) are dropped
+    individually — a single bad band never fails the whole fit.
 
     Parameters
     ----------
     lc_df : pd.DataFrame
-        Light curve with mjd, psfFlux/flux, psfFluxErr/flux_err, band_name/band.
+        Light curve with mjd, psfFlux/flux, psfFluxErr/flux_err,
+        band_name/band, and optionally 'survey' (default Rubin).
     model_name : str
-        'salt2' or 'salt3'.
+        sncosmo source name (default 'salt2-extended').
     z : float, optional
-        Fixed redshift. If None, z floats within z_range.
-    z_range : tuple
-        (z_min, z_max) bounds when z is free.
+        Fixed redshift (e.g. TNS spec-z). Takes precedence over z_bounds.
+    z_bounds : (lo, hi), optional
+        Redshift is fitted as a free parameter within these bounds.
+        Used when z is None; defaults to (0.005, 0.5).
+    mwebv : float, optional
+        Milky Way E(B-V) along the line of sight (SFD). Applied through
+        the model's F99 dust component; defaults to 0.
+    clean : bool
+        Run clean_light_curve() (dedup + sigma clip) first.
 
     Returns
     -------
-    dict with fit parameters or status='unavailable'/'failed'.
+    dict with: status, method, t0, t0_err, x0, x1, x1_err, c, c_err,
+    z, z_railed, peak_mag_obs, peak_band_obs, peak_mag_B, chi2, ndof,
+    chi2_dof, mwebv, n_points, n_bands.
     """
+    base_result = {'method': 'salt', 'model': model_name}
+
     if not HAS_SNCOSMO:
-        return {'status': 'sncosmo_not_installed', 'method': 'salt'}
+        return {**base_result, 'status': 'sncosmo_not_installed'}
 
     from astropy.table import Table
 
-    df = lc_df.copy()
+    df = clean_light_curve(lc_df) if clean else lc_df.copy()
+    # clean_light_curve() already normalizes; repeat for clean=False
     if 'psfFlux' in df.columns and 'flux' not in df.columns:
         df['flux'] = df['psfFlux']
     if 'psfFluxErr' in df.columns and 'flux_err' not in df.columns:
@@ -368,85 +452,252 @@ def fit_salt(lc_df, model_name='salt2', z=None, z_range=(0.01, 1.2)):
     if 'band_name' in df.columns and 'band' not in df.columns:
         df['band'] = df['band_name']
 
-    # Filter to LSST bands that sncosmo knows about
-    df = df[df['band'].isin(LSST_BAND_MAP)].copy()
-    df['sncosmo_band'] = df['band'].map(LSST_BAND_MAP)
+    if not {'mjd', 'flux', 'flux_err', 'band'}.issubset(df.columns):
+        return {**base_result, 'status': 'insufficient_data',
+                'n_points': 0, 'n_bands': 0}
 
-    good = df['flux'].notna() & df['flux_err'].notna() & (df['flux_err'] > 0) & df['mjd'].notna()
+    # Survey-aware band mapping (missing survey column → Rubin)
+    surveys = df['survey'] if 'survey' in df.columns else pd.Series(
+        'Rubin', index=df.index)
+    df = df.copy()
+    df['sncosmo_band'] = [to_sncosmo_band(b, s)
+                          for b, s in zip(df['band'], surveys)]
+    df = df[df['sncosmo_band'].notna()]
+
+    good = (df['flux'].notna() & df['flux_err'].notna()
+            & (df['flux_err'] > 0) & df['mjd'].notna())
     df = df[good]
+
+    # Early bail before touching the model (whose first load may download)
+    if len(df) < 5 or df['band'].nunique() < 2:
+        return {**base_result, 'status': 'insufficient_data',
+                'n_points': len(df), 'n_bands': df['band'].nunique()}
+
+    # Load (cached) base model and take a private copy for this fit
+    base_model = load_salt_model(model_name)
+    if base_model is None:
+        return {**base_result, 'status': 'model_unavailable',
+                'n_points': len(df), 'n_bands': df['band'].nunique()}
+    model = copy.copy(base_model)
+
+    mwebv_val = float(mwebv) if (mwebv is not None
+                                 and np.isfinite(mwebv)) else 0.0
+    model.set(mwebv=mwebv_val)
+
+    # Redshift treatment: fixed z beats bounds; neither → broad free-z box
+    z_free = z is None
+    if z_free:
+        if z_bounds is None:
+            z_bounds = (0.005, 0.5)
+        z_lo, z_hi = float(z_bounds[0]), float(z_bounds[1])
+    else:
+        z_lo = z_hi = float(z)
+
+    # Per-band model-coverage check at the extreme trial redshifts.
+    # Drop out-of-range bands individually; never fail the fit on one band.
+    kept = []
+    for sb in sorted(df['sncosmo_band'].unique()):
+        try:
+            ok = bool(np.all(model.bandoverlap(sb, z=[z_lo, z_hi])))
+        except Exception as e:
+            logger.debug("SALT: cannot check band %s coverage: %s", sb, e)
+            ok = False
+        if ok:
+            kept.append(sb)
+        else:
+            logger.debug("SALT: dropping band %s (outside %s coverage "
+                         "for z in [%.3f, %.3f])", sb, model_name, z_lo, z_hi)
+    df = df[df['sncosmo_band'].isin(kept)]
 
     n_points = len(df)
     n_bands = df['band'].nunique()
 
     if n_points < 5 or n_bands < 2:
-        return {
-            'status': 'insufficient_data',
-            'method': 'salt',
-            'n_points': n_points,
-            'n_bands': n_bands,
-        }
+        return {**base_result, 'status': 'insufficient_data',
+                'n_points': n_points, 'n_bands': n_bands,
+                'mwebv': mwebv_val}
 
-    # Build astropy Table for sncosmo
     data = Table({
-        'time': df['mjd'].values,
+        'time': df['mjd'].values.astype(float),
         'band': df['sncosmo_band'].values,
-        'flux': df['flux'].values,
-        'fluxerr': df['flux_err'].values,
+        'flux': df['flux'].values.astype(float),
+        'fluxerr': df['flux_err'].values.astype(float),
         'zp': np.full(n_points, AB_ZP_NJY),
         'zpsys': np.full(n_points, 'ab', dtype='U2'),
     })
 
+    params = ['t0', 'x0', 'x1', 'c']
+    bounds = {
+        't0': (df['mjd'].min() - 20, df['mjd'].max() + 20),
+        'x1': (-5.0, 5.0),
+        'c': (-0.5, 0.5),
+    }
+    if z_free:
+        params.insert(0, 'z')
+        bounds['z'] = (z_lo, z_hi)
+        model.set(z=0.5 * (z_lo + z_hi))
+    else:
+        model.set(z=float(z))
+
     try:
-        model = sncosmo.Model(source=model_name)
-
-        params = ['t0', 'x0', 'x1', 'c']
-        bounds = {
-            't0': (df['mjd'].min() - 20, df['mjd'].max() + 20),
-            'x1': (-5.0, 5.0),
-            'c': (-0.5, 0.5),
-        }
-
-        if z is not None:
-            model.set(z=z)
-        else:
-            params.insert(0, 'z')
-            bounds['z'] = z_range
-
-        result, fitted_model = sncosmo.fit_lc(
-            data, model, params, bounds=bounds,
-        )
-
-        # Peak magnitude in rest-frame B
-        try:
-            peak_mag_B = fitted_model.source_peakmag('bessellb', 'ab')
-        except Exception:
-            peak_mag_B = np.nan
-
-        return {
-            'status': 'ok',
-            'method': 'salt',
-            't0': result.parameters[result.param_names.index('t0')],
-            'x0': result.parameters[result.param_names.index('x0')],
-            'x1': result.parameters[result.param_names.index('x1')],
-            'c': result.parameters[result.param_names.index('c')],
-            'z': fitted_model.get('z'),
-            'peak_mag_B': peak_mag_B,
-            'chi2': result.chisq,
-            'ndof': result.ndof,
-            'chi2_dof': result.chisq / max(result.ndof, 1),
-            'n_points': n_points,
-            'n_bands': n_bands,
-        }
-
+        result, fitted_model = sncosmo.fit_lc(data, model, params,
+                                              bounds=bounds)
     except Exception as e:
         logger.debug("SALT fit failed: %s", e)
-        return {
-            'status': 'fit_failed',
-            'method': 'salt',
-            'error': str(e),
-            'n_points': n_points,
-            'n_bands': n_bands,
-        }
+        return {**base_result, 'status': 'fit_failed', 'error': str(e),
+                'n_points': n_points, 'n_bands': n_bands,
+                'mwebv': mwebv_val}
+
+    errors = getattr(result, 'errors', None) or {}
+    t0_fit = float(fitted_model.get('t0'))
+    z_fit = float(fitted_model.get('z'))
+    z_railed = bool(z_free and (abs(z_fit - z_lo) <= 1e-3
+                                or abs(z_fit - z_hi) <= 1e-3))
+
+    # Observer-frame peak: synthesize the model in the best-covered band
+    # (most points) on a grid around t0 and take the brightest magnitude.
+    counts = df['sncosmo_band'].value_counts()
+    best_sb = counts.idxmax()
+    peak_band_obs = str(df.loc[df['sncosmo_band'] == best_sb, 'band'].iloc[0])
+    peak_mag_obs = np.nan
+    try:
+        grid = np.linspace(t0_fit - 10.0 * (1 + z_fit),
+                           t0_fit + 30.0 * (1 + z_fit), 161)
+        grid = grid[(grid >= fitted_model.mintime())
+                    & (grid <= fitted_model.maxtime())]
+        if len(grid) > 0:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                mags = np.atleast_1d(
+                    fitted_model.bandmag(best_sb, 'ab', grid))
+            finite = mags[np.isfinite(mags)]
+            if len(finite) > 0:
+                peak_mag_obs = float(np.min(finite))
+    except Exception as e:
+        logger.debug("SALT: peak synthesis failed in %s: %s", best_sb, e)
+
+    # Peak magnitude in rest-frame B
+    try:
+        peak_mag_B = float(fitted_model.source_peakmag('bessellb', 'ab'))
+    except Exception:
+        peak_mag_B = np.nan
+
+    return {
+        **base_result,
+        'status': 'ok',
+        't0': t0_fit,
+        't0_err': float(errors.get('t0', np.nan)),
+        'x0': float(fitted_model.get('x0')),
+        'x1': float(fitted_model.get('x1')),
+        'x1_err': float(errors.get('x1', np.nan)),
+        'c': float(fitted_model.get('c')),
+        'c_err': float(errors.get('c', np.nan)),
+        'z': z_fit,
+        'z_railed': z_railed,
+        'peak_mag_obs': peak_mag_obs,
+        'peak_band_obs': peak_band_obs,
+        'peak_mag_B': peak_mag_B,
+        'chi2': result.chisq,
+        'ndof': result.ndof,
+        'chi2_dof': result.chisq / max(result.ndof, 1),
+        'mwebv': mwebv_val,
+        'n_points': n_points,
+        'n_bands': n_bands,
+    }
+
+
+def salt_z_policy(z_best, z_source):
+    """Decide how a candidate's redshift enters the SALT fit.
+
+    Pure function of the payload redshift and its provenance:
+
+    - 'tns_specz'    → fix z exactly (spectroscopic).
+    - 'legacy_photz' → free z within ±2σ of the photo-z, where
+                       σ = max(0.03, 0.05·(1+z)) (Legacy DR8 photo-z scatter),
+                       floored at z = 0.005.
+    - 'none'/missing → free z in a bright-target box [0.005, 0.15]
+                       (wide-mode selection is r ≤ 21.5 anyway).
+
+    Returns
+    -------
+    (z_fixed_or_None, z_bounds_or_None) — exactly one is non-None.
+    """
+    src = str(z_source or '').strip().lower()
+    z_ok = (z_best is not None and np.isfinite(z_best) and z_best > 0)
+
+    if src == 'tns_specz' and z_ok:
+        return float(z_best), None
+    if src == 'legacy_photz' and z_ok:
+        zb = float(z_best)
+        sig = max(0.03, 0.05 * (1.0 + zb))
+        return None, [max(0.005, zb - 2.0 * sig), zb + 2.0 * sig]
+    return None, [0.005, 0.15]
+
+
+def choose_best_fit(vil, par, salt, min_fit_bands, mjd_min, mjd_max,
+                    salt_max_chi2_dof=3.0, salt_max_t0_err=3.0):
+    """Pick the headline peak estimate among Villar, parabola and SALT fits.
+
+    SALT wins iff its fit is trustworthy: status 'ok', chi2/dof ≤ 3,
+    t0 uncertainty ≤ 3 d, t0 within [mjd_min − 10, mjd_max + 20] (peak
+    anchored by the data, not extrapolated), and a finite synthesized
+    observer-frame peak magnitude. Otherwise the pre-existing preference
+    applies: multiband Villar (status 'ok' in ≥ min_fit_bands bands),
+    else parabola ('ok' in ≥ min_fit_bands bands), else nothing.
+
+    Parameters
+    ----------
+    vil : dict or None
+        Output of fit_villar_multiband().
+    par : dict or None
+        Output of fit_parabola().
+    salt : dict or None
+        Output of fit_salt() (None if not attempted).
+    min_fit_bands : int
+        Minimum bands required for Villar/parabola acceptance.
+    mjd_min, mjd_max : float
+        Time range of the (cleaned) light curve.
+
+    Returns
+    -------
+    (best_dict_or_None, fit_method) with fit_method in
+    {'salt', 'villar_mb', 'parabola', 'none'}.
+    """
+    if salt is not None and salt.get('status') == 'ok':
+        chi2 = salt.get('chi2_dof', np.nan)
+        t0_err = salt.get('t0_err', np.nan)
+        t0 = salt.get('t0', np.nan)
+        peak_mag = salt.get('peak_mag_obs', np.nan)
+        if (np.isfinite(chi2) and chi2 <= salt_max_chi2_dof
+                and np.isfinite(t0_err) and t0_err <= salt_max_t0_err
+                and np.isfinite(t0)
+                and (mjd_min - 10.0) <= t0 <= (mjd_max + 20.0)
+                and np.isfinite(peak_mag)):
+            best = {
+                'method': 'salt',
+                'status': 'ok',
+                'peak_mjd': float(t0),
+                'peak_mag': float(peak_mag),
+                'band': salt.get('peak_band_obs', ''),
+                'chi2_dof': float(chi2),
+            }
+            return best, 'salt'
+
+    vil = vil or {}
+    par = par or {}
+
+    vil_best = vil.get('best')
+    if (vil_best and vil_best.get('status') == 'ok'
+            and vil.get('n_bands_fit', 0) >= min_fit_bands):
+        return vil_best, 'villar_mb'
+
+    par_best = par.get('best')
+    if par_best and par_best.get('status') == 'ok':
+        par_bands_ok = sum(1 for info in par.get('per_band', {}).values()
+                           if info.get('status') == 'ok')
+        if par_bands_ok >= min_fit_bands:
+            return par_best, 'parabola'
+
+    return None, 'none'
 
 
 # ---------------------------------------------------------------------------

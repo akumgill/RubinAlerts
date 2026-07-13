@@ -99,30 +99,36 @@ When making significant changes to RubinAlerts architecture or methods, update t
 loop — R17 Baade docstring, R3 state path, R8 quartile docs, etc. See
 `docs/design/review-loop-log.md`.)
 
-### HIGH PRIORITY (post wide-sky pivot, July 2026)
-1. **ALeRCE-ZTF wide-sky reuse** — the DB client already queries the full ZTF
-   footprint (~3k candidates) then discards 99.9% via the DDF filter; apply
-   the wide-mode cuts instead. Second survey for the bright/nearby sample and
-   the primary alert source during the August 2026 Rubin downtime.
-2. **ANTARES proxy coalescing** — use its heuristic P(Ia) as a fallback only
-   when no ML score exists (`effective_prob` + `prob_source` column,
-   down-ranked, flagged `needs_classification`). Never average into ML probs.
-3. **Ia-specific probability** — fold `f:clf_earlySNIa_score` / CATS class
-   into w_prob (currently SN-vs-other only); scores are already fetched.
+### DONE (July 2026 sprint — see git log 8fd00e3..HEAD)
+1. ~~**ALeRCE-ZTF wide-sky reuse**~~ — DONE: `query_fresh_sn_candidates`
+   (time-filtered SQL, fixing the arbitrary-slice bug) feeds wide mode;
+   class tags carried (`alerce_class`), Galactic-plane screen.
+2. ~~**ANTARES proxy coalescing**~~ — DONE: `effective_prob` chain
+   (mean_ia_prob → sn_score → proxy), `prob_source`, `needs_classification`.
+3. ~~**Ia-specific probability**~~ — DONE: `w_iaspec` [0.8–1.2] from TNS
+   spec-type / ALeRCE SNIa prob / earlySNIa; positive Ia evidence ≥ neutral.
+   (CATS is broad taxonomy, carried but not Ia evidence.)
+4. ~~**Rubin RSP/TAP**~~ — RESOLVED NO (audit 2026-07-13): token grants
+   static DP1 only (ends 2024-12-12); no PPDB on community RSP; USDF is 401.
+   Fink-independent Rubin selection impossible today; redundancy = brokers.
+5. ~~**SALT2-driven phase/typing**~~ — DONE: survey-aware `fit_salt`
+   (salt2-extended + F99 MW dust), `salt_z_policy` (spec-z fixed / photo-z
+   bounded / free box), `choose_best_fit`, tiered rescue fits
+   (`--salt-rescue-cap`). Default ON in wide mode, `--no-salt` to disable.
+   Requires sncosmo + iminuit (iminuit absence was why --use-salt silently
+   no-op'd historically).
+6. ~~**Wide-mode multi-broker**~~ — DONE (aggregator phases 1+2):
+   PASSTHROUGH_COLUMNS reducers carry payload columns through the merge;
+   wide mode uses the real `merge_alerts` (2" tolerance) with cross-survey
+   agreement stats; TNS xm first-non-null across alerts.
 
-### MEDIUM PRIORITY
-4. **Rubin RSP/TAP** — verify whether the token grants live Prompt Products;
-   if so, direct DiaObject queries give an owned selection function and a
-   Fink-outage fallback. Currently plumbed but never queried in the run path.
-5. ~~**SALT2-driven phase/typing**~~ — DONE (July 2026): survey-aware
-   `fit_salt` (salt2-extended + F99 MW dust), `salt_z_policy` (spec-z fixed /
-   photo-z bounded / free box), `choose_best_fit` (SALT wins on chi2/t0_err/
-   anchoring gates), tiered rescue fits (`--salt-rescue-cap`). Default ON in
-   wide mode, `--no-salt` to disable. Requires sncosmo + iminuit.
-6. **Wide-mode multi-broker** — the aggregator drops payload selection
-   columns (z_best, brightest_mag, xm_tns_*); carry them through so wide mode
-   need not imply --fink-only. Also: per-object TNS xm should take the first
-   non-null across alerts, not the most recent alert's value.
+### NEXT UP
+- **ANTARES wide-sky query mode** — its client is a DDF-cone search; a
+  dec-strip/all-sky query would let ANTARES join wide mode (~1 day).
+- **TNS/host-z enrichment for ZTF-stream targets** (currently z-less,
+  kept only if ≤20.5 mag; SALT2 free-z fits mitigate).
+- **Absolute cross-night merit thresholds** once statistics accumulate.
+- **S/N-based exposure + w_mag replacement** (TODO(S/N-feasibility) marker).
 
 ### PLANNED FEATURES
 7. **Google Sheet integration** — Allow PIs to manually enqueue targets not sourced from alerts (gspread + service account). Design spec exists in `docs/design/spectroscopic-orchestration-review.tex` §"Planned: Google-Sheet manual-request front end".

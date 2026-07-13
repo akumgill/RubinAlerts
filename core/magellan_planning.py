@@ -324,11 +324,25 @@ def compute_merit_breakdown(delta_t, peak_mag,
                             max_possible_brokers=None,
                             moon_penalty=None,
                             salt_chi2_dof=None, absolute_mag=None,
+                            ia_evidence=None,
                             tau=10.0, mag_optimal=20.5,
                             mag_bright=18.0, mag_faint=23.0):
     """Compute merit score and return individual component weights.
 
     Same calculation as compute_merit(), but returns a dict with all factors.
+
+    Parameters (beyond compute_merit)
+    ---------------------------------
+    ia_evidence : float or array-like, optional
+        Ia-SPECIFIC classification evidence in [0, 1], distinct from the
+        generic SN-vs-other probability in ``ia_prob``. Sources: TNS
+        spectroscopic type "SN Ia" (1.0), ALeRCE lc_classifier SNIa
+        probability, Fink earlySNIa score. 0 means positively classified as
+        a NON-Ia SN class; NaN/None means no Ia-specific information
+        (neutral). Folded in as w_iaspec = 0.8 + 0.4*evidence, i.e. a known
+        non-Ia is mildly demoted (0.8), a spectroscopic Ia mildly boosted
+        (1.2), and ignorance is not penalized (1.0). Preference, not a
+        filter: other-science programs re-rank the same list by class tag.
 
     Returns
     -------
@@ -343,6 +357,7 @@ def compute_merit_breakdown(delta_t, peak_mag,
         'w_moon': Moon penalty
         'w_salt': SALT2 fit quality weight
         'w_absmag': Absolute magnitude consistency weight
+        'w_iaspec': Ia-specific classification preference [0.8-1.2]
     """
     delta_t = np.asarray(delta_t, dtype=float)
     peak_mag = np.asarray(peak_mag, dtype=float)
@@ -407,7 +422,16 @@ def compute_merit_breakdown(delta_t, peak_mag,
         w_absmag = np.clip(w_absmag, 0.3, 1.0)
         w_absmag = np.where(np.isfinite(absolute_mag), w_absmag, 1.0)
 
-    merit = w_time * w_mag * w_prob * w_host * w_ext * w_broker * w_moon * w_salt * w_absmag
+    w_iaspec = np.ones_like(delta_t)
+    if ia_evidence is not None:
+        ia_evidence = np.asarray(ia_evidence, dtype=float)
+        # Preference, not a filter: known non-Ia 0.8, spectro-Ia 1.2,
+        # no Ia-specific information -> neutral 1.0.
+        w_iaspec = 0.8 + 0.4 * np.clip(ia_evidence, 0.0, 1.0)
+        w_iaspec = np.where(np.isfinite(ia_evidence), w_iaspec, 1.0)
+
+    merit = (w_time * w_mag * w_prob * w_host * w_ext * w_broker * w_moon
+             * w_salt * w_absmag * w_iaspec)
     merit = np.where(np.isfinite(delta_t) & np.isfinite(peak_mag), merit, np.nan)
 
     return {
@@ -421,6 +445,7 @@ def compute_merit_breakdown(delta_t, peak_mag,
         'w_moon': w_moon,
         'w_salt': w_salt,
         'w_absmag': w_absmag,
+        'w_iaspec': w_iaspec,
     }
 
 

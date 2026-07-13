@@ -221,6 +221,42 @@ class TestMergeWideStreams:
         assert len(merge_wide_streams(empty, empty)) == 0
 
 
+class TestIaSpecificWeight:
+    """w_iaspec: Ia-specific evidence folds into merit as [0.8, 1.2]."""
+
+    @staticmethod
+    def _merit(ia_evidence):
+        from core.magellan_planning import compute_merit_breakdown
+        return compute_merit_breakdown(
+            delta_t=0.0, peak_mag=20.0, ia_evidence=ia_evidence)
+
+    def test_spectroscopic_ia_boosted(self):
+        b = self._merit(1.0)
+        assert b['w_iaspec'] == pytest.approx(1.2)
+
+    def test_known_non_ia_demoted(self):
+        b = self._merit(0.0)
+        assert b['w_iaspec'] == pytest.approx(0.8)
+
+    def test_no_information_neutral(self):
+        b = self._merit(np.nan)
+        assert b['w_iaspec'] == pytest.approx(1.0)
+        b2 = self._merit(None)
+        assert b2['w_iaspec'] == pytest.approx(1.0)
+
+    def test_partial_evidence_interpolates(self):
+        b = self._merit(0.5)
+        assert b['w_iaspec'] == pytest.approx(1.0)
+        assert self._merit(0.75)['w_iaspec'] == pytest.approx(1.1)
+
+    def test_folded_into_merit(self):
+        m_ia = float(self._merit(1.0)['merit'])
+        m_non = float(self._merit(0.0)['merit'])
+        m_unk = float(self._merit(np.nan)['merit'])
+        assert m_ia > m_unk > m_non
+        assert m_ia / m_non == pytest.approx(1.2 / 0.8)
+
+
 class TestCombined:
     def test_mixed_population(self):
         """One passing object among assorted rejects."""

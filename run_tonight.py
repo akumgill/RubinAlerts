@@ -444,13 +444,14 @@ WIDE_MAX_MAG = 21.5          # proposal: 18.0 <= r <= 21.5
 WIDE_MAX_Z = 0.4             # proposal: 0.1 < z < 0.4
 WIDE_HOSTLESS_MAX_MAG = 20.5 # keep no-redshift objects only if clearly bright
 WIDE_FIT_CAP = 150           # max objects sent to per-object photometry+fit
+WIDE_MIN_GAL_B = 10.0        # deg; |b| below this is nova/CV territory, not SNe
 
 
 def select_wide_candidates(df, mjd_now, days_back=30,
                            dec_limit=WIDE_DEC_LIMIT, max_mag=WIDE_MAX_MAG,
                            max_z=WIDE_MAX_Z,
                            hostless_max_mag=WIDE_HOSTLESS_MAX_MAG,
-                           fit_cap=WIDE_FIT_CAP):
+                           fit_cap=WIDE_FIT_CAP, min_gal_b=WIDE_MIN_GAL_B):
     """Payload-level selection for wide (non-DDF-restricted) sky mode.
 
     Applies the proposal's target-space cuts using columns already present in
@@ -472,8 +473,20 @@ def select_wide_candidates(df, mjd_now, days_back=30,
         s = df.get(col, pd.Series('', index=df.index, dtype=object))
         return s.fillna('').astype(str).str.strip()
 
-    # 1. Magellan-visible declination
-    df = df[pd.to_numeric(df['dec'], errors='coerce') <= dec_limit]
+    # 1. Magellan-visible declination + Galactic-plane rejection: a "bright
+    #    SN candidate" at |b| < ~10 deg is overwhelmingly a nova/CV/YSO, and
+    #    extinction ruins it for cosmology regardless.
+    ra_num = pd.to_numeric(df['ra'], errors='coerce')
+    dec_num = pd.to_numeric(df['dec'], errors='coerce')
+    coords_ok = ra_num.notna() & dec_num.notna()
+    gal_b = pd.Series(np.nan, index=df.index)
+    if coords_ok.any():
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+        sc = SkyCoord(ra=ra_num[coords_ok].values * u.deg,
+                      dec=dec_num[coords_ok].values * u.deg)
+        gal_b.loc[coords_ok] = sc.galactic.b.deg
+    df = df[(dec_num <= dec_limit) & (gal_b.abs() >= min_gal_b)]
     n_dec = len(df)
 
     # 2. Freshness: last alert within days_back (finally makes --days-back
@@ -531,13 +544,137 @@ def select_wide_candidates(df, mjd_now, days_back=30,
     dropped = max(0, len(df) - fit_cap)
     df = df.head(fit_cap)
 
-    logger.info("Wide selection: %d -> dec<=%+.0f: %d -> fresh(%dd): %d -> "
+    logger.info("Wide selection: %d -> dec<=%+.0f,|b|>=%.0f: %d -> fresh(%dd): %d -> "
                 "var/AGN screen: %d -> r<=%.1f: %d -> z<=%.1f|hostless<=%.1f: %d"
                 "%s",
-                n0, dec_limit, n_dec, days_back, n_fresh, n_screen,
+                n0, dec_limit, min_gal_b, n_dec, days_back, n_fresh, n_screen,
                 max_mag, n_bright, max_z, hostless_max_mag, n_z,
                 f" -> capped at {fit_cap} (dropped {dropped})" if dropped else "")
     return df
+
+
+def fetch_ztf_wide_candidates(mjd_now, min_prob=0.3, days_back=30,
+                              dec_limit=WIDE_DEC_LIMIT, max_mag=WIDE_MAX_MAG,
+                              hostless_max_mag=WIDE_HOSTLESS_MAX_MAG,
+                              max_baseline_days=150.0,
+                              min_gal_b=WIDE_MIN_GAL_B):
+    """Fetch live ZTF SN candidates from ALeRCE for wide sky mode.
+
+    Uses the time-filtered ``query_fresh_sn_candidates`` (fresh, short
+    baseline, Magellan-visible at the SQL level) rather than the legacy
+    arbitrary-slice query, then applies the Galactic-plane screen and the
+    brightness rule. ALeRCE carries no redshift, so — mirroring the Fink
+    hostless rule — z-less ZTF objects are kept only if brighter than
+    ``hostless_max_mag``. The classifier class tag (SNIa/SNIbc/SNII/SLSN) is
+    carried through in ``alerce_class`` for program-specific ranking; the
+    selection does NOT filter to Ia.
+
+    Returns (DataFrame in the wide-candidate schema, status dict).
+    """
+    status = {'queried': True, 'responded': False, 'n_returned': 0,
+              'error': None}
+    try:
+        from broker_clients.alerce_db_client import AlerceDBClient
+        db = AlerceDBClient()
+        db.connect()
+        rows = db.query_fresh_sn_candidates(
+            mjd_now, min_prob=min_prob, days_back=days_back,
+            max_baseline_days=max_baseline_days, dec_limit=dec_limit)
+    except Exception as e:
+        status['error'] = str(e)
+        logger.warning("ALeRCE-ZTF wide query failed: %s", e)
+        return pd.DataFrame(), status
+
+    status['responded'] = True
+    if len(rows) == 0:
+        return pd.DataFrame(), status
+
+    # Aggregate (object, band) rows -> one row per object
+    g = rows.groupby('oid').agg(
+        ra=('meanra', 'first'), dec=('meandec', 'first'),
+        firstmjd=('firstmjd', 'first'), deltajd=('deltajd', 'first'),
+        alerce_class=('class_name', 'first'),
+        probability=('probability', 'max'),
+        brightest_mag=('magmin', 'min'),
+    ).reset_index()
+    g['last_mjd'] = g['firstmjd'] + g['deltajd']
+
+    # Galactic-plane screen (same rationale as select_wide_candidates)
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+    sc = SkyCoord(ra=g['ra'].values * u.deg, dec=g['dec'].values * u.deg)
+    g = g[np.abs(sc.galactic.b.deg) >= min_gal_b]
+
+    # Brightness: no redshift available from ALeRCE, so apply the same
+    # hostless rule as the Fink path — bright enough to follow blind.
+    bmag = pd.to_numeric(g['brightest_mag'], errors='coerce')
+    g = g[bmag <= min(max_mag, hostless_max_mag)]
+
+    # Normalize to the wide-candidate schema
+    g = g.copy()
+    g['diaObjectId'] = g['oid'].astype(str)
+    g['object_id'] = g['diaObjectId']
+    g['sn_score'] = g['probability']
+    g['sn_ia_prob'] = g['probability']
+    g['mean_ia_prob'] = g['probability']
+    g['early_ia_score'] = np.nan
+    g['broker'] = 'ALeRCE-ZTF'
+    g['brokers_detected'] = 'ALeRCE-ZTF'
+    g['num_brokers'] = 1
+    g['known_variable'] = False
+    g['z_phot'] = np.nan
+    g['z_tns'] = np.nan
+    g['z_best'] = np.nan
+    g['z_source'] = 'none'
+    g['ddf_field'] = g.apply(
+        lambda r: is_in_ddf(r['ra'], r['dec']), axis=1)
+
+    status['n_returned'] = len(g)
+    logger.info("ALeRCE-ZTF wide: %d live candidates after |b|>=%.0f and "
+                "mag<=%.1f (classes: %s)",
+                len(g), min_gal_b, min(max_mag, hostless_max_mag),
+                dict(g['alerce_class'].value_counts()))
+    return g, status
+
+
+def merge_wide_streams(fink_df, ztf_df, tol_arcsec=2.0):
+    """Merge the Fink and ALeRCE-ZTF wide candidate streams.
+
+    A bright nearby SN is often alerted by BOTH surveys; a coordinate match
+    within ``tol_arcsec`` collapses the pair into the Fink/Rubin row (which
+    carries photo-z and TNS cross-match), credited with both brokers. The
+    lightweight merge here exists because the full cross-broker aggregator
+    predates wide mode and drops the payload selection columns.
+    """
+    if fink_df is None or len(fink_df) == 0:
+        return ztf_df if ztf_df is not None else pd.DataFrame()
+    if ztf_df is None or len(ztf_df) == 0:
+        return fink_df
+
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+    fink_sc = SkyCoord(ra=pd.to_numeric(fink_df['ra']).values * u.deg,
+                       dec=pd.to_numeric(fink_df['dec']).values * u.deg)
+    ztf_sc = SkyCoord(ra=pd.to_numeric(ztf_df['ra']).values * u.deg,
+                      dec=pd.to_numeric(ztf_df['dec']).values * u.deg)
+    idx, sep, _ = ztf_sc.match_to_catalog_sky(fink_sc)
+    matched = sep.arcsec <= tol_arcsec
+
+    fink_df = fink_df.copy()
+    for zpos in np.where(matched)[0]:
+        fpos = fink_df.index[idx[zpos]]
+        fink_df.loc[fpos, 'num_brokers'] = 2
+        fink_df.loc[fpos, 'brokers_detected'] = 'ALeRCE-ZTF,Fink'
+        fink_df.loc[fpos, 'ztf_oid'] = ztf_df.iloc[zpos]['diaObjectId']
+        if 'alerce_class' in ztf_df.columns:
+            fink_df.loc[fpos, 'alerce_class'] = ztf_df.iloc[zpos]['alerce_class']
+
+    unmatched = ztf_df.iloc[np.where(~matched)[0]]
+    combined = pd.concat([fink_df, unmatched], ignore_index=True)
+    logger.info("Wide merge: %d Fink + %d ZTF -> %d unique "
+                "(%d seen by both surveys)",
+                len(fink_df), len(ztf_df), len(combined), int(matched.sum()))
+    return combined
 
 
 def format_broker_status_lines(broker_status, prefix=''):
@@ -618,6 +755,41 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
     else:
         logger.info("Fink API unavailable — skipping Fink candidate discovery")
         fink_df = pd.DataFrame()
+
+    # --- Wide mode: Fink + live ALeRCE-ZTF, bypassing the DDF-cone brokers ---
+    # The monitor/aggregator path is skipped: ANTARES and ALeRCE-LSST are
+    # still DDF-restricted, and the aggregator drops the payload selection
+    # columns. ZTF is queried directly with the same wide cuts instead.
+    if sky_mode == 'wide':
+        if len(fink_df) > 0:
+            fink_df['brokers_detected'] = 'Fink'
+            fink_df['num_brokers'] = 1
+            fink_df['mean_ia_prob'] = fink_df['sn_score']
+            fink_df['known_variable'] = False
+
+        wk = wide_kwargs or {}
+        ztf_df, ztf_status = fetch_ztf_wide_candidates(
+            mjd_now, min_prob=min_prob, days_back=days_back,
+            dec_limit=wk.get('dec_limit', WIDE_DEC_LIMIT),
+            max_mag=wk.get('max_mag', WIDE_MAX_MAG))
+
+        combined = merge_wide_streams(fink_df, ztf_df)
+
+        status = {
+            'Fink': {'queried': fink is not None,
+                     'responded': fink is not None and len(fink_df) >= 0,
+                     'n_returned': int(len(fink_df)),
+                     'error': None if fink is not None
+                              else 'Fink client unavailable'},
+            'ALeRCE-ZTF': ztf_status,
+            'ANTARES': {'queried': False, 'responded': False,
+                        'n_returned': 0,
+                        'error': 'not queried (wide mode; DDF-cone only)'},
+            'ALeRCE-LSST': {'queried': False, 'responded': False,
+                            'n_returned': 0,
+                            'error': 'not queried (wide mode; DDF-cone only)'},
+        }
+        return combined, status
 
     # The non-Fink brokers we *intend* to query in multi-broker mode. Used to
     # build a fallback broker-status block if the multi-broker path fails so a
@@ -1379,6 +1551,9 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
             'ddf_field': cand.get('ddf_field', ''),
             'sn_score': cand.get('sn_score', np.nan),
             'early_ia_score': cand.get('early_ia_score', np.nan),
+            'alerce_class': cand.get('alerce_class', ''),
+            'z_source': cand.get('z_source', ''),
+            'ztf_oid': cand.get('ztf_oid', ''),
             'brokers_detected': cand.get('brokers_detected', 'Fink'),
             'num_brokers': num_brokers,
             'max_possible_brokers': max_brokers,
@@ -2284,14 +2459,8 @@ def main():
     if args.sky_mode == 'wide':
         logger.info("Sky mode: WIDE (r<=%.1f, z<=%.1f, dec<=%+.0f, fit cap %d)",
                     args.max_mag, args.max_z, args.dec_limit, args.fit_cap)
-        if not args.fink_only:
-            # The secondary brokers are still DDF-cone-restricted and the
-            # cross-broker aggregator does not carry the payload selection
-            # columns (z_best, brightest_mag, xm_tns_*). Until their wide-sky
-            # selection exists, wide mode is Fink-only by construction.
-            logger.info("Wide mode implies --fink-only for now "
-                        "(ALeRCE/ANTARES wide-sky selection is future work)")
-            args.fink_only = True
+        logger.info("Wide brokers: Fink LSST + live ALeRCE-ZTF "
+                    "(ANTARES/ALeRCE-LSST remain DDF-cone only)")
     candidates, broker_status = fetch_all_broker_candidates(
         fink if fink_available else None,
         min_prob=args.min_prob,

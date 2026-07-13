@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from run_tonight import (
-    select_wide_candidates,
+    select_wide_candidates, merge_wide_streams,
     WIDE_DEC_LIMIT, WIDE_MAX_MAG, WIDE_MAX_Z, WIDE_HOSTLESS_MAX_MAG,
 )
 
@@ -162,6 +162,63 @@ class TestFitCap:
         df = make_payload(0)
         out = select_wide_candidates(df, MJD_NOW)
         assert len(out) == 0
+
+
+class TestGalacticPlaneScreen:
+    def test_plane_object_dropped(self):
+        # RA 266, Dec -29 is the Galactic center (b ~ 0): nova/CV territory
+        df = make_payload(1, ra=[266.4], dec=[-28.9])
+        assert len(select_wide_candidates(df, MJD_NOW)) == 0
+
+    def test_high_latitude_kept(self):
+        df = make_payload(1, ra=[150.0], dec=[-20.0])  # b ~ +27
+        assert len(select_wide_candidates(df, MJD_NOW)) == 1
+
+    def test_configurable(self):
+        df = make_payload(1, ra=[266.4], dec=[-28.9])
+        assert len(select_wide_candidates(df, MJD_NOW, min_gal_b=0.0)) == 1
+
+
+class TestMergeWideStreams:
+    @staticmethod
+    def _fink(n=1, **ov):
+        base = make_payload(n, **ov)
+        base['brokers_detected'] = 'Fink'
+        base['num_brokers'] = 1
+        return base
+
+    @staticmethod
+    def _ztf(ra, dec, oid='ZTF26abc', cls='SNIa'):
+        return pd.DataFrame({
+            'diaObjectId': [oid], 'object_id': [oid], 'ra': [ra], 'dec': [dec],
+            'sn_score': [0.5], 'brokers_detected': ['ALeRCE-ZTF'],
+            'num_brokers': [1], 'alerce_class': [cls],
+        })
+
+    def test_coincident_pair_collapses_to_fink_row(self):
+        fink = self._fink(1, ra=[150.0], dec=[-20.0])
+        ztf = self._ztf(150.0 + 0.0001, -20.0)  # ~0.36 arcsec away
+        out = merge_wide_streams(fink, ztf)
+        assert len(out) == 1
+        row = out.iloc[0]
+        assert row['num_brokers'] == 2
+        assert row['brokers_detected'] == 'ALeRCE-ZTF,Fink'
+        assert row['ztf_oid'] == 'ZTF26abc'
+        assert row['alerce_class'] == 'SNIa'
+
+    def test_distinct_objects_both_kept(self):
+        fink = self._fink(1, ra=[150.0], dec=[-20.0])
+        ztf = self._ztf(200.0, 10.0)
+        out = merge_wide_streams(fink, ztf)
+        assert len(out) == 2
+        assert set(out['brokers_detected']) == {'Fink', 'ALeRCE-ZTF'}
+
+    def test_empty_streams(self):
+        fink = self._fink(1)
+        empty = pd.DataFrame()
+        assert len(merge_wide_streams(fink, empty)) == 1
+        assert len(merge_wide_streams(empty, self._ztf(1.0, 1.0))) == 1
+        assert len(merge_wide_streams(empty, empty)) == 0
 
 
 class TestCombined:

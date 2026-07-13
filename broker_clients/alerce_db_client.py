@@ -150,6 +150,73 @@ class AlerceDBClient:
             logger.warning("ALeRCE DB query_sn_candidates failed: %s", e)
             return pd.DataFrame()
 
+    def query_fresh_sn_candidates(self, mjd_now: float,
+                                  min_prob: float = 0.3,
+                                  days_back: float = 30.0,
+                                  max_baseline_days: float = 150.0,
+                                  dec_limit: float = 22.0,
+                                  classifier: str = 'lc_classifier',
+                                  max_rows: int = 5000) -> pd.DataFrame:
+        """Query LIVE SN candidates for wide-sky selection.
+
+        Unlike ``query_sn_candidates`` — which pulls an arbitrary
+        LIMIT-truncated slice of ZTF's multi-year history (no time filter, no
+        ordering) — this constrains at the SQL level to objects that are:
+
+        - fresh: last detection (firstmjd + deltajd) within ``days_back``,
+        - short-baseline: detection span <= ``max_baseline_days`` (rejects
+          AGN/long-lived variables before they ever reach the pipeline),
+        - Magellan-visible: dec <= ``dec_limit``,
+        - SN-classified (any SN class, ranking 1) above ``min_prob``.
+
+        The class tag is carried through (SNIa/SNIbc/SNII/SLSN) so downstream
+        ranking can be program-specific — selection does NOT filter to Ia.
+
+        Returns one row per (object, band) with magstat's per-band brightest
+        magnitude joined in; aggregate over ``oid`` for per-object values.
+        Columns: oid, meanra, meandec, ndet, firstmjd, deltajd, class_name,
+        probability, fid, magmin, maglast.
+        """
+        sn_classes_str = ", ".join(f"'{c}'" for c in SN_CLASSES)
+        query = f"""
+            WITH fresh AS (
+                SELECT
+                    o.oid, o.meanra, o.meandec, o.ndet,
+                    o.firstmjd, o.deltajd,
+                    p.class_name, p.probability
+                FROM object o
+                INNER JOIN probability p ON o.oid = p.oid
+                WHERE p.classifier_name = :classifier
+                  AND p.ranking = 1
+                  AND p.class_name IN ({sn_classes_str})
+                  AND p.probability > :min_prob
+                  AND (o.firstmjd + o.deltajd) >= :min_last_mjd
+                  AND o.deltajd <= :max_baseline
+                  AND o.meandec <= :dec_limit
+                LIMIT :max_rows
+            )
+            SELECT f.*, m.fid, m.magmin, m.maglast
+            FROM fresh f LEFT JOIN magstat m ON m.oid = f.oid
+        """
+        try:
+            df = self._read_sql(query, {
+                'classifier': classifier,
+                'min_prob': min_prob,
+                'min_last_mjd': mjd_now - days_back,
+                'max_baseline': max_baseline_days,
+                'dec_limit': dec_limit,
+                'max_rows': max_rows,
+            })
+            n_obj = df['oid'].nunique() if len(df) else 0
+            logger.info("ALeRCE DB: %d fresh SN candidates "
+                        "(prob>%.2f, <=%.0fd old, span<=%.0fd, dec<=%+.0f)",
+                        n_obj, min_prob, days_back, max_baseline_days,
+                        dec_limit)
+            return df
+        except Exception as e:
+            logger.warning("ALeRCE DB query_fresh_sn_candidates failed: %s", e)
+            return pd.DataFrame()
+
     def query_probabilities(self, oids: List[str],
                             classifier: str = 'lc_classifier') -> pd.DataFrame:
         """Get all class probabilities for a list of objects.

@@ -797,8 +797,12 @@ def _normalize_merged_candidates(screened):
 
     # ddf_field: the aggregator only carries it for brokers that set it
     # (ANTARES/ALeRCE blocks), so fill any missing rows from coordinates.
+    # The column must be object-dtype first: an all-NaN merged column comes
+    # out float64, and assigning field-name strings into it raises under
+    # pandas>=3 (no silent object upcast).
     if 'ddf_field' not in screened.columns:
         screened['ddf_field'] = None
+    screened['ddf_field'] = screened['ddf_field'].astype(object)
     missing_field = screened['ddf_field'].isna()
     if missing_field.any():
         screened.loc[missing_field, 'ddf_field'] = screened.loc[missing_field].apply(

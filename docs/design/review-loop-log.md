@@ -214,5 +214,20 @@ needs_classification + non-Ia rescue tier; real MAGNETS allocations
 (example file still in use); epoch-cadence policy; S/N-based exposure/ETC;
 ANTARES wide mode (parked); Google-Sheet manual front end.
 
-`nights/wide10/ut20260715` (union-fed night, 310 objects fitted vs 157) was
-running at log time — results to be appended.
+### wide10 — first union-fed night (2026-07-14, MJD 61236)
+
+Completed same day, ~15 min runtime despite 2x fit load:
+union 313 → 287 after screens (220 BHRF + 67 legacy) + Fink → 310 fitted →
+**63 ranked finalists (vs 30 on wide9)**. Finalist provenance: 48 BHRF /
+9 legacy / 6 Fink-Rubin. Ground truth is rich: 61/63 TNS-reported, 22
+spec-classified (20 Ia). z-enrichment gained 26 (22 TNS spec-z). Template
+tournament (production, all 63): Ia=53, Ibc=8, IIP=1, IIn=1. Plan: 17
+science targets + 4 standards, 9.7 h.
+
+**Rank 1 = SN 2026reu** — the confirmed Ia (r=18.4, +4.5 d) that the
+legacy classifier missed this morning and that motivated the union: found
+via BHRF at 2 pm, implemented by 3 pm, top of the executable plan by 3:40.
+Merit-per-hour 0.83 at an 11-min exposure; ranks 2–3 are two more
+confirmed Ia at 18.4–18.6 (13/12 min). The rising Rubin photo-z object
+(wide9's rank 2) sits at rank 4, now Δt = −4.1 d and template-tournament
+preferred as Ia.

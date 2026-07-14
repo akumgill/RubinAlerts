@@ -123,6 +123,17 @@ loop — R17 Baade docstring, R3 state path, R8 quartile docs, etc. See
    agreement stats; TNS xm first-non-null across alerts.
 
 ### NEXT UP
+- **Multi-type template tournament** — generalize choose_best_fit from
+  SALT2-vs-generic into a template comparison: sncosmo built-ins cover
+  Ibc/IIP/IIL/IIn (nugent-*, snana-* CC library); SLSN/TDE need wrapped
+  community SEDs or parametric (magnetar/MOSFiT) models; ParSNIP (Boone
+  2021, pip-installable, sncosmo-compatible) is the modern all-types
+  generative option. Buys: positive typing evidence for the exotic profile
+  (ia_evidence is one-sided today), correct non-Ia phase estimates (IIP
+  plateau fitted as a plateau, not a Villar bump), and an exotic rescue
+  tier (today's rescue only resurrects Ia-shaped light curves). ~1 s/fit
+  extra per candidate. Natural first deliverable of the exotic
+  top-of-funnel work.
 - **Exotic top-of-funnel** — the selection funnel is Ia-shaped end-to-end
   (SN-classifier streams, Ia z/phase/freshness cuts, nuclear/long-baseline
   screens treat exotic signatures as contamination). The ranking/scheduling

@@ -137,12 +137,16 @@ top-of-queue work, roughly in order:
    candidates.csv schema + manual-queue CSV + allocations.yaml + composite
    priority are the de-facto interface to formalize. Other groups implement
    clients against it; a sandbox tabletop exercise (fake night) validates it.
-2. **Token / currency prioritization model.** NEW priority input, SEPARATE from
-   hour budgets (both coexist: budgets dock PI time, tokens set queue priority).
-   Shared targets split by token spend / contribution. Design into the API spec;
-   maps onto the manual-queue `priority` field + composite_priority.
-3. **LDSS3 output format** alongside LLAMAS (see architecture decision above) —
-   scheduler emits both instrument catalog formats.
+2. **Parity-queue prioritization (NOT tokens).** Akum rejected the meeting's
+   token model (2026-07-14). Charging = actual observed time docked from the PI
+   budget. Priority = (a) parity bucket (existing P1–P4) × (b) budget
+   availability (% of original budget remaining or hours left — function TBD).
+   This is essentially the current composite priority (parity × budget factor ×
+   phase × observability) minus tokens. Open choice: reward-underspent vs.
+   fair-share-convergence; %-remaining vs. absolute-hours. Fold into the API spec.
+3. **LDSS3 output format** alongside LLAMAS — agreed but DEFERRED (Akum: "a little
+   later"); LLAMAS output stays primary. Scheduler eventually emits both catalog
+   formats.
 4. **S/N-based exposure calculator** — calibration team posts an S/N-vs-mag chart
    on Slack (data point: R~18.5 → S/N~25/px in 10 min on LLAMAS). Replaces the
    magnitude-scaling model; resolves the TODO(S/N-feasibility) marker.

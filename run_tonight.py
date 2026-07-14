@@ -1062,6 +1062,10 @@ ATLAS_BRIGHT_MAG_CUT = 20.0  # Only fetch ATLAS for candidates brighter than thi
 # ILLUSTRATIVE budgets until MAGNETS agrees real per-PI numbers.
 DEFAULT_ALLOCATIONS = 'ref/allocations_example.yaml'
 
+# Reference exposure for the merit-per-hour ranking (matches the scheduler's
+# value-density reference): a 45-min target has density 1.0.
+RATE_REF_MINUTES = 45.0
+
 
 def _atlas_filter_to_nJy(by_filter):
     """Convert ATLAS per-filter photometry dict to unified nJy DataFrame.
@@ -2813,6 +2817,10 @@ def main():
     parser.add_argument('--no-orchestrate', action='store_true',
                         help='Stop after candidates.csv; do not generate the '
                              'LLAMAS observing plan')
+    parser.add_argument('--rank-alpha', type=float, default=0.5,
+                        help='Merit-per-hour exponent: ranking orders by '
+                             'merit x (45min/exposure)^alpha — value density. '
+                             '0 ranks by pure merit (default: 0.5)')
     parser.add_argument('--max-phase', type=float, default=25.0,
                         help='Max |days from fitted peak| to keep a candidate '
                              '(default: 25, matched to the tau=10d merit scale)')
@@ -3181,7 +3189,9 @@ def main():
     moon_cols = ['merit', 'merit_exotic', 'w_time', 'w_mag', 'w_prob',
                  'w_host', 'w_ext', 'w_broker', 'w_moon', 'w_salt',
                  'w_absmag', 'w_iaspec',
-                 'moon_penalty', 'moon_separation', 'moon_illumination']
+                 'moon_penalty', 'moon_separation', 'moon_illumination',
+                 # needed by the merit-per-hour ranking (merit_rate)
+                 'exposure_minutes', 'optimal_time_ut']
     avail_cols = [c for c in moon_cols if c in plan.columns]
     if avail_cols and 'diaObjectId' in plan.columns:
         moon_lookup = plan.set_index('diaObjectId')[avail_cols]
@@ -3190,12 +3200,25 @@ def main():
         summary = summary.sort_values('merit', ascending=False, na_position='last')
         summary = summary.reset_index(drop=True)
 
-    # Within-night merit rank/percentile: absolute merit values are products
-    # of many sub-1 factors and hard to read; rank is what the observer acts
-    # on. 1 = best. Percentile is the fraction of tonight's targets this one
-    # beats (100 = best), meaningful only relative to tonight's list.
+    # Within-night ranking. `merit` stays the PURE science value (every
+    # factor auditable); the RANKING orders by value DENSITY:
+    #     merit_rate = merit x (45 min / exposure)^alpha
+    # (PI decision 2026-07-14: a target delivering its science in a fifth of
+    # the time should outrank a marginally-better one that eats a quarter of
+    # the night; alpha=0 restores pure-merit ordering). merit_rank/percentile
+    # are what the observer acts on; 1 = best.
     if 'merit' in summary.columns and len(summary) > 0:
-        m = summary['merit']
+        alpha = getattr(args, 'rank_alpha', 0.5)
+        exp_col = pd.to_numeric(summary.get('exposure_minutes'), errors='coerce')
+        if alpha > 0 and exp_col is not None and exp_col.notna().any():
+            density = (RATE_REF_MINUTES / exp_col.clip(lower=5.0)) ** alpha
+            density = density.fillna(1.0)
+        else:
+            density = 1.0
+        summary['merit_rate'] = summary['merit'] * density
+        if 'merit_exotic' in summary.columns:
+            summary['merit_exotic_rate'] = summary['merit_exotic'] * density
+        m = summary['merit_rate']
         summary['merit_rank'] = m.rank(ascending=False, method='min', na_option='bottom').astype(int)
         n_ranked = m.notna().sum()
         if n_ranked > 1:
@@ -3203,9 +3226,11 @@ def main():
                                            / (n_ranked - 1) * 100).clip(0, 100).round(1)
         else:
             summary['merit_percentile'] = np.where(m.notna(), 100.0, np.nan)
-        if 'merit_exotic' in summary.columns:
-            summary['merit_exotic_rank'] = summary['merit_exotic'].rank(
+        if 'merit_exotic_rate' in summary.columns:
+            summary['merit_exotic_rank'] = summary['merit_exotic_rate'].rank(
                 ascending=False, method='min', na_option='bottom').astype(int)
+        summary = summary.sort_values('merit_rate', ascending=False,
+                                      na_position='last').reset_index(drop=True)
 
     # --- Step 7: Generate light curve plots ---
     plot_paths = generate_light_curve_plots(fit_results, lc_dir, summary)

@@ -425,11 +425,22 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
     # Per-target ranking merit: the program's own profile column when
     # configured and present, else the shared (Ia) merit.
     if merit_col in df.columns:
-        df['_rank_merit'] = df[merit_col]
+        # Ranking merit: prefer the value-density column (merit_rate =
+        # merit x (45min/exposure)^alpha) when the pipeline provides it —
+        # ranking rewards science per hour, while `merit` itself remains the
+        # pure science value for auditability.
+        base_rate = 'merit_rate' if 'merit_rate' in df.columns else merit_col
+        df['_rank_merit'] = df[base_rate]
         if program_profiles and 'program' in df.columns:
             for prog, prof in program_profiles.items():
-                col = f'merit_{prof}'
-                if prof and prof != 'ia' and col in df.columns:
+                if not prof or prof == 'ia':
+                    continue
+                col = None
+                for cand_col in (f'merit_{prof}_rate', f'merit_{prof}'):
+                    if cand_col in df.columns:
+                        col = cand_col
+                        break
+                if col:
                     sel = df['program'].fillna('').astype(str).str.strip() == prog
                     df.loc[sel, '_rank_merit'] = df.loc[sel, col]
 

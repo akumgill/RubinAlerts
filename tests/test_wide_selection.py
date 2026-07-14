@@ -780,3 +780,37 @@ programs:
     assert acc.get_ranking_profile('A') == 'ia'
     assert acc.get_ranking_profile('B') == 'exotic'
     assert acc.get_ranking_profile('missing') == 'ia'
+
+
+class TestMeritPerHour:
+    """Ranking orders by value density (merit_rate); merit stays pure."""
+
+    def test_rate_column_preferred_by_loader(self, tmp_path):
+        from orchestrator.normalize import load_from_rubinalerts
+        rows = [
+            # high merit but huge exposure -> low rate
+            {'object_id': 'anchor', 'ra': 150, 'dec': -20, 'merit': 0.40,
+             'merit_rate': 0.22},
+            # slightly lower merit, tiny exposure -> high rate
+            {'object_id': 'snack', 'ra': 151, 'dec': -20, 'merit': 0.33,
+             'merit_rate': 0.41},
+            {'object_id': 'c3', 'ra': 152, 'dec': -20, 'merit': 0.10,
+             'merit_rate': 0.10},
+            {'object_id': 'c4', 'ra': 153, 'dec': -20, 'merit': 0.05,
+             'merit_rate': 0.05},
+        ]
+        path = tmp_path / 'c.csv'
+        pd.DataFrame(rows).to_csv(path, index=False)
+        targets = load_from_rubinalerts(str(path), default_program='X')
+        pr = {t.name: t.priority for t in targets}
+        assert pr['snack'] == 1   # density winner is P1
+        assert pr['anchor'] == 2  # pure-merit winner drops to P2
+
+    def test_no_rate_column_falls_back_to_merit(self, tmp_path):
+        from orchestrator.normalize import load_from_rubinalerts
+        rows = [{'object_id': f't{i}', 'ra': 150, 'dec': -20,
+                 'merit': 0.4 - 0.1 * i} for i in range(4)]
+        path = tmp_path / 'c.csv'
+        pd.DataFrame(rows).to_csv(path, index=False)
+        targets = load_from_rubinalerts(str(path), default_program='X')
+        assert {t.name: t.priority for t in targets}['t0'] == 1

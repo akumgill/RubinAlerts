@@ -65,7 +65,11 @@ python -m orchestrator --date 2026-10-15 --targets ref/test_targets.csv --moon g
 
 ## Key Architecture Decisions
 
-- **LLAMAS only** — orchestrator is for LLAMAS on Magellan/Baade exclusively. LDSS3 materials in `ref/` are reference only.
+- **LLAMAS primary; LDSS3 output now required** — orchestrator scheduling logic
+  is LLAMAS-first (IFU, 1-min overhead), but the 2026-07 MAGNETS meeting asked the
+  scheduler to emit instrument-specific target lists for **both LLAMAS and LDSS3**
+  (LDSS3 is slit, ~10-min overhead, different catalog format). This reverses the
+  earlier "LDSS3 is reference only" stance. See `magnets-meeting-2026-07` memory.
 - **Multi-program time accounting** — allocations.yaml defines per-PI budgets across dark/grey/bright moon phases. Charge-on-schedule with post-night reconciliation.
 - **Composite priority scoring** — science weight × budget factor × phase weight + observability + keyword signals. Phase weight (`w_time`) from alert pipeline boosts near-peak targets.
 - **Greedy scheduling** — `score = composite_priority - airmass × 10`. Falls back to `(5 - priority) × 100 - airmass × 10` without prioritizer.
@@ -122,6 +126,35 @@ loop — R17 Baade docstring, R3 state path, R8 quartile docs, etc. See
    wide mode uses the real `merge_alerts` (2" tolerance) with cross-survey
    agreement stats; TNS xm first-non-null across alerts.
 
+### POST-MEETING PRIORITIES (2026-07 MAGNETS meeting — see `magnets-meeting-2026-07` memory)
+The collaboration adopted the shared alert-to-schedule pipeline concept. New
+top-of-queue work, roughly in order:
+
+1. **Target-submission API spec (Akum's deliverable — highest priority).**
+   Draft + distribute an interface spec for pushing targets with attributes
+   (anticipated magnitude, priority/token spent, requested exposure) that
+   supports BOTH manual lists and automated pipeline ingestion. Our
+   candidates.csv schema + manual-queue CSV + allocations.yaml + composite
+   priority are the de-facto interface to formalize. Other groups implement
+   clients against it; a sandbox tabletop exercise (fake night) validates it.
+2. **Token / currency prioritization model.** NEW priority input, SEPARATE from
+   hour budgets (both coexist: budgets dock PI time, tokens set queue priority).
+   Shared targets split by token spend / contribution. Design into the API spec;
+   maps onto the manual-queue `priority` field + composite_priority.
+3. **LDSS3 output format** alongside LLAMAS (see architecture decision above) —
+   scheduler emits both instrument catalog formats.
+4. **S/N-based exposure calculator** — calibration team posts an S/N-vs-mag chart
+   on Slack (data point: R~18.5 → S/N~25/px in 10 min on LLAMAS). Replaces the
+   magnitude-scaling model; resolves the TODO(S/N-feasibility) marker.
+5. **ToO / high-priority interrupt tier** — extends the existing `mandatory`
+   reservation flag.
+
+Meeting-answered / de-scoped: in-night type-then-commit is NOT feasible yet
+(only white-light quick-look exists; spectral typing is "months not weeks" away)
+→ **plan statically**; engagement models (manual/intermediate/automated) validated
+= our Pitch A/B; scheduling spreadsheet + observer training + authorship policy
+are other people's action items.
+
 ### NEXT UP
 - ~~**ALeRCE multi-classifier union**~~ — DONE (2026-07-14, 3ffd717):
   wide mode queries BHRF forced-phot + legacy lc_classifier pools
@@ -175,7 +208,14 @@ loop — R17 Baade docstring, R3 state path, R8 quartile docs, etc. See
   cadence policy (per-program, on top of phase buckets) is a science
   decision for the collaboration.
 - **Absolute cross-night merit thresholds** once statistics accumulate.
-- **S/N-based exposure + w_mag replacement** (TODO(S/N-feasibility) marker).
+- **S/N-based exposure + w_mag replacement** — now unblocked; see
+  POST-MEETING PRIORITIES #4 (S/N-vs-mag chart coming from the calibration team).
 
 ### PLANNED FEATURES
-7. **Google Sheet integration** — Allow PIs to manually enqueue targets not sourced from alerts (gspread + service account). Design spec exists in `docs/design/spectroscopic-orchestration-review.tex` §"Planned: Google-Sheet manual-request front end".
+7. **Manual target front end → superseded by the collaboration API** (POST-MEETING
+   PRIORITIES #1). The meeting asked for a target-submission API supporting manual
+   lists + automated ingestion + token priority; that generalizes the earlier
+   Google-Sheet-only plan. A Google-Sheet / gspread client can still be one
+   front end that talks to the API. Design spec:
+   `docs/design/spectroscopic-orchestration-review.tex` §"Planned: Google-Sheet
+   manual-request front end".

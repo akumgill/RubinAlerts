@@ -123,6 +123,21 @@ loop — R17 Baade docstring, R3 state path, R8 quartile docs, etc. See
    agreement stats; TNS xm first-non-null across alerts.
 
 ### NEXT UP
+- ~~**ALeRCE multi-classifier union**~~ — DONE (2026-07-14, 3ffd717):
+  wide mode queries BHRF forced-phot + legacy lc_classifier pools
+  (`query_fresh_sn_candidates_multi`, provenance in `alerce_classifier`);
+  313 fresh SN objects vs 149 legacy-only. ATAT(beta) excluded pending
+  probability-calibration check (531 objects at 64% TNS-reported).
+- **TNS-fresh third source** — the youngest confirmed SNe (e.g. SN 2026rwh,
+  Ia mag 17.9 at 6 d) predate ALL LC classifiers (stamp says 'bogus');
+  source them from the nightly TNS dump directly (typed/reported SN, fresh,
+  dec <= +22) with light curves pulled from ALeRCE detections, skipping
+  classifier gates. ~half a day.
+- **ANTARES**: parked (audit 2026-07-14) — ES wide queries work but the
+  harvest is unwieldy (>4000 unfiltered young loci); its distinct catch
+  (pre-classifier SNe) is mostly covered by the TNS-fresh source. Cheap
+  option if wanted: per-finalist term-query enrichment (anomaly_score,
+  desoto typing; ~0.2 s/object).
 - ~~**Multi-type template tournament**~~ — DONE (2026-07-14, production):
   `fit_template` + `run_template_tournament` (core/peak_fitting) fit each
   finalist against SALT2 and nugent Ibc/IIP/IIn under the same z policy;

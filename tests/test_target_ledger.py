@@ -288,3 +288,20 @@ def test_breakdown_invariant_holds_with_completeness():
             bd['science_term'] + bd['observability_term'] + bd['keyword_term'])
         # science_term reflects the completeness factor.
         assert bd['completeness'] == pytest.approx(c)
+
+
+def test_bright_target_with_zero_integration_not_satisfied():
+    """A target whose TOTAL requirement is below the worthwhile-block size
+    must not be born 'satisfied' with zero integration (SN 2026roc bug,
+    2026-07-14): the below-block shortcut applies only once some
+    integration exists."""
+    from orchestrator.target_ledger import TargetLedger
+    from orchestrator.models import Target
+
+    ledger = TargetLedger()
+    t = Target(name='BrightSN', ra_deg=300.66, dec_deg=-25.56, priority=1)
+    # requires only 4 minutes total (< min_block_minutes), nothing observed
+    assert not ledger.is_satisfied(t, required_minutes=4.0)
+    # after observing ~all of it, the below-block rule may now fire
+    ledger.charge(t, science_seconds=3.5 * 60, date='2026-07-14')
+    assert ledger.is_satisfied(t, required_minutes=4.0)

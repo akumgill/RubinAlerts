@@ -289,6 +289,14 @@ class TargetLedger:
         frac = self.completeness_fraction(target, required_minutes, phase)
         if frac >= self.satisfied_fraction:
             return True
+        # The below-block rule exists so we don't chase a 5-minute remainder
+        # on a nearly-done target. It must NOT fire on a target with ZERO
+        # integration whose TOTAL need is small — a bright target requiring
+        # <15 min was born "satisfied" and could never be observed at all
+        # (caught live by the 2026-07-14 manual-enqueue demo: SN 2026roc,
+        # mag 17.2, excluded at 0/10 min).
+        if frac <= 0.0:
+            return False
         return self.remaining_minutes(target, required_minutes, phase) \
             < self.min_block_minutes
 

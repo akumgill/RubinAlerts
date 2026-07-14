@@ -597,14 +597,16 @@ def fetch_ztf_wide_candidates(mjd_now, min_prob=0.3, days_back=30,
                               min_gal_b=WIDE_MIN_GAL_B):
     """Fetch live ZTF SN candidates from ALeRCE for wide sky mode.
 
-    Uses the time-filtered ``query_fresh_sn_candidates`` (fresh, short
-    baseline, Magellan-visible at the SQL level) rather than the legacy
-    arbitrary-slice query, then applies the Galactic-plane screen and the
-    brightness rule. ALeRCE carries no redshift, so — mirroring the Fink
-    hostless rule — z-less ZTF objects are kept only if brighter than
-    ``hostless_max_mag``. The classifier class tag (SNIa/SNIbc/SNII/SLSN) is
-    carried through in ``alerce_class`` for program-specific ranking; the
-    selection does NOT filter to Ia.
+    Uses the time-filtered multi-classifier union
+    ``query_fresh_sn_candidates_multi`` (fresh, short baseline,
+    Magellan-visible at the SQL level; BHRF forced-phot + legacy
+    lc_classifier pools, per-object provenance in ``alerce_classifier``)
+    rather than the legacy arbitrary-slice query, then applies the
+    Galactic-plane screen and the brightness rule. ALeRCE carries no
+    redshift, so — mirroring the Fink hostless rule — z-less ZTF objects
+    are kept only if brighter than ``hostless_max_mag``. The classifier
+    class tag (SNIa/SNIbc/SNII/SLSN) is carried through in ``alerce_class``
+    for program-specific ranking; the selection does NOT filter to Ia.
 
     Returns (DataFrame in the wide-candidate schema, status dict).
     """
@@ -614,7 +616,7 @@ def fetch_ztf_wide_candidates(mjd_now, min_prob=0.3, days_back=30,
         from broker_clients.alerce_db_client import AlerceDBClient
         db = AlerceDBClient()
         db.connect()
-        rows = db.query_fresh_sn_candidates(
+        rows = db.query_fresh_sn_candidates_multi(
             mjd_now, min_prob=min_prob, days_back=days_back,
             max_baseline_days=max_baseline_days, dec_limit=dec_limit)
     except Exception as e:
@@ -627,12 +629,16 @@ def fetch_ztf_wide_candidates(mjd_now, min_prob=0.3, days_back=30,
         return pd.DataFrame(), status
 
     # Aggregate (object, band) rows -> one row per object
+    if 'alerce_classifier' not in rows.columns:
+        rows = rows.copy()
+        rows['alerce_classifier'] = 'lc_classifier'
     g = rows.groupby('oid').agg(
         ra=('meanra', 'first'), dec=('meandec', 'first'),
         firstmjd=('firstmjd', 'first'), deltajd=('deltajd', 'first'),
         alerce_class=('class_name', 'first'),
         probability=('probability', 'max'),
         brightest_mag=('magmin', 'min'),
+        alerce_classifier=('alerce_classifier', 'first'),
     ).reset_index()
     g['last_mjd'] = g['firstmjd'] + g['deltajd']
 
@@ -669,9 +675,10 @@ def fetch_ztf_wide_candidates(mjd_now, min_prob=0.3, days_back=30,
 
     status['n_returned'] = len(g)
     logger.info("ALeRCE-ZTF wide: %d live candidates after |b|>=%.0f and "
-                "mag<=%.1f (classes: %s)",
+                "mag<=%.1f (classes: %s; classifiers: %s)",
                 len(g), min_gal_b, min(max_mag, hostless_max_mag),
-                dict(g['alerce_class'].value_counts()))
+                dict(g['alerce_class'].value_counts()),
+                dict(g['alerce_classifier'].value_counts()))
     return g, status
 
 
@@ -1764,6 +1771,7 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
             'sn_score': cand.get('sn_score', np.nan),
             'early_ia_score': cand.get('early_ia_score', np.nan),
             'alerce_class': cand.get('alerce_class', ''),
+            'alerce_classifier': cand.get('alerce_classifier', ''),
             'z_source': cand.get('z_source', ''),
             'ztf_oid': cand.get('ztf_oid', ''),
             'brokers_detected': cand.get('brokers_detected', 'Fink'),

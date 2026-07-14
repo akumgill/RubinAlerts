@@ -83,6 +83,7 @@ PASSTHROUGH_COLUMNS = {
     'gaia_varflag_xm':  _first_notblank,
     'early_ia_score':   _max_num,        # per-object best, matches fetch side
     'alerce_class':     _join_unique,    # keep every broker's class tag
+    'alerce_classifier': _first_notblank,  # which ALeRCE classifier selected it
     'fink_tag':         _join_unique,
 }
 

@@ -17,6 +17,16 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Fresh-SN classifier priority for query_fresh_sn_candidates_multi.
+# BHRF forced-phot first (bigger AND purer pool: 222 objects / 92%
+# TNS-reported vs legacy's 149 / 75%, audit 2026-07-14); legacy second so
+# nothing selected before the migration is silently dropped. ATAT
+# (LC_classifier_ATAT_forced_phot(beta), 531 objects / 64%) is deliberately
+# excluded until its probability calibration is checked — at min_prob 0.3
+# it would flood the wide-mode fit cap with impurity.
+DEFAULT_FRESH_CLASSIFIERS = ('lc_classifier_BHRF_forced_phot',
+                             'lc_classifier')
+
 CREDENTIALS_URL = (
     "https://raw.githubusercontent.com/alercebroker/usecases/"
     "master/alercereaduser_v4.json"
@@ -218,6 +228,53 @@ class AlerceDBClient:
         except Exception as e:
             logger.warning("ALeRCE DB query_fresh_sn_candidates failed: %s", e)
             return pd.DataFrame()
+
+    def query_fresh_sn_candidates_multi(
+            self, mjd_now: float,
+            classifiers=DEFAULT_FRESH_CLASSIFIERS,
+            **kwargs) -> pd.DataFrame:
+        """Union of per-classifier fresh SN pools, with provenance.
+
+        ALeRCE runs several light-curve classifiers whose SN pools overlap
+        only partially (audit 2026-07-14: legacy lc_classifier 149 objects
+        at 75% TNS-reported vs BHRF forced-phot 222 at 92%, overlap only
+        58 — neither contains the other). This queries each classifier in
+        priority order and unions the results.
+
+        Deduplication is by ``oid``, keeping the FIRST (highest-priority)
+        classifier's rows: probabilities are NOT calibrated against each
+        other across classifiers, so no cross-classifier max is taken.
+        The winning classifier is recorded per row in ``alerce_classifier``.
+
+        Parameters
+        ----------
+        classifiers : sequence of str
+            Classifier names in priority order (default: BHRF forced-phot
+            first, then legacy lc_classifier).
+        **kwargs
+            Passed through to query_fresh_sn_candidates (min_prob,
+            days_back, dec_limit, ...).
+        """
+        frames = []
+        seen: set = set()
+        counts = {}
+        for clf in classifiers:
+            df = self.query_fresh_sn_candidates(mjd_now, classifier=clf,
+                                                **kwargs)
+            if len(df) == 0:
+                counts[clf] = 0
+                continue
+            new = df[~df['oid'].isin(seen)].copy()
+            new['alerce_classifier'] = clf
+            counts[clf] = new['oid'].nunique()
+            seen.update(new['oid'])
+            frames.append(new)
+        logger.info("ALeRCE DB multi-classifier union: %d objects (%s)",
+                    len(seen),
+                    ', '.join(f"{c}: +{n}" for c, n in counts.items()))
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
 
     def query_probabilities(self, oids: List[str],
                             classifier: str = 'lc_classifier') -> pd.DataFrame:

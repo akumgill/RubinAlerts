@@ -400,6 +400,10 @@ class TestZtfWideIaProbSemantics:
             def query_fresh_sn_candidates(self, *a, **k):
                 return rows
 
+            # production path: the multi-classifier union entry point
+            def query_fresh_sn_candidates_multi(self, *a, **k):
+                return rows
+
         monkeypatch.setattr(adb, 'AlerceDBClient', FakeDB)
         out, status = rt.fetch_ztf_wide_candidates(MJD_NOW, min_prob=0.3)
         assert status['responded'] and status['n_returned'] == 2

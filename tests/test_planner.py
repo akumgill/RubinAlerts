@@ -235,3 +235,47 @@ def test_mid_standard_reserved_block(tmp_path):
             for e in plan.scheduled:
                 assert not (e.start < smid['end'] and e.end > smid['start']), \
                     f"science entry {e.target.name} overlaps mid-standard block"
+
+
+def test_fairness_band_prefers_underserved_when_feasible(tmp_path):
+    """Tolerance band: a program over its share (beyond tolerance) loses the
+    slot to a feasible under-served candidate, but the band yields (never
+    wastes sky) when the underdog has nothing observable."""
+    from astropy.time import Time
+    from orchestrator.planner import create_schedule, compute_observability
+    from orchestrator.config import LLAMASConfig
+    from orchestrator.accounting import TimeAccountant
+
+    y = tmp_path / 'a.yaml'
+    y.write_text("""
+semester: "T"
+default_program: "A"
+programs:
+  - program: "A"
+    pi: "x"
+    allocated_hours: {dark: 5.0, grey: 0.0, bright: 0.0}
+  - program: "B"
+    pi: "y"
+    allocated_hours: {dark: 5.0, grey: 0.0, bright: 0.0}
+""")
+    acc = TimeAccountant.from_yaml(str(y), state_path=str(tmp_path / 's.json'))
+    config = LLAMASConfig()
+    config.fairness_tolerance = 0.10
+    evening = Time('2026-07-14T00:00:00')
+    morning = Time('2026-07-14T06:00:00')
+    # Program A: two big targets; program B: one small target, same sky area.
+    # After A's first pick, A is far over-share; B's target is feasible, so
+    # the band must hand B the next slot even though A's P1 outranks it.
+    tgts = [
+        _mk_target('A1', 300.0, -30.0, 90.0, priority=1),
+        _mk_target('A2', 301.0, -30.0, 90.0, priority=1),
+        _mk_target('B1', 302.0, -30.0, 25.0, priority=3),
+    ]
+    for t, p in zip(tgts, ('A', 'A', 'B')):
+        t.program = p
+    targets = compute_observability(tgts, evening, morning, config=config)
+    plan = create_schedule(targets, evening, morning, moon_phase='dark',
+                           standards_path=str(tmp_path / 'none.txt'),
+                           config=config, accountant=acc)
+    order = [e.target.name for e in plan.scheduled]
+    assert order.index('B1') == 1, f"band should slot B1 second, got {order}"

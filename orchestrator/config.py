@@ -29,6 +29,12 @@ class LLAMASConfig:
     # Wall-clock block reserved for each MID-NIGHT standard (2x30s + acquire).
     # Start/end standards live in twilight and consume no dark time.
     std_block_minutes: float = 6.0
+    # Multi-program fairness tolerance: a program may not exceed its share of
+    # tonight's allocations by more than this fraction WHILE an under-served
+    # program still has a feasible in-window candidate (feasibility-
+    # conditioned, so it never wastes sky). 0 disables the band; the
+    # prospective nudge still applies. Within the band, merit rules.
+    fairness_tolerance: float = 0.15
     max_airmass: float = 1.6
     gap_fill_max_minutes: float = 5.0
 

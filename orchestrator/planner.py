@@ -685,6 +685,9 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
         best = None
         best_score = -np.inf
         best_ops_min = 0.0
+        best_over = None
+        best_over_score = -np.inf
+        best_over_ops = 0.0
 
         for t in eligible:
             if t.name in scheduled_names:
@@ -731,16 +734,34 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             density = EXPOSURE_DENSITY_BONUS * min(
                 EXPOSURE_DENSITY_REF_MIN / max(exp_min, 1.0), 3.0)
 
-            # Night-balance nudge: boost the program that is under-served
-            # relative to its share of tonight's allocations (bounded; a
-            # soft pull toward the split, not a wall).
+            # Night-balance nudge — PROSPECTIVE and DURATION-AWARE
+            # (2026-07-14 redesign after the slot-trace): evaluate the share
+            # as it WOULD BE after this pick, so a long pick at a balanced
+            # moment feels resistance proportional to the imbalance it is
+            # about to create (the retrospective form was exactly zero at
+            # that moment, whatever the bonus). Still a bounded soft nudge.
             balance = 0.0
+            over_band = False
             if fair_share:
-                tot_sched = sum(sched_science_min.values())
-                if tot_sched > 0:
-                    share_now = sched_science_min.get(t.program, 0.0) / tot_sched
-                    deficit = fair_share.get(t.program, 0.0) - share_now
-                    balance = NIGHT_BALANCE_BONUS * max(-1.0, min(1.0, deficit))
+                charged_est = exp_min + config.overhead_minutes
+                tot_after = sum(sched_science_min.values()) + charged_est
+                share_after = (sched_science_min.get(t.program, 0.0)
+                               + charged_est) / tot_after
+                deficit_after = fair_share.get(t.program, 0.0) - share_after
+                size = min(charged_est / EXPOSURE_DENSITY_REF_MIN, 3.0)
+                # imbalance-increasing picks feel size-scaled resistance;
+                # underdog picks get the plain boost (not weakened by being
+                # small — small picks barely move the split anyway)
+                scale = size if deficit_after < 0 else 1.0
+                balance = (NIGHT_BALANCE_BONUS
+                           * max(-1.0, min(1.0, deficit_after)) * scale)
+                # Tolerance band: mark candidates whose pick would push their
+                # program beyond fair share + tolerance. They are skipped
+                # this slot IF an under-served program has a feasible
+                # candidate here (checked after the loop) — never otherwise.
+                tol = getattr(config, 'fairness_tolerance', 0.0) or 0.0
+                if tol > 0 and deficit_after < -tol:
+                    over_band = True
 
             # Score: use prioritizer if available, else priority-based
             if prioritizer_scores and t.name in prioritizer_scores:
@@ -749,10 +770,23 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             else:
                 score = ((5 - t.priority) * 100 - am * 10 - slew_pen
                          + density + balance)
-            if score > best_score:
+            if over_band:
+                # feasible but over the fairness band: only eligible if no
+                # within-band candidate exists this slot
+                if score > best_over_score:
+                    best_over_score = score
+                    best_over = t
+                    best_over_ops = ops_min
+            elif score > best_score:
                 best_score = score
                 best = t
                 best_ops_min = ops_min
+
+        if best is None and best_over is not None:
+            # No within-band candidate is feasible at this slot: the band
+            # yields rather than waste sky (feasibility-conditioned).
+            best, best_score, best_ops_min = (best_over, best_over_score,
+                                              best_over_ops)
 
         if best is not None:
             exp_min = best.exposure_minutes

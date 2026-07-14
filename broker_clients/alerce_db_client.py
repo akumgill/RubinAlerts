@@ -199,13 +199,15 @@ class AlerceDBClient:
             FROM fresh f LEFT JOIN magstat m ON m.oid = f.oid
         """
         try:
+            # Plain-python types: psycopg2 cannot adapt np.float64 (it renders
+            # as np.float64(...) in the SQL -> "schema np does not exist").
             df = self._read_sql(query, {
-                'classifier': classifier,
-                'min_prob': min_prob,
-                'min_last_mjd': mjd_now - days_back,
-                'max_baseline': max_baseline_days,
-                'dec_limit': dec_limit,
-                'max_rows': max_rows,
+                'classifier': str(classifier),
+                'min_prob': float(min_prob),
+                'min_last_mjd': float(mjd_now - days_back),
+                'max_baseline': float(max_baseline_days),
+                'dec_limit': float(dec_limit),
+                'max_rows': int(max_rows),
             })
             n_obj = df['oid'].nunique() if len(df) else 0
             logger.info("ALeRCE DB: %d fresh SN candidates "

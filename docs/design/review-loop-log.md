@@ -143,3 +143,76 @@ system — all R-fixes, W11 ledger, and these phase features. Compiles clean (8 
 phase-bucket window (±5 d); multi-group conflict *arbitration* deferred (currently alerts only).
 
 
+
+---
+
+## 2026-07-13/14 — Wide-sky sprint + MAGNETS meeting prep
+
+Status snapshot written 2026-07-14 (meeting day). ~30 commits
+`8fd00e3..3ffd717`, suite 96 → **288 tests** (all offline-safe).
+
+### The pivot: DDF-only → wide-sky selection
+
+The DDF-centric funnel produced 8 faint unusable targets (77 min runtime);
+inverted to payload-level wide-sky selection: r ≤ 21.5, z ≤ 0.4 (hostless
+≤ 20.5), dec ≤ +22 (airmass 1.6 at LCO), fresh ≤ 30 d, baseline ≤ 150 d,
+|b| ≥ 10, GCVS/VSX/Simbad-AGN/Gaia-parallax screens — all BEFORE per-object
+work. Canonical demonstration night (`nights/wide9/ut20260713`): funnel
+3584 Fink + 134 ALeRCE-ZTF → 157 fitted → **30 ranked finalists, 11 min
+runtime**; 6/6 pre-classified finalists consistent with pipeline evidence
+(rank 1 = confirmed SN Ia, 10-min target).
+
+### Shipped since the June loop
+
+| Area | What |
+|------|------|
+| Sources | ALeRCE-ZTF live SQL (`query_fresh_sn_candidates`, time-filtered, fixes arbitrary-slice bug); Fink payload selection; TNS daily-dump cross-match (1 download/night, 202k objects); NED timeout fix |
+| Aggregator | Wide mode uses real `merge_alerts` (2″), PASSTHROUGH_COLUMNS reducers, cross-survey agreement stats |
+| Probability | `effective_prob` chain (mean_ia_prob → sn_score → antares_proxy) + `prob_source` + `needs_classification`; `w_iaspec` [0.8–1.2] with positive-Ia ≥ neutral |
+| Fitting | Survey-aware SALT2 (`salt2-extended` + F99), `salt_z_policy` (spec-z fixed / photo-z bounded / free box), `choose_best_fit`, tiered rescue; **multi-type template tournament in production** (`fit_template`/`run_template_tournament`, nugent Ibc/IIP/IIn; Step 5b enrichment on finalists; ground truth 6/6: 4 Ia→Ia, TDE→IIn, SN II→IIP) |
+| Ranking | **Merit-per-hour** (single ranking; `merit_rate = merit × (45/exp)^0.5`, `--rank-alpha`); merit stays pure science value; per-program RankingProfile (IA + exotic strawman) |
+| Scheduling | **Single authority**: pipeline RANKS, orchestrator SCHEDULES (run_tonight Step 9 → `orchestrator.run_nightly` → `nights/…/llamas/`); pipeline's own schedule outputs retired. Standards in-plan, slew+acquisition wall-clock (unbilled ops), exposure-density bonus, prospective duration-aware fairness with feasibility band (`fairness_tolerance`), shared-ops proration by science share |
+| Cross-night | Per-target integration ledger (2″ coordinate-keyed, phase buckets, satisfied ≥ 0.95, frac>0 guard), multi-group alerts, mandatory reservation pass |
+| Enrichment | Post-ranking finalist z-enrichment (TNS dump → NED → fixed-z SALT refits); template-tournament typing columns |
+| Reporting | PDF report consistent with single ranking (merit/hr table, rank-order breakdown, updated merit reference, **LLAMAS observing-plan page** with per-program charges + ID→TNS-name legend) |
+| Robustness | Fink breaker pause+resume; pandas≥3 dtype fixes; np.float64 SQL-param fix |
+
+### Broker audits (recorded in memory + CLAUDE.md)
+
+- **RSP/TAP**: static DP1 only; live APDB USDF-restricted → Fink is the sole
+  live Rubin stream; redundancy = ZTF brokers.
+- **ANTARES (2026-07-14)**: raw ES queries work (range on freshness/mag/dec;
+  term queries ~0.2 s/object; knows 24/24 wide9 finalists). Wide harvest
+  unwieldy (>4000 unfiltered young loci). Distinct payload (desoto typing,
+  anomaly scores) sparse on young objects. **Parked**; per-finalist
+  term-query enrichment is the cheap option if wanted.
+- **ALeRCE classifier migration (found via ANTARES sanity check)**: legacy
+  `lc_classifier` (149 objects, 75% TNS-reported) vs BHRF forced-phot
+  (222, 92%) — overlap only 58. **Shipped multi-classifier union**
+  (`query_fresh_sn_candidates_multi`, BHRF priority + legacy, provenance
+  in `alerce_classifier`, no cross-classifier prob mixing): 313 objects
+  (+110%). Legacy-only slice is 60% TNS-reported → union, not swap.
+  ATAT(beta) (531 @ 64%) excluded pending calibration.
+
+### Meeting materials
+
+- Briefing artifact (two tabs: intro + technical appendix; collapsible
+  sections; clickable per-target light curves; two-source architecture +
+  funnel SVGs; Option-1/Option-2 operating scenarios; 7 discussion asks).
+- `nights/wide9/ut20260713/report_ut20260713.pdf` — self-contained nightly
+  report incl. executable LLAMAS plan.
+- Fortino et al. (arXiv 2607.03532) ingested: typing intact at R=50/SNR=5 →
+  "reconnaissance then commit" concept in asks (pending LLAMAS quicklook
+  latency — question for Simcoe).
+
+### Open (post-meeting queue)
+
+TNS-fresh third source (typed SNe from the nightly dump; the ONLY source
+for dec < −32 during the August Rubin downtime — 9 typed SNe there tonight);
+ATAT calibration check; exotic top-of-funnel; tournament verdict → merit /
+needs_classification + non-Ia rescue tier; real MAGNETS allocations
+(example file still in use); epoch-cadence policy; S/N-based exposure/ETC;
+ANTARES wide mode (parked); Google-Sheet manual front end.
+
+`nights/wide10/ut20260715` (union-fed night, 310 objects fitted vs 157) was
+running at log time — results to be appended.

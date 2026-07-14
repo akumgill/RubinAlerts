@@ -1986,6 +1986,75 @@ def enrich_finalist_redshifts(summary, fit_results, use_salt=False):
     return summary
 
 
+def enrich_finalist_typing(summary, fit_results):
+    """Multi-type template tournament over the finalists (typing evidence).
+
+    For each finalist, the SALT2 (Ia) fit competes against the core-collapse
+    template set (nugent Ibc/IIP/IIn) on the same cleaned light curve under
+    the same redshift policy. Positive typing evidence instead of the
+    one-sided "not a good Ia" signal (x1 rail / bad chi2): the winner says
+    WHICH template the photometry prefers. Ground truth 2026-07-13:
+    6/6 classified finalists consistent (Ia->salt2, SN II->IIP, TDE->IIn).
+
+    Adds columns:
+      template_best       winning label ('Ia', 'Ibc', 'IIP', 'IIn')
+      template_best_chi2  winner's chi2/dof
+      template_margin     runner-up chi2/dof - winner's (decisiveness)
+      template_peak_mjd   winner's synthesized peak epoch (non-Ia winners)
+
+    Evidence only: merit, phase and ranking are deliberately untouched —
+    non-Ia phase correction and an exotic rescue tier are the fit-loop
+    follow-on. Cost: ~3 extra ~1 s fits x ~30 finalists.
+    """
+    if len(summary) == 0 or not HAS_SNCOSMO:
+        return summary
+    from core.peak_fitting import run_template_tournament
+
+    summary['template_best'] = pd.Series(index=summary.index, dtype=object)
+    for col in ('template_best_chi2', 'template_margin', 'template_peak_mjd'):
+        summary[col] = np.nan
+
+    n_run = 0
+    wins = {}
+    for idx, row in summary.iterrows():
+        did = row['diaObjectId']
+        fit = fit_results.get(did, {})
+        lc = fit.get('light_curve_clean')
+        if lc is None or len(lc) < 5:
+            continue
+        z_val = pd.to_numeric(row.get('redshift'), errors='coerce')
+        src = row.get('z_source')
+        if str(row.get('ned_name') or '') == 'tns_specz':
+            src = 'tns_specz'   # z gained by enrichment: fix it
+        z_fixed, z_bounds = salt_z_policy(z_val, src)
+        salt = fit.get('salt')
+        mwebv = (salt or {}).get('mwebv')
+        try:
+            t = run_template_tournament(lc, z=z_fixed, z_bounds=z_bounds,
+                                        salt=salt, mwebv=mwebv, clean=False)
+        except Exception as e:
+            logger.debug("tournament failed for %s: %s", did, e)
+            continue
+        if t.get('status') != 'ok':
+            continue
+        n_run += 1
+        best = t['template_best']
+        wins[best] = wins.get(best, 0) + 1
+        summary.at[idx, 'template_best'] = best
+        summary.at[idx, 'template_best_chi2'] = t['template_best_chi2_dof']
+        summary.at[idx, 'template_margin'] = t['template_margin']
+        if best != 'Ia':
+            summary.at[idx, 'template_peak_mjd'] = t['template_peak_mjd']
+
+    non_ia = {k: v for k, v in wins.items() if k != 'Ia'}
+    logger.info("Template tournament: %d/%d finalists fit; winners: %s%s",
+                n_run, len(summary),
+                ', '.join(f"{k}={v}" for k, v in sorted(wins.items())),
+                (' — non-Ia preferred: check typing before long exposures'
+                 if non_ia else ''))
+    return summary
+
+
 def recompute_merit_with_moon(plan_df):
     """Fold the night's moon penalty into the ranking merit and re-sort.
 
@@ -2923,6 +2992,10 @@ def main():
     parser.add_argument('--no-z-enrich', action='store_true',
                         help='Skip the post-ranking TNS+NED redshift '
                              'enrichment of finalists (wide mode)')
+    parser.add_argument('--no-tournament', action='store_true',
+                        help='Skip the multi-type template tournament '
+                             '(SALT2 vs Ibc/IIP/IIn typing evidence on '
+                             'finalists; wide mode, needs SALT enabled)')
 
     # Scheduling: the LLAMAS orchestrator is the single scheduling authority
     parser.add_argument('--allocations', default=DEFAULT_ALLOCATIONS,
@@ -3280,6 +3353,17 @@ def main():
                                                 use_salt=do_salt)
         except Exception as e:
             logger.warning("Redshift enrichment failed (continuing): %s", e)
+
+    # --- Step 5b: template-tournament typing for the finalists (wide mode) ---
+    # SALT2 vs CC templates on each finalist: positive typing evidence
+    # (which template wins), not just "poor Ia fit". Runs after z-enrichment
+    # so gained spectroscopic redshifts are fixed in the comparison fits.
+    if (args.sky_mode == 'wide' and do_salt and not args.no_tournament
+            and len(summary) > 0):
+        try:
+            summary = enrich_finalist_typing(summary, fit_results)
+        except Exception as e:
+            logger.warning("Template tournament failed (continuing): %s", e)
 
     if len(summary) == 0:
         logger.error("Empty summary table")

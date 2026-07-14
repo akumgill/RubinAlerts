@@ -701,6 +701,233 @@ def choose_best_fit(vil, par, salt, min_fit_bands, mjd_min, mjd_max,
 
 
 # ---------------------------------------------------------------------------
+# Multi-type template tournament
+# ---------------------------------------------------------------------------
+
+# Core-collapse comparison set: sncosmo built-in Nugent templates. These are
+# amplitude-parameterized spectral time-series (params: z, t0, amplitude) —
+# no standardization, but exactly what typing-by-photometry needs. SLSN/TDE
+# have no built-in template; IIn is the closest available proxy for slow,
+# blue, long-lived transients (the classified TDE in the 2026-07 ground-truth
+# check was correctly preferred by IIn over SALT2).
+CC_TEMPLATES = {
+    'Ibc': 'nugent-sn1bc',
+    'IIP': 'nugent-sn2p',
+    'IIn': 'nugent-sn2n',
+}
+
+
+def fit_template(lc_df, model_name, z=None, z_bounds=None, mwebv=None,
+                 clean=True):
+    """Fit one amplitude-parameterized sncosmo template (e.g. nugent-*).
+
+    The generic sibling of fit_salt(): same survey-aware band mapping,
+    per-band model-coverage screening, F99 MW dust and redshift policy,
+    but fitting (z,) t0, amplitude instead of SALT's x0/x1/c.
+
+    Returns
+    -------
+    dict with: status, method='template', model, t0, z, z_railed,
+    peak_mjd, peak_mag_obs, peak_band_obs, chi2, ndof, chi2_dof,
+    n_points, n_bands. Peak is synthesized in the best-covered band, so a
+    IIP's plateau is located by the IIP template rather than an Ia-shaped
+    bump — the correct phase estimate for non-Ia transients.
+    """
+    base_result = {'method': 'template', 'model': model_name}
+
+    if not HAS_SNCOSMO:
+        return {**base_result, 'status': 'sncosmo_not_installed'}
+
+    from astropy.table import Table
+
+    df = clean_light_curve(lc_df) if clean else lc_df.copy()
+    if 'psfFlux' in df.columns and 'flux' not in df.columns:
+        df['flux'] = df['psfFlux']
+    if 'psfFluxErr' in df.columns and 'flux_err' not in df.columns:
+        df['flux_err'] = df['psfFluxErr']
+    if 'band_name' in df.columns and 'band' not in df.columns:
+        df['band'] = df['band_name']
+    if not {'mjd', 'flux', 'flux_err', 'band'}.issubset(df.columns):
+        return {**base_result, 'status': 'insufficient_data',
+                'n_points': 0, 'n_bands': 0}
+
+    surveys = df['survey'] if 'survey' in df.columns else pd.Series(
+        'Rubin', index=df.index)
+    df = df.copy()
+    df['sncosmo_band'] = [to_sncosmo_band(b, s)
+                          for b, s in zip(df['band'], surveys)]
+    df = df[df['sncosmo_band'].notna()]
+    good = (df['flux'].notna() & df['flux_err'].notna()
+            & (df['flux_err'] > 0) & df['mjd'].notna())
+    df = df[good]
+    if len(df) < 5 or df['band'].nunique() < 2:
+        return {**base_result, 'status': 'insufficient_data',
+                'n_points': len(df), 'n_bands': df['band'].nunique()}
+
+    base_model = load_salt_model(model_name)  # generic: any source + F99 MW
+    if base_model is None:
+        return {**base_result, 'status': 'model_unavailable',
+                'n_points': len(df), 'n_bands': df['band'].nunique()}
+    model = copy.copy(base_model)
+    model.set(mwebv=float(mwebv) if (mwebv is not None
+                                     and np.isfinite(mwebv)) else 0.0)
+
+    z_free = z is None
+    if z_free:
+        if z_bounds is None:
+            z_bounds = (0.005, 0.5)
+        z_lo, z_hi = float(z_bounds[0]), float(z_bounds[1])
+    else:
+        z_lo = z_hi = float(z)
+
+    kept = []
+    for sb in sorted(df['sncosmo_band'].unique()):
+        try:
+            ok = bool(np.all(model.bandoverlap(sb, z=[z_lo, z_hi])))
+        except Exception:
+            ok = False
+        if ok:
+            kept.append(sb)
+    df = df[df['sncosmo_band'].isin(kept)]
+    n_points, n_bands = len(df), df['band'].nunique()
+    if n_points < 5 or n_bands < 2:
+        return {**base_result, 'status': 'insufficient_data',
+                'n_points': n_points, 'n_bands': n_bands}
+
+    data = Table({
+        'time': df['mjd'].values.astype(float),
+        'band': df['sncosmo_band'].values,
+        'flux': df['flux'].values.astype(float),
+        'fluxerr': df['flux_err'].values.astype(float),
+        'zp': np.full(n_points, AB_ZP_NJY),
+        'zpsys': np.full(n_points, 'ab', dtype='U2'),
+    })
+
+    params = ['t0', 'amplitude']
+    bounds = {'t0': (df['mjd'].min() - 40, df['mjd'].max() + 40)}
+    if z_free:
+        params.insert(0, 'z')
+        bounds['z'] = (z_lo, z_hi)
+        model.set(z=0.5 * (z_lo + z_hi))
+    else:
+        model.set(z=float(z))
+
+    try:
+        result, fitted_model = sncosmo.fit_lc(data, model, params,
+                                              bounds=bounds)
+    except Exception as e:
+        logger.debug("template %s fit failed: %s", model_name, e)
+        return {**base_result, 'status': 'fit_failed', 'error': str(e),
+                'n_points': n_points, 'n_bands': n_bands}
+
+    t0_fit = float(fitted_model.get('t0'))
+    z_fit = float(fitted_model.get('z'))
+    z_railed = bool(z_free and (abs(z_fit - z_lo) <= 1e-3
+                                or abs(z_fit - z_hi) <= 1e-3))
+
+    # Observer-frame peak from the fitted template itself. Wide window:
+    # CC templates peak well after their t0 epoch and evolve slowly.
+    counts = df['sncosmo_band'].value_counts()
+    best_sb = counts.idxmax()
+    peak_band_obs = str(df.loc[df['sncosmo_band'] == best_sb, 'band'].iloc[0])
+    peak_mjd = peak_mag_obs = np.nan
+    try:
+        grid = np.linspace(max(fitted_model.mintime(), t0_fit - 20.0),
+                           min(fitted_model.maxtime(),
+                               t0_fit + 120.0 * (1 + z_fit)), 281)
+        if len(grid) > 1:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                mags = np.atleast_1d(fitted_model.bandmag(best_sb, 'ab', grid))
+            finite = np.isfinite(mags)
+            if finite.any():
+                i_pk = int(np.nanargmin(np.where(finite, mags, np.inf)))
+                peak_mjd = float(grid[i_pk])
+                peak_mag_obs = float(mags[i_pk])
+    except Exception as e:
+        logger.debug("template %s: peak synthesis failed: %s", model_name, e)
+
+    return {
+        **base_result,
+        'status': 'ok',
+        't0': t0_fit,
+        'z': z_fit,
+        'z_railed': z_railed,
+        'peak_mjd': peak_mjd,
+        'peak_mag_obs': peak_mag_obs,
+        'peak_band_obs': peak_band_obs,
+        'chi2': result.chisq,
+        'ndof': result.ndof,
+        'chi2_dof': result.chisq / max(result.ndof, 1),
+        'n_points': n_points,
+        'n_bands': n_bands,
+    }
+
+
+def run_template_tournament(lc_df, z=None, z_bounds=None, salt=None,
+                            mwebv=None, templates=None, clean=True):
+    """Compare an Ia (SALT2) fit against core-collapse templates.
+
+    Positive typing evidence: instead of only "not a good Ia" (x1 rail /
+    bad chi2), report WHICH template describes the light curve best.
+    Ground truth 2026-07-13 (6 classified finalists): Ia -> salt2,
+    SN II -> IIP, TDE -> IIn, 6/6 consistent.
+
+    Parameters
+    ----------
+    salt : dict, optional
+        An existing fit_salt() result to reuse as the Ia entry (saves a
+        fit); when None or not 'ok', a fresh SALT fit is attempted.
+    templates : dict, optional
+        {label: sncosmo source name} — defaults to CC_TEMPLATES.
+
+    Returns
+    -------
+    dict: status, template_best (label), template_best_chi2_dof,
+    template_margin (runner-up chi2/dof − winner's; large = decisive),
+    template_chi2s ({label: chi2_dof}), template_peak_mjd /
+    template_peak_mag (winner's synthesized peak, NaN for the Ia entry —
+    SALT's own peak already stands).
+    """
+    if not HAS_SNCOSMO:
+        return {'status': 'sncosmo_not_installed'}
+
+    entries = {}
+    winners = {}
+
+    if salt is None or salt.get('status') != 'ok':
+        salt = fit_salt(lc_df, z=z, z_bounds=z_bounds, mwebv=mwebv,
+                        clean=clean)
+    if salt.get('status') == 'ok' and np.isfinite(salt.get('chi2_dof',
+                                                           np.nan)):
+        entries['Ia'] = float(salt['chi2_dof'])
+
+    for label, name in (templates or CC_TEMPLATES).items():
+        r = fit_template(lc_df, name, z=z, z_bounds=z_bounds, mwebv=mwebv,
+                         clean=clean)
+        if r.get('status') == 'ok' and np.isfinite(r.get('chi2_dof',
+                                                         np.nan)):
+            entries[label] = float(r['chi2_dof'])
+            winners[label] = r
+
+    if not entries:
+        return {'status': 'no_fits'}
+
+    ranked = sorted(entries.items(), key=lambda kv: kv[1])
+    best_label, best_chi2 = ranked[0]
+    margin = (ranked[1][1] - best_chi2) if len(ranked) > 1 else np.nan
+    win = winners.get(best_label, {})
+    return {
+        'status': 'ok',
+        'template_best': best_label,
+        'template_best_chi2_dof': best_chi2,
+        'template_margin': margin,
+        'template_chi2s': entries,
+        'template_peak_mjd': win.get('peak_mjd', np.nan),
+        'template_peak_mag': win.get('peak_mag_obs', np.nan),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Villar SPM model (Villar et al. 2019)
 # ---------------------------------------------------------------------------
 

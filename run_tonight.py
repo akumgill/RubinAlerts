@@ -2187,9 +2187,17 @@ def plot_observing_sequence_skymap(sequence_df, obs_date, ax=None):
 
 def generate_pdf_report(summary_df, fit_results, plot_paths,
                         pdf_path, mjd_now, obs_date, observing_sequence=None,
-                        broker_status=None):
-    """Generate multi-page PDF report with summary and light curves."""
+                        broker_status=None, orch_dir=None):
+    """Generate multi-page PDF report with summary and light curves.
+
+    If ``orch_dir`` points at the orchestrator's output directory, the
+    executable LLAMAS plan (timeline + per-program charges) is rendered as a
+    page so the PDF is self-contained for observers and PIs.
+    """
     from matplotlib.backends.backend_pdf import PdfPages
+
+    has_rate = ('merit_rate' in summary_df.columns
+                and summary_df['merit_rate'].notna().any())
 
     with PdfPages(pdf_path) as pdf:
         # --- Title page ---
@@ -2216,8 +2224,14 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
         fields = summary_df['ddf_field'].nunique() if 'ddf_field' in summary_df.columns else 0
         high_merit = (summary_df['merit'] > 0.1).sum() if 'merit' in summary_df.columns else 0
 
-        stats = (f'{fields} DDFs  |  {n_atlas} with ATLAS  |  {n_ztf} with ZTF  |  '
-                 f'{high_merit} high-merit (>0.1)')
+        if fields:
+            stats = (f'{fields} DDFs  |  {n_atlas} with ATLAS  |  {n_ztf} with ZTF  |  '
+                     f'{high_merit} high-merit (>0.1)')
+        else:
+            n_rubin = ((summary_df['n_ztf'] == 0).sum()
+                       if 'n_ztf' in summary_df.columns else 0)
+            stats = (f'wide-sky selection  |  {n_ztf} with ZTF photometry  |  '
+                     f'{n_rubin} Rubin-only  |  {high_merit} high-merit (>0.1)')
         ax.text(0.5, 0.20, stats,
                 ha='center', va='center', fontsize=10, color='dimgray')
 
@@ -2238,7 +2252,9 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
         if len(summary_df) > 0:
             fig, ax = plt.subplots(figsize=(11, 8.5))
             ax.axis('off')
-            ax.set_title('Top 30 Candidates by Merit', fontsize=14, pad=20)
+            title = ('Top 30 Candidates — ranked by merit per hour'
+                     if has_rate else 'Top 30 Candidates by Merit')
+            ax.set_title(title, fontsize=14, pad=20)
 
             table_df = summary_df.head(30).copy()
             table_df['RA_s'] = table_df.apply(
@@ -2246,25 +2262,39 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
             table_df['Dec_s'] = table_df.apply(
                 lambda r: radec_to_sexagesimal(r['ra'], r['dec'])[1], axis=1)
 
-            display_cols = ['diaObjectId', 'ddf_field', 'RA_s', 'Dec_s',
+            # Prefer the TNS name where one exists (matches the LLAMAS plan
+            # and the briefing); fall back to a short diaObjectId.
+            def _display_name(r):
+                tns = r.get('tns_name')
+                if isinstance(tns, str) and tns.strip():
+                    return tns
+                return str(r['diaObjectId'])[-10:]
+            table_df['name'] = table_df.apply(_display_name, axis=1)
+
+            display_cols = ['name', 'ddf_field', 'RA_s', 'Dec_s',
                            'peak_mag', 'peak_band', 'delta_t', 'merit',
-                           'brokers_detected', 'num_brokers', 'fit_method',
-                           'surveys']
+                           'merit_rate', 'exposure_minutes',
+                           'brokers_detected', 'fit_method', 'surveys']
             display_df = table_df[
                 [c for c in display_cols if c in table_df.columns]
             ].copy()
+            # Drop columns that are entirely empty (e.g. ddf_field in wide mode)
+            display_df = display_df.dropna(axis=1, how='all')
 
             # Format numbers
-            for col in ['peak_mag', 'merit', 'sn_score']:
+            for col in ['peak_mag', 'merit', 'merit_rate', 'sn_score']:
                 if col in display_df.columns:
                     display_df[col] = display_df[col].apply(
                         lambda x: f'{x:.2f}' if pd.notna(x) and np.isfinite(x) else '--')
             if 'delta_t' in display_df.columns:
                 display_df['delta_t'] = display_df['delta_t'].apply(
                     lambda x: f'{x:+.1f}d' if pd.notna(x) and np.isfinite(x) else '--')
-
-            # Shorten diaObjectId for display
-            display_df['diaObjectId'] = display_df['diaObjectId'].astype(str).str[-10:]
+            if 'exposure_minutes' in display_df.columns:
+                display_df['exposure_minutes'] = display_df['exposure_minutes'].apply(
+                    lambda x: f'{x:.0f}m' if pd.notna(x) and np.isfinite(x) else '--')
+            display_df = display_df.rename(columns={
+                'name': 'Object', 'merit_rate': 'merit/hr',
+                'exposure_minutes': 'exp est.'})
 
             tbl = ax.table(
                 cellText=display_df.values,
@@ -2273,34 +2303,91 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
                 cellLoc='center',
             )
             tbl.auto_set_font_size(False)
-            tbl.set_fontsize(7)
+            tbl.set_fontsize(6.5)
             tbl.auto_set_column_width(range(len(display_df.columns)))
-            tbl.scale(1.0, 1.3)
+            tbl.scale(1.0, 1.12)
+
+            if has_rate:
+                ax.text(0.5, -0.06,
+                        'merit/hr = merit x (45 min / exp)^0.5. "exp est." is the '
+                        'ranking\'s magnitude-based estimate; the LLAMAS plan '
+                        're-sizes exposures with redshift where known (see the '
+                        'Observing Plan page).',
+                        ha='center', va='top', fontsize=8, color='dimgray',
+                        transform=ax.transAxes)
 
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
-        # --- Merit Breakdown table page ---
+        # --- Observing Plan page (the executable LLAMAS timeline) ---
+        if orch_dir and os.path.isdir(orch_dir):
+            date_stamp = obs_date.replace('-', '')
+            timeline_path = os.path.join(
+                orch_dir, f'LLAMAS_{date_stamp}_timeline.txt')
+            acct_path = os.path.join(orch_dir, 'time_accounting.json')
+            if os.path.exists(timeline_path):
+                with open(timeline_path) as f:
+                    timeline_text = f.read()
+                charge_lines = []
+                try:
+                    with open(acct_path) as f:
+                        acct = json.load(f)
+                    per_prog = {}
+                    for entry in acct.get('charge_log', []):
+                        if entry.get('date') == obs_date:
+                            per_prog[entry['program']] = (
+                                per_prog.get(entry['program'], 0.0)
+                                + entry.get('hours', 0.0))
+                    charge_lines = [f'{prog}: {hrs:.1f} h charged'
+                                    for prog, hrs in sorted(per_prog.items())]
+                except Exception:
+                    pass
+
+                # Map timeline IDs to TNS names so the plan reads the same
+                # as the candidate table.
+                alias_lines = []
+                if 'tns_name' in summary_df.columns:
+                    for _, r in summary_df.iterrows():
+                        tns = r.get('tns_name')
+                        did = str(r['diaObjectId'])
+                        if (isinstance(tns, str) and tns.strip()
+                                and did in timeline_text):
+                            typ = r.get('tns_type')
+                            tag = (f' ({typ})' if isinstance(typ, str)
+                                   and typ.strip() else '')
+                            alias_lines.append(f'{did} = {tns}{tag}')
+                if alias_lines:
+                    timeline_text += ('\n\nTarget names:\n  '
+                                      + '\n  '.join(alias_lines))
+
+                fig, ax = plt.subplots(figsize=(11, 8.5))
+                ax.axis('off')
+                ax.set_title(f'LLAMAS Observing Plan — {obs_date}',
+                             fontsize=16, fontweight='bold', pad=20)
+                ax.text(0.02, 0.96, timeline_text, ha='left', va='top',
+                        fontsize=7.5, fontfamily='monospace',
+                        transform=ax.transAxes)
+                footer = ('Scheduled by the LLAMAS orchestrator (the single '
+                          'scheduling authority): composite priority, airmass, '
+                          'standards, per-program time accounting.')
+                if charge_lines:
+                    footer += '\n' + '  |  '.join(charge_lines)
+                ax.text(0.02, 0.04, footer, ha='left', va='bottom',
+                        fontsize=8, color='dimgray', fontfamily='monospace',
+                        transform=ax.transAxes)
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
+
+        # --- Merit Breakdown table pages (rank order, paginated) ---
         has_breakdown = all(c in summary_df.columns for c in ['w_time', 'w_mag', 'w_prob'])
         has_salt_weight = 'w_salt' in summary_df.columns
         if len(summary_df) > 0 and has_breakdown:
-            fig, ax = plt.subplots(figsize=(11, 8.5))
-            ax.axis('off')
-            ax.set_title('Merit Breakdown — Top 30 Candidates', fontsize=14, pad=20)
-
-            # Add formula explanation
-            if has_salt_weight:
-                formula = 'Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker × W_salt × W_absmag'
-            else:
-                formula = 'Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker'
-            ax.text(0.5, 0.95, formula,
-                   ha='center', va='top', fontsize=9, fontfamily='monospace',
-                   transform=ax.transAxes)
-
-            table_df = summary_df.sort_values('merit', ascending=False).head(30).copy()
+            # Same order as the ranking table — do NOT re-sort by raw merit,
+            # which would contradict the merit-per-hour rank.
+            table_df = summary_df.head(30).copy()
 
             breakdown_cols = ['diaObjectId', 'merit', 'w_time', 'w_mag', 'w_prob',
-                             'w_host', 'w_ext', 'w_broker']
+                             'w_iaspec', 'w_host', 'w_ext', 'w_broker', 'w_moon']
             if has_salt_weight:
                 breakdown_cols.extend(['w_salt', 'w_absmag'])
             breakdown_df = table_df[[c for c in breakdown_cols if c in table_df.columns]].copy()
@@ -2320,44 +2407,54 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
                 'w_time': 'W_time',
                 'w_mag': 'W_mag',
                 'w_prob': 'W_prob',
+                'w_iaspec': 'W_iasp',
                 'w_host': 'W_host',
                 'w_ext': 'W_ext',
                 'w_broker': 'W_brok',
+                'w_moon': 'W_moon',
                 'w_salt': 'W_salt',
                 'w_absmag': 'W_abs',
             }
             breakdown_df.columns = [col_names.get(c, c) for c in breakdown_df.columns]
+            breakdown_df.insert(0, 'Rank', range(1, len(breakdown_df) + 1))
 
-            tbl = ax.table(
-                cellText=breakdown_df.values,
-                colLabels=breakdown_df.columns,
-                loc='center',
-                cellLoc='center',
+            formula = ('Merit = ' + ' × '.join(
+                c for c in breakdown_df.columns if c.startswith('W_')))
+            legend_text = (
+                'W_time: Gaussian in phase (τ=10d)  |  W_mag: soft top-hat over the LLAMAS window  |  '
+                'W_prob: P(SN) classifier\n'
+                'W_iasp: Ia-specific evidence [0.8-1.2]  |  W_host: Elliptical=1.0, Spiral=0.6  |  '
+                'W_ext: Galactic extinction  |  W_brok: multi-broker bonus\n'
+                'W_moon: moon separation penalty  |  W_salt: SALT2 chi2/dof quality [0.5-1.2]  |  '
+                'W_abs: absolute mag ~ -19.3\n'
+                'Rows in ranking order (merit per hour); Merit alone is the raw science weight.'
             )
-            tbl.auto_set_font_size(False)
-            tbl.set_fontsize(7 if has_salt_weight else 8)
-            tbl.auto_set_column_width(range(len(breakdown_df.columns)))
-            tbl.scale(1.0, 1.4)
 
-            # Add legend at bottom
-            if has_salt_weight:
-                legend_text = (
-                    'W_time: Gaussian decay from peak (τ=10d)  |  W_mag: Optimal ~20.5 AB  |  W_prob: P(Ia) classifier\n'
-                    'W_host: Elliptical=1.0, Spiral=0.6  |  W_ext: Galactic extinction  |  W_brok: Multi-broker bonus\n'
-                    'W_salt: SALT2 chi2/dof quality [0.5-1.2]  |  W_abs: Absolute mag ~ -19.3 [0.3-1.0]'
+            rows_per_page = 15
+            for pstart in range(0, len(breakdown_df), rows_per_page):
+                chunk = breakdown_df.iloc[pstart:pstart + rows_per_page]
+                fig, ax = plt.subplots(figsize=(11, 8.5))
+                ax.axis('off')
+                ax.set_title(
+                    f'Merit Breakdown — ranks {pstart + 1}-'
+                    f'{pstart + len(chunk)}', fontsize=14, pad=20)
+                ax.text(0.5, 0.92, formula,
+                       ha='center', va='top', fontsize=9, fontfamily='monospace',
+                       transform=ax.transAxes)
+                tbl = ax.table(
+                    cellText=chunk.values,
+                    colLabels=chunk.columns,
+                    loc='center',
+                    cellLoc='center',
                 )
-            else:
-                legend_text = (
-                    'W_time: Gaussian decay from peak (τ=10d)  |  '
-                    'W_mag: Optimal ~20.5 AB  |  W_prob: P(Ia) classifier\n'
-                    'W_host: Elliptical=1.0, Spiral=0.6  |  '
-                    'W_ext: Galactic extinction  |  W_broker: Multi-broker bonus'
-                )
-            ax.text(0.5, 0.02, legend_text, ha='center', va='bottom',
-                   fontsize=8, color='dimgray', transform=ax.transAxes)
-
-            pdf.savefig(fig, bbox_inches='tight')
-            plt.close(fig)
+                tbl.auto_set_font_size(False)
+                tbl.set_fontsize(7.5)
+                tbl.auto_set_column_width(range(len(chunk.columns)))
+                tbl.scale(1.0, 1.4)
+                ax.text(0.5, 0.02, legend_text, ha='center', va='bottom',
+                       fontsize=7.5, color='dimgray', transform=ax.transAxes)
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
 
         # --- Merit Function Reference page ---
         fig, ax = plt.subplots(figsize=(11, 8.5))
@@ -2367,22 +2464,36 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
         merit_text = """
 MERIT FUNCTION
 
-    Merit = W_time × W_mag × W_prob × W_host × W_ext × W_broker × W_salt × W_absmag
+    Merit = W_time × W_mag × W_prob × W_iaspec × W_host × W_ext × W_broker
+            × W_moon × W_salt × W_absmag
 
-Each component ranges from 0 to ~1 (W_broker/W_salt can reach 1.2). The multiplicative
+Each component ranges from 0 to ~1 (a few reach 1.2). The multiplicative
 structure means a candidate needs to score well on ALL factors to rank highly.
 
+RANKING = MERIT PER HOUR
+
+    merit_rate = Merit × (45 min / exposure)^0.5
+
+Targets are ordered by merit_rate: science value weighed against the time it
+costs, so a fast bright target outranks a marginally better slow one. The
+exponent (--rank-alpha, default 0.5) is a policy knob; 0 recovers pure merit.
+Merit itself stays a pure science weight. Exposure here is the magnitude-based
+estimate; the LLAMAS plan re-sizes with redshift where known.
 
 COMPONENT DEFINITIONS
 
-W_time  — Time from Peak: exp(−Δt² / 2τ²) with τ = 10 days
+W_time  — Phase: exp(−(Δt−Δt_pref)² / 2τ²), τ = 10 d (Δt_pref per program)
     Supernovae are most valuable for spectroscopy near peak brightness.
 
-W_mag   — Magnitude Suitability: Gaussian at m_opt = 20.5 AB, σ = 1.5
-    Penalizes targets too bright or too faint for Magellan spectroscopy.
+W_mag   — Magnitude Suitability: soft top-hat — full weight for
+    18.0 ≤ m ≤ 21.0 AB, gentle Gaussian roll-offs outside (bright σ = 2.0,
+    faint σ = 1.0 mag). Brightness is never punished sharply; too-faint is.
 
-W_prob  — Type Ia Probability: P(Ia) from ML classifier [0.1, 1.0]
+W_prob  — SN Probability: P(SN) from ML classifier [0.1, 1.0]
     From ALeRCE or Fink. ANTARES-only use proxy capped at 0.50.
+
+W_iaspec — Ia-specific Evidence [0.8, 1.2]: TNS spec-type / ALeRCE SNIa /
+    early-Ia scores. Positive Ia evidence scores at or above neutral.
 
 W_host  — Host Galaxy Morphology: Elliptical=1.0, Spiral=0.6, Unknown=0.7
     SNe Ia in elliptical hosts have lower Hubble diagram scatter.
@@ -2390,8 +2501,11 @@ W_host  — Host Galaxy Morphology: Elliptical=1.0, Spiral=0.6, Unknown=0.7
 W_ext   — Galactic Extinction Penalty: exp(−E(B−V) / 0.15)
     Heavily penalizes targets behind significant Milky Way dust.
 
-W_broker — Multi-broker Agreement: 1.0 + 0.1×(N−1)
-    Independent detections increase confidence. Range [1.0, 1.2].
+W_broker — Multi-broker Agreement, coverage-aware: bonus scales with the
+    fraction of ACHIEVABLE brokers that detected the object [1.0, 1.3].
+
+W_moon  — Moon Proximity Penalty [0.3, 1.0]: separation- and
+    illumination-dependent; neutral when the moon is down or dark.
 
 W_salt  — SALT2 Template Fit Quality: sigmoid(chi2/dof) [0.5, 1.2]
     Good SALT2 fit (chi2/dof < 2) indicates SN Ia template match.
@@ -2401,8 +2515,8 @@ W_absmag — Absolute Magnitude: Gaussian at M_B = −19.3, σ = 0.7
     SNe Ia have M_B ~ −19.3 ± 0.5. Requires host redshift.
     Penalizes candidates with absolute mag inconsistent with SN Ia.
 """
-        ax.text(0.05, 0.95, merit_text, ha='left', va='top',
-                fontsize=10, fontfamily='monospace', transform=ax.transAxes)
+        ax.text(0.05, 0.99, merit_text, ha='left', va='top',
+                fontsize=8, fontfamily='monospace', transform=ax.transAxes)
 
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
@@ -2485,8 +2599,11 @@ W_absmag — Absolute Magnitude: Gaussian at M_B = −19.3, σ = 0.7
                 plt.close(fig)
 
         # --- Remaining pages: light curve plots, 4 per page ---
-        # Sort by merit (best first) to match follow-up priority
-        ordered = summary_df.sort_values('merit', ascending=False, na_position='last')
+        # Keep the ranking order (merit per hour when available) so plot
+        # rank numbers match the summary table and the LLAMAS plan inputs.
+        ordered = (summary_df if has_rate else
+                   summary_df.sort_values('merit', ascending=False,
+                                          na_position='last'))
         # Build ranked list: (rank, diaObjectId) for candidates with plots
         ranked_dids = []
         for rank, (_, row) in enumerate(ordered.iterrows(), 1):
@@ -2514,6 +2631,8 @@ W_absmag — Absolute Magnitude: Gaussian at M_B = −19.3, σ = 0.7
                     info = f"#{rank}"
                     if pd.notna(r['merit']):
                         info += f"  Merit={r['merit']:.3f}"
+                    if has_rate and pd.notna(r.get('merit_rate')):
+                        info += f"  Merit/hr={r['merit_rate']:.3f}"
                     if pd.notna(r.get('ddf_field')):
                         info += f"  DDF={r['ddf_field']}"
                     ax.set_title(info, fontsize=9, loc='right')
@@ -3277,7 +3396,8 @@ def main():
     generate_pdf_report(summary, fit_results, plot_paths,
                         pdf_path, mjd_now, obs_date,
                         observing_sequence=None,
-                        broker_status=broker_status)
+                        broker_status=broker_status,
+                        orch_dir=orch_dir)
 
     # --- Done ---
     logger.info("=" * 70)

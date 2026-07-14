@@ -123,6 +123,13 @@ loop — R17 Baade docstring, R3 state path, R8 quartile docs, etc. See
    agreement stats; TNS xm first-non-null across alerts.
 
 ### NEXT UP
+- **Exotic top-of-funnel** — the selection funnel is Ia-shaped end-to-end
+  (SN-classifier streams, Ia z/phase/freshness cuts, nuclear/long-baseline
+  screens treat exotic signatures as contamination). The ranking/scheduling
+  side is ready for a second program; the exotic group needs its own source
+  streams + cuts (nuclear-allowed, baseline>150d allowed, hours-fresh,
+  higher-z). Scenario runs 2026-07-13: exotic cohort = 12 past-peak leakage
+  objects, 0 rising.
 - ~~**Scheduler reconciliation (one authority per night)**~~ — DONE
   (2026-07-13): the pipeline RANKS, the orchestrator SCHEDULES.
   `run_tonight.py` now calls `orchestrator.run_nightly` at the end (Step 9;

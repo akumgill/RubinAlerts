@@ -43,6 +43,14 @@ SLEW_PENALTY = 0.5
 EXPOSURE_DENSITY_BONUS = 5.0
 EXPOSURE_DENSITY_REF_MIN = 45.0
 
+# Within-night fairness nudge (PI policy, 2026-07-13): a multi-program split
+# should stay "at least close" to the allocation shares without being a hard
+# wall — the most interesting target can still win, and reconcile trues up
+# afterwards. The under-served program (relative to its share of tonight's
+# allocations) gets a bounded boost proportional to its deficit; the cap is
+# below one priority tier so fairness reorders near-ties, never science.
+NIGHT_BALANCE_BONUS = 25.0
+
 
 # ---------------------------------------------------------------------------
 # Twilight
@@ -633,6 +641,20 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
     # Coord of the most-recently placed science target; None before the first
     # pick (so the first target incurs no slew penalty).
     prev_coord = None
+    # Night-balance bookkeeping: tonight's fair share per program from its
+    # fraction of the total allocation in this moon phase.
+    fair_share = {}
+    sched_science_min = {}
+    if accountant is not None and len(getattr(accountant, 'allocations', {})) > 1:
+        alloc_tot = 0.0
+        for pname, alloc in accountant.allocations.items():
+            h = float(alloc.allocated_hours.get(moon_phase, 0.0) or 0.0)
+            fair_share[pname] = h
+            alloc_tot += h
+        if alloc_tot > 0:
+            fair_share = {p: h / alloc_tot for p, h in fair_share.items()}
+        else:
+            fair_share = {}
 
     def _next_reserved_after(t0):
         """Start time of the earliest reserved block beginning at/after ``t0``,
@@ -709,11 +731,24 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             density = EXPOSURE_DENSITY_BONUS * min(
                 EXPOSURE_DENSITY_REF_MIN / max(exp_min, 1.0), 3.0)
 
+            # Night-balance nudge: boost the program that is under-served
+            # relative to its share of tonight's allocations (bounded; a
+            # soft pull toward the split, not a wall).
+            balance = 0.0
+            if fair_share:
+                tot_sched = sum(sched_science_min.values())
+                if tot_sched > 0:
+                    share_now = sched_science_min.get(t.program, 0.0) / tot_sched
+                    deficit = fair_share.get(t.program, 0.0) - share_now
+                    balance = NIGHT_BALANCE_BONUS * max(-1.0, min(1.0, deficit))
+
             # Score: use prioritizer if available, else priority-based
             if prioritizer_scores and t.name in prioritizer_scores:
-                score = prioritizer_scores[t.name] - am * 10 - slew_pen + density
+                score = (prioritizer_scores[t.name] - am * 10 - slew_pen
+                         + density + balance)
             else:
-                score = (5 - t.priority) * 100 - am * 10 - slew_pen + density
+                score = ((5 - t.priority) * 100 - am * 10 - slew_pen
+                         + density + balance)
             if score > best_score:
                 best_score = score
                 best = t
@@ -787,9 +822,12 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                 exp_sec=exp_sec,
                 program=best.program,
                 charged_minutes=charged_min,
-                padding_minutes=padding_min,
+                padding_minutes=max(0.0, padding_min - best_ops_min),
+                ops_minutes=best_ops_min,
             )
             scheduled_entries.append(entry)
+            sched_science_min[best.program] = (
+                sched_science_min.get(best.program, 0.0) + charged_min)
             scheduled_names.add(best.name)
             prev_coord = best.coord  # anchor slew penalty to this pointing
             current = current + dur
@@ -882,9 +920,40 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                               required_seconds=required_seconds,
                               phase=bucket, program=t.program)
 
+    # 5b. Shared-ops proration (PI policy, 2026-07-13): standards blocks and
+    # per-target ops (slew + acquisition) are pooled and charged to programs
+    # PROPORTIONALLY to their science share of the night — a program using
+    # two-thirds of the night pays two-thirds of the shared overheads. Logged
+    # as its own charge so the audit trail separates science from ops.
+    if accountant is not None and scheduled_entries:
+        science_by_prog = {}
+        ops_pool_min = 0.0
+        for entry in scheduled_entries:
+            cm = (entry.charged_minutes
+                  if math.isfinite(entry.charged_minutes) else 0.0)
+            science_by_prog[entry.program] = (
+                science_by_prog.get(entry.program, 0.0) + cm)
+            ops_pool_min += getattr(entry, 'ops_minutes', 0.0) or 0.0
+        n_stds = ((1 if std_start else 0) + (1 if std_end else 0)
+                  + len(std_mid or []))
+        ops_pool_min += n_stds * config.std_block_minutes
+        total_science = sum(science_by_prog.values())
+        if ops_pool_min > 0 and total_science > 0:
+            date_str = str(evening.iso[:10])
+            for prog, sci in science_by_prog.items():
+                share = sci / total_science
+                accountant.charge(prog, ops_pool_min * share / 60.0,
+                                  moon_phase,
+                                  date=f"{date_str} shared-ops")
+            logger.info("Shared ops pool %.1f min (%d standards + slew/acq) "
+                        "prorated by science share: %s",
+                        ops_pool_min, n_stds,
+                        {p: f"{sci / total_science:.0%}"
+                         for p, sci in science_by_prog.items()})
+
     # 6. Standards were selected up front (step before the reservation pass)
-    # so their mid-night blocks are reserved; they remain calibration
-    # overhead, recorded on the plan but never billed to a science budget.
+    # so their mid-night blocks are reserved; they are billed only through
+    # the shared-ops proration above, never to a single program directly.
 
     # 7. Build and return ObsPlan
     # Record which scoring path ran (R18) and gather per-target breakdowns

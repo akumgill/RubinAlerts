@@ -103,6 +103,10 @@ class ScheduledEntry:
     # Dead-time-avoidance slack folded into the wall-clock window (stretch +
     # gap-fill). Recorded for transparency; never billed.
     padding_minutes: float = 0.0
+    # Per-target operations wall-clock (slew from previous pointing +
+    # acquisition buffer). Tracked separately from padding (gap-fill) and
+    # pooled into the shared-ops proration; never billed per-target.
+    ops_minutes: float = 0.0
 
 
 @dataclass

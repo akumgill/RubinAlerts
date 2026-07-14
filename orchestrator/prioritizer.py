@@ -121,7 +121,8 @@ def _clamp01(x: float) -> float:
 
 
 def _phase_factor(target: Target, phase_preference: str = 'peak',
-                  config: LLAMASConfig = None) -> float:
+                  config: LLAMASConfig = None,
+                  tau_days: float = None) -> float:
     """Light-curve phase factor for a program's desired phase.
 
     Different MAGNETS programs want SNe at different light-curve phases:
@@ -150,7 +151,11 @@ def _phase_factor(target: Target, phase_preference: str = 'peak',
         config = LLAMAS_CONFIG
     if math.isfinite(target.delta_t):
         dt_pref = config.phase_preference_offsets.get(phase_preference, 0.0)
-        tau = config.phase_tau_days
+        # tau is a SCIENCE timescale (Ia ~10 d, slow evolvers 2-3x longer):
+        # per-program override comes from the program's RankingProfile so the
+        # orchestrator's phase factor and the pipeline's per-program merit
+        # share a single timescale definition.
+        tau = tau_days if tau_days else config.phase_tau_days
         return _clamp01(math.exp(
             -((target.delta_t - dt_pref) ** 2) / (2.0 * tau ** 2)))
     if math.isfinite(target.phase_weight):
@@ -243,9 +248,19 @@ def compute_composite_score(target: Target,
     # phase preference (peak vs rising) selects the Gaussian center; default
     # 'peak' when no accountant is supplied to look it up.
     phase_preference = 'peak'
+    profile_tau = None
     if accountant is not None:
         phase_preference = accountant.get_phase_preference(target.program)
-    phase = _phase_factor(target, phase_preference, config)
+        try:
+            from core.magellan_planning import RANKING_PROFILES
+            prof = RANKING_PROFILES.get(
+                accountant.get_ranking_profile(target.program))
+            if prof is not None:
+                profile_tau = prof.tau
+        except Exception:
+            profile_tau = None
+    phase = _phase_factor(target, phase_preference, config,
+                          tau_days=profile_tau)
 
     # Completeness factor (W11): per-target integration ledger weight, clamped
     # to [0, 1]. 1.0 (neutral) when no ledger is in use.

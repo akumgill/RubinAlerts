@@ -124,14 +124,21 @@ MAG_BRIGHT_SOFT    = 2.0    # gentle bright-side roll-off scale (mag)
 MAG_FAINT_SOFT     = 1.0    # faint-side roll-off scale (mag) — ~0 by mag 23
 
 
-def _mag_weight(peak_mag):
-    """Soft top-hat magnitude weight in (0, 1]. Vectorized (np array in/out)."""
+def _mag_weight(peak_mag, plateau_bright=None, plateau_faint=None):
+    """Soft top-hat magnitude weight in (0, 1]. Vectorized (np array in/out).
+
+    The plateau bounds default to the Ia proposal's window but are
+    profile-overridable — the followable window is science-dependent
+    (an exotic program may accept fainter targets with longer exposures).
+    """
+    pb = MAG_PLATEAU_BRIGHT if plateau_bright is None else plateau_bright
+    pf = MAG_PLATEAU_FAINT if plateau_faint is None else plateau_faint
     m = np.asarray(peak_mag, dtype=float)
     w = np.ones_like(m)
-    bright = m < MAG_PLATEAU_BRIGHT
-    faint  = m > MAG_PLATEAU_FAINT
-    w = np.where(bright, np.exp(-((MAG_PLATEAU_BRIGHT - m) / MAG_BRIGHT_SOFT)**2), w)
-    w = np.where(faint,  np.exp(-((m - MAG_PLATEAU_FAINT) / MAG_FAINT_SOFT)**2), w)
+    bright = m < pb
+    faint = m > pf
+    w = np.where(bright, np.exp(-((pb - m) / MAG_BRIGHT_SOFT)**2), w)
+    w = np.where(faint, np.exp(-((m - pf) / MAG_FAINT_SOFT)**2), w)
     return w
 
 
@@ -338,12 +345,17 @@ class RankingProfile:
       'off'    — neutral (1.0).
     """
     name: str = 'ia'
-    tau: float = 10.0            # phase width (days)
+    tau: float = 10.0            # phase width (days) — a SCIENCE timescale:
+                                 # Ia evolve on ~10 d; SLSNe 3-5x slower
     dt_pref: float = 0.0         # preferred days-from-peak (<0 = rising)
     ia_evidence_mode: str = 'prefer'
     host_weights: dict = field(default_factory=lambda: dict(HOST_MORPHOLOGY_WEIGHTS))
     use_absmag: bool = True      # M_B ~ -19.3 standard-candle consistency
     use_salt: bool = True        # SALT2 Ia-template fit-quality factor
+    # Followable magnitude window (soft top-hat plateau). Defaults are the
+    # Ia proposal's 18-21; a program may accept fainter at longer exposure.
+    mag_plateau_bright: float = MAG_PLATEAU_BRIGHT
+    mag_plateau_faint: float = MAG_PLATEAU_FAINT
 
 
 # The Ia program's profile IS the historical merit — defaults match exactly.
@@ -355,13 +367,20 @@ IA_PROFILE = RankingProfile(name='ia')
 # template-consistency factors are meaningless for non-Ia science; confirmed
 # Ia are actively avoided). A future refinement could INVERT w_salt — a bad
 # Ia-template fit is weak evidence FOR exotic.
+# Slow-evolver strawman (SLSN/SESN/TDE-flavored): these transients evolve
+# 3-5x slower than Ia, so a +15 d object is nowhere near spectroscopically
+# stale — hence the wide tau. A FAST/rising program (flash spectroscopy,
+# infant SNe) would be a THIRD profile (dt_pref ~ -7, tau ~ 8, hours-fresh
+# top-of-funnel); do not overload this one.
 EXOTIC_PROFILE = RankingProfile(
     name='exotic',
-    dt_pref=-7.0,
+    tau=20.0,
+    dt_pref=0.0,
     ia_evidence_mode='avoid',
     host_weights={'elliptical': 0.6, 'spiral': 1.0, 'unknown': 0.8},
     use_absmag=False,
     use_salt=False,
+    mag_plateau_faint=22.0,
 )
 
 RANKING_PROFILES = {'ia': IA_PROFILE, 'exotic': EXOTIC_PROFILE}
@@ -422,7 +441,11 @@ def compute_merit_breakdown(delta_t, peak_mag,
         host_w = profile.host_weights
 
     w_time = np.exp(-(delta_t - dt_pref)**2 / (2.0 * tau**2))
-    w_mag = _mag_weight(peak_mag)
+    if profile is not None:
+        w_mag = _mag_weight(peak_mag, profile.mag_plateau_bright,
+                            profile.mag_plateau_faint)
+    else:
+        w_mag = _mag_weight(peak_mag)
 
     # Initialize all weights to 1.0
     w_prob = np.ones_like(delta_t)

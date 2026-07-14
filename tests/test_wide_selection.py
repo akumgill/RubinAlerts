@@ -692,12 +692,20 @@ class TestRankingProfiles:
         b2 = self._bd(EXOTIC_PROFILE, ia_evidence=0.0)
         assert float(b2['w_iaspec']) == pytest.approx(1.2)  # confirmed non-Ia boosted
 
-    def test_exotic_prefers_rising(self):
-        from core.magellan_planning import EXOTIC_PROFILE
-        rising = self._bd(EXOTIC_PROFILE, delta_t=-7.0)
-        peak = self._bd(EXOTIC_PROFILE, delta_t=0.0)
-        assert float(rising['w_time']) > float(peak['w_time'])
-        assert float(rising['w_time']) == pytest.approx(1.0)
+    def test_exotic_slow_evolver_phase(self):
+        """Slow-evolver strawman: a +15 d object is far less stale under
+        the exotic profile (tau=20) than under the Ia profile (tau=10)."""
+        from core.magellan_planning import EXOTIC_PROFILE, IA_PROFILE
+        ex = self._bd(EXOTIC_PROFILE, delta_t=15.0)
+        ia = self._bd(IA_PROFILE, delta_t=15.0)
+        assert float(ex['w_time']) > 2 * float(ia['w_time'])
+
+    def test_exotic_wider_mag_window(self):
+        from core.magellan_planning import EXOTIC_PROFILE, IA_PROFILE
+        ex = self._bd(EXOTIC_PROFILE, peak_mag=21.8)
+        ia = self._bd(IA_PROFILE, peak_mag=21.8)
+        assert float(ex['w_mag']) > float(ia['w_mag'])
+        assert float(ex['w_mag']) == pytest.approx(1.0)
 
     def test_exotic_ignores_ia_specific_factors(self):
         from core.magellan_planning import EXOTIC_PROFILE

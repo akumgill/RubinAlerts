@@ -139,6 +139,31 @@ def test_queue_summary_counts(svc):
     assert q["prog-A"]["requested_hours"] > 0
 
 
+# ---- instrument field ----
+def test_instrument_defaults_llamas(svc):
+    r = svc.submit("kA", [{"ra": 10, "dec": 20, "mag": 19, "priority": "P1"}])
+    t = svc.list_targets("kA")[0]
+    assert t["instrument"] == "LLAMAS"
+
+
+def test_instrument_validated(svc):
+    r = svc.submit("kA", [{"ra": 10, "dec": 20, "mag": 19, "priority": "P1",
+                           "instrument": "GMOS"}])
+    assert r[0]["status"] == "error" and "instrument" in r[0]["error"]
+
+
+def test_active_filters_by_instrument(svc):
+    svc.submit("kA", [
+        {"name": "L1", "ra": 10, "dec": 20, "mag": 19, "priority": "P1", "instrument": "LLAMAS"},
+        {"name": "D1", "ra": 30, "dec": 20, "mag": 19, "priority": "P1", "instrument": "LDSS3"},
+        {"name": "E1", "ra": 50, "dec": 20, "mag": 19, "priority": "P1", "instrument": "EITHER"},
+    ])
+    llamas = {t.name for t in svc.active(instrument="LLAMAS")}
+    ldss3 = {t.name for t in svc.active(instrument="LDSS3")}
+    assert llamas == {"L1", "E1"}   # EITHER joins both universes
+    assert ldss3 == {"D1", "E1"}
+
+
 # ---- preview smoke test (runs the real orchestrator) ----
 def test_plan_preview_smoke(svc):
     svc.submit("kA", [
@@ -151,3 +176,21 @@ def test_plan_preview_smoke(svc):
     assert "requested_hours" in plan
     # every timeline entry is tagged with a program
     assert all(e["program"] for e in plan["timeline"])
+
+
+# ---- the Ia alert feed on a LLAMAS night, and instrument isolation ----
+def test_ia_feed_schedules_on_llamas_night(svc):
+    # a handful of Ia-like targets submitted as the automated feed (LLAMAS),
+    # plus one LDSS3 target that must NOT appear on a LLAMAS-night plan.
+    svc.submit("kA", [
+        {"name": "SNIa-1", "ra": 340.0, "dec": 5.0, "mag": 18.4, "redshift": 0.06, "priority": "P1", "instrument": "LLAMAS"},
+        {"name": "SNIa-2", "ra": 320.0, "dec": -4.0, "mag": 18.9, "redshift": 0.11, "priority": "P2", "instrument": "LLAMAS"},
+    ])
+    svc.submit("kB", [
+        {"name": "LDSS-only", "ra": 335.0, "dec": -10.0, "mag": 19.5, "priority": "P1", "instrument": "LDSS3"},
+    ])
+    plan = svc.plan_preview("2026-07-15", instrument="LLAMAS")
+    assert plan["instrument"] == "LLAMAS"
+    names = {e["target"] for e in plan["timeline"]}
+    assert names, "Ia feed produced no LLAMAS-night plan"
+    assert "LDSS-only" not in names   # the LDSS3 target is in the other universe

@@ -28,7 +28,8 @@ def _moon_phase_for(date: str) -> str:
     try:
         from astropy.time import Time
         from astropy.coordinates import get_body, get_sun
-        t = Time(date) + 0.5  # local midnight-ish
+        import astropy.units as u
+        t = Time(date) + 0.5 * u.day  # local midnight-ish
         elong = get_sun(t).separation(get_body("moon", t)).radian
         illum = (1 - math.cos(elong)) / 2
         return "dark" if illum < 0.25 else "grey" if illum < 0.65 else "bright"
@@ -64,17 +65,24 @@ def _tier_of(target, id_to_tier) -> str:
     return id_to_tier.get((target.program, target.name), "P?")
 
 
-def preview_plan(service, date: str, moon: str = None) -> dict:
-    """Run the orchestrator over the live queue; return the preview dict."""
+def preview_plan(service, date: str, moon: str = None,
+                 instrument: str = "LLAMAS") -> dict:
+    """Run the orchestrator over the live queue for one instrument; return the
+    preview dict. LLAMAS and LDSS3 are parallel systems: only this instrument's
+    targets (plus EITHER) are scheduled, with this instrument's overhead."""
     from orchestrator.run_nightly import run_nightly
+    from orchestrator.config import LLAMASConfig
 
-    active = service.active()
+    instrument = (instrument or "LLAMAS").upper()
+    active = service.active(instrument=instrument)
     if not active:
         return {"date": date, "moon": moon or _moon_phase_for(date),
-                "requested_hours": {}, "timeline": [], "overflow": [],
-                "note": "queue is empty"}
+                "instrument": instrument, "requested_hours": {},
+                "timeline": [], "overflow": [], "note": "queue is empty"}
 
     moon = moon or _moon_phase_for(date)
+    # Slit acquisition dominates LDSS3 per-target overhead; IFU is ~1 min.
+    cfg = LLAMASConfig(overhead_minutes=10.0) if instrument == "LDSS3" else LLAMASConfig()
 
     # requested hours per program (before scheduling)
     summary = service.queue_summary()
@@ -93,6 +101,7 @@ def preview_plan(service, date: str, moon: str = None) -> dict:
             date=date, candidates_path=csv_path,
             allocations_path=service.allocations_path,
             moon_phase=moon, output_dir=tmp, from_rubinalerts=False,
+            config=cfg,
         )
 
     def _hhmm(t):
@@ -129,9 +138,27 @@ def preview_plan(service, date: str, moon: str = None) -> dict:
 
     sci_hours = sum(e.charged_minutes for e in plan.scheduled
                     if math.isfinite(e.charged_minutes)) / 60.0
+
+    def _iso(t):
+        return t.datetime.strftime("%H:%M") if t is not None else None
+    twi_start, twi_end = _iso(plan.evening_twilight), _iso(plan.morning_twilight)
+    dark_h = None
+    if plan.evening_twilight is not None and plan.morning_twilight is not None:
+        dark_h = round((plan.morning_twilight - plan.evening_twilight).to_value("hr"), 2)
+
+    # per-program scheduled hours (what actually made the plan)
+    sched_by_prog: dict = {}
+    for e in plan.scheduled:
+        if math.isfinite(e.charged_minutes):
+            sched_by_prog[e.program] = sched_by_prog.get(e.program, 0.0) + e.charged_minutes / 60.0
+    sched_by_prog = {k: round(v, 2) for k, v in sched_by_prog.items()}
+
     return {
-        "date": date, "moon": moon,
+        "date": date, "moon": moon, "instrument": instrument,
+        "twilight_start": twi_start, "twilight_end": twi_end,
+        "dark_hours": dark_h,
         "requested_hours": requested,
+        "scheduled_hours": sched_by_prog,
         "scheduled_science_hours": round(sci_hours, 2),
         "n_scheduled": len(plan.scheduled),
         "timeline": timeline,

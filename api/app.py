@@ -70,7 +70,9 @@ def queue(authorization: str = Header(None)):
 
 
 @app.get("/v1/plan/preview")
-def plan_preview(date: str, moon: str = None, authorization: str = Header(None)):
-    # preview is collaboration-wide; still require a valid key
+def plan_preview(date: str, instrument: str = "LLAMAS", moon: str = None,
+                 authorization: str = Header(None)):
+    # preview is collaboration-wide; still require a valid key. LLAMAS and LDSS3
+    # are parallel systems, so a preview is for one instrument at a time.
     return _guard(lambda: (svc.program_for(_key(authorization)),
-                           svc.plan_preview(date, moon))[1])
+                           svc.plan_preview(date, moon, instrument))[1])

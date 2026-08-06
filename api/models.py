@@ -17,6 +17,10 @@ TIERS = ("P0", "P1", "P2", "P3")
 # Statuses a submission moves through.
 STATUSES = ("queued", "scheduled", "observed", "withdrawn")
 
+# Instruments. LDSS3 and LLAMAS are budgeted/scheduled as two parallel systems;
+# EITHER means the target may go on whichever instrument's night comes first.
+INSTRUMENTS = ("LLAMAS", "LDSS3", "EITHER")
+
 
 @dataclass
 class Target:
@@ -29,6 +33,8 @@ class Target:
 
     # --- submitted ---
     priority: str = "P2"
+    instrument: str = "LLAMAS"          # LLAMAS | LDSS3 | EITHER — which
+                                        # parallel budget universe this draws from
     name: Optional[str] = None
     ra: float = float("nan")            # deg, ICRS
     dec: float = float("nan")           # deg, ICRS

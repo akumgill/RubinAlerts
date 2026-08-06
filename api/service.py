@@ -9,7 +9,7 @@ import logging
 import math
 from typing import Callable, Optional
 
-from .models import Target, TIERS
+from .models import Target, TIERS, INSTRUMENTS
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +63,15 @@ class TargetQueueService:
         return prog
 
     # ---- helpers ----
-    def active(self) -> list[Target]:
-        return [t for t in self._targets
-                if t.status in ("queued", "scheduled")]
+    def active(self, instrument: Optional[str] = None) -> list[Target]:
+        """Active (queued/scheduled) targets. If ``instrument`` is given,
+        restrict to that instrument's universe — its own targets plus any
+        flagged EITHER — since LLAMAS and LDSS3 schedule as parallel systems."""
+        act = [t for t in self._targets if t.status in ("queued", "scheduled")]
+        if instrument:
+            inst = instrument.upper()
+            act = [t for t in act if t.instrument in (inst, "EITHER")]
+        return act
 
     def _find_same_object(self, program: str, ra: float, dec: float
                           ) -> Optional[Target]:
@@ -102,6 +108,10 @@ class TargetQueueService:
         if pri not in TIERS:
             return {"status": "error",
                     "error": f"priority must be one of {TIERS}"}
+        inst = str(raw.get("instrument", "LLAMAS")).upper()
+        if inst not in INSTRUMENTS:
+            return {"status": "error",
+                    "error": f"instrument must be one of {INSTRUMENTS}"}
 
         ra = raw.get("ra", float("nan"))
         dec = raw.get("dec", float("nan"))
@@ -141,6 +151,7 @@ class TargetQueueService:
         existing = self._find_same_object(program, ra, dec)
         if existing:  # upsert
             existing.priority = pri
+            existing.instrument = inst
             if math.isfinite(mag):
                 existing.mag = mag
             if math.isfinite(redshift):
@@ -155,7 +166,7 @@ class TargetQueueService:
             updated = True
         else:
             t = Target(
-                priority=pri, name=name, ra=ra, dec=dec, mag=mag,
+                priority=pri, instrument=inst, name=name, ra=ra, dec=dec, mag=mag,
                 band=str(raw.get("band", "r")), redshift=redshift,
                 exposure_minutes=float(raw["exposure_minutes"])
                 if raw.get("exposure_minutes") not in (None, "") else float("nan"),
@@ -218,7 +229,10 @@ class TargetQueueService:
             p["requested_hours"] = round(p["requested_hours"], 2)
         return by_prog
 
-    def plan_preview(self, date: str, moon: Optional[str] = None) -> dict:
-        """GET /v1/plan/preview — live dry-run over the current queue."""
+    def plan_preview(self, date: str, moon: Optional[str] = None,
+                     instrument: str = "LLAMAS") -> dict:
+        """GET /v1/plan/preview — live dry-run over the current queue for one
+        instrument (LLAMAS or LDSS3): only that instrument's targets are
+        scheduled, with that instrument's overhead."""
         from .scheduler_bridge import preview_plan
-        return preview_plan(self, date, moon)
+        return preview_plan(self, date, moon, instrument)

@@ -23,6 +23,7 @@ every query/parse method is overridden:
 """
 
 import logging
+from datetime import timedelta as _timedelta
 from typing import Optional
 
 import numpy as np
@@ -215,14 +216,97 @@ class FinkZTFClient(FinkLSSTClient):
         return out[[c for c in keep if c in out.columns]].reset_index(drop=True)
 
     # ------------------------------------------------------------------
+    # Cone search — ZTF portal /api/v1/conesearch (NOT the inherited Rubin one)
+    # ------------------------------------------------------------------
+    def cone_search(self, ra: float, dec: float, radius_arcsec: float = 5.0,
+                    n: int = 1000, startdate: Optional[str] = None,
+                    window_days: float = 200.0,
+                    lookback_days: float = 90.0) -> Optional[pd.DataFrame]:
+        """Positional search on Fink's ZTF portal ``/api/v1/conesearch``.
+
+        The inherited :meth:`FinkLSSTClient.cone_search` is wrong for the ZTF
+        portal in two ways:
+
+        * **It sends ``n``.** The ZTF ``/api/v1/conesearch`` does not accept a
+          result-limit ``n``; when the key is present the query returns ZERO
+          rows even at an object's exact position. (Empirically ``{ra,dec,
+          radius:5}`` finds ZTF24abkllyo at 0.06", but adding ``n:5`` returns
+          nothing.) ``n`` here is applied CLIENT-side as a nearest-``n`` cap.
+        * **The plain query misses some very recent objects.** The default
+          (no-date) conesearch hits a rolling spatial index that lags ingest,
+          so freshly-added objects (e.g. ZTF26abjqico, first detection days
+          ago) return 0 rows even at their exact position. Supplying
+          ``startdate`` + ``window`` routes the request to the date-partitioned
+          path, which does find them. Conversely, some older objects only
+          answer on the plain (no-date) path. We therefore try the plain query
+          first and fall back to a date-windowed query when it is empty — the
+          union finds all of them.
+
+        ``radius`` is in **arcseconds** (the ZTF portal's unit; a 5 here means
+        5"). None-vs-empty contract: ``None`` on transport error, an empty
+        DataFrame on a successful zero-row result.
+        """
+        payload = {"ra": float(ra), "dec": float(dec),
+                   "radius": float(radius_arcsec)}
+        data = self._post("/api/v1/conesearch", payload)
+        if data is None:
+            return None  # transport error on the primary query
+        if len(data) == 0:
+            # Fallback to the date-partitioned path for recent objects.
+            if startdate is None:
+                from astropy.time import Time
+                startdate = (Time.now().datetime.date()
+                             - _timedelta(days=lookback_days)).isoformat()
+            fb = self._post("/api/v1/conesearch",
+                            {"ra": float(ra), "dec": float(dec),
+                             "radius": float(radius_arcsec),
+                             "startdate": startdate, "window": window_days})
+            # Primary already gave a valid zero-row answer; a transport error on
+            # the fallback should not turn that into the error sentinel.
+            data = fb if fb is not None else []
+        if len(data) == 0:
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        if "v:separation_degree" in df.columns:
+            df = df.sort_values("v:separation_degree").reset_index(drop=True)
+        if n and len(df) > n:
+            df = df.head(int(n)).reset_index(drop=True)
+        return df
+
+    # ------------------------------------------------------------------
     # Cross-match / classification enrichment (ZTF field names)
     # ------------------------------------------------------------------
+    def _object_ia_score(self, object_id: str) -> float:
+        """Best SNN Ia-vs-nonIa score for one objectId (RF as fallback).
+
+        The ZTF ``/api/v1/conesearch`` returns only positional/classification
+        columns (``i:objectId``, ``i:ra``, ``i:dec``, ``i:jd``,
+        ``d:classification``, ``v:separation_degree``) — never the
+        ``d:snn_snia_vs_nonia`` float. That score lives per-alert in
+        ``/api/v1/objects``; we pull it there and keep the best (max) value.
+        Returns NaN on transport error or if no score exists.
+        """
+        data = self._post("/api/v1/objects",
+                           {"objectId": str(object_id),
+                            "columns": "i:objectId,i:jd,d:snn_snia_vs_nonia,"
+                                       "d:rf_snia_vs_nonia"})
+        if not data:
+            return np.nan
+        df = pd.DataFrame(data)
+        for col in ("d:snn_snia_vs_nonia", "d:rf_snia_vs_nonia"):
+            vals = pd.to_numeric(df.get(col), errors="coerce").dropna()
+            if len(vals):
+                return float(vals.max())
+        return np.nan
+
     def get_classifications(self, candidates_df: pd.DataFrame,
                             radius_arcsec: float = 2.0) -> pd.DataFrame:
         """Attach Fink-ZTF Ia score + objectId to candidates by cone-match.
 
         Overrides the Rubin version to read ZTF fields (``i:objectId``,
-        ``d:snn_snia_vs_nonia``, ``v:separation_degree``).
+        ``v:separation_degree``). The Ia score (``d:snn_snia_vs_nonia``) is not
+        served by the ZTF conesearch, so it is fetched for the matched objectId
+        via :meth:`_object_ia_score` (``/api/v1/objects``).
         """
         scores, ids, seps = [], [], []
         for _, row in candidates_df.iterrows():
@@ -237,10 +321,14 @@ class FinkZTFClient(FinkLSSTClient):
                     if "v:separation_degree" in res.columns:
                         res = res.sort_values("v:separation_degree")
                     best = res.iloc[0]
-                    ids.append(str(best.get("i:objectId", "")))
+                    oid = str(best.get("i:objectId", ""))
+                    ids.append(oid)
                     sep = best.get("v:separation_degree", np.nan)
                     seps.append(float(sep) * 3600 if pd.notna(sep) else np.nan)
+                    # conesearch omits the Ia score; look it up per objectId.
                     sc = best.get("d:snn_snia_vs_nonia", np.nan)
+                    if pd.isna(sc) and oid:
+                        sc = self._object_ia_score(oid)
                     scores.append(float(sc) if pd.notna(sc) else np.nan)
                 else:
                     scores.append(np.nan); ids.append(None); seps.append(np.nan)

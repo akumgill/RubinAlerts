@@ -38,6 +38,11 @@ const esc = (s) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 // stable id for write endpoints: prefer explicit id, fall back to name
 const idOf = (t) => (t.id != null ? t.id : t.name);
+// observability-window flag: colour-codes whether a target is leaving early,
+// rising late, or flexible — the "when do I actually have to do this" cue.
+const WFLAGCOL = { early: "var(--copper)", late: "#3d6ea5", flexible: "var(--ok)", none: "var(--err)" };
+const windowFlag = (flag, note) =>
+  note ? `<span class="wflag" style="color:${WFLAGCOL[flag] || "var(--faint)"}">${esc(note)}</span>` : "";
 
 // ---- toasts ----------------------------------------------------------
 function toast(msg, kind = "ok") {
@@ -505,12 +510,25 @@ function renderPlan() {
   $("exp-cat").href = base + "catalog";
   $("exp-csv").href = base + "csv";
   $("exp-txt").href = base + "text";
-  $("planbody").innerHTML = DATA.plan.timeline.map((e, i) =>
-    `<tr><td class="num">${i + 1}</td><td class="num">${esc(e.utc)}</td><td>${esc(e.target)}</td>
-     <td><span class="dot" style="background:${RAW[e.program]}"></span>${esc(e.program)}</td><td>${chip(e.tier)}</td>
-     <td class="num">${esc(e.ra)}</td><td class="num">${esc(e.dec)}</td><td class="num">${e.mag == null ? "—" : esc(e.mag)}</td>
-     <td class="num">${e.exp_min == null ? "—" : Math.round(e.exp_min) + "m"}</td><td class="num">${e.airmass == null ? "—" : esc(e.airmass)}</td></tr>`
-  ).join("");
+  // Join each scheduled row to its target record for the observability window.
+  const byName = {};
+  (DATA.targets || []).forEach((t) => (byName[t.name] = t));
+  $("planbody").innerHTML = DATA.plan.timeline.map((e, i) => {
+    const t = byName[e.target] || {};
+    const win = (t.obs_start && t.obs_end) ? `${esc(t.obs_start)}–${esc(t.obs_end)}` : "—";
+    const best = t.obs_best
+      ? `${esc(t.obs_best)}${t.min_airmass == null ? "" : " · X" + esc(t.min_airmass)}` : "—";
+    const nominal = e.utc ? `<span class="nominal">nominal ≈ ${esc(e.utc)}</span>` : "";
+    return `<tr><td class="num">${i + 1}</td>
+      <td><span class="tname">${esc(e.target)}</span>${nominal}</td>
+      <td><span class="dot" style="background:${RAW[e.program]}"></span>${esc(e.program)}</td>
+      <td>${chip(e.tier)}</td>
+      <td class="num">${win}</td><td class="num">${best}</td>
+      <td class="num">${e.mag == null ? "—" : esc(e.mag)}</td>
+      <td class="num">${e.exp_min == null ? "—" : Math.round(e.exp_min) + "m"}</td>
+      <td>${windowFlag(t.window_flag, t.window_note)}</td></tr>`;
+  }).join("") ||
+    `<tr><td colspan="9" style="color:var(--faint)">nothing scheduled for this instrument yet</td></tr>`;
 }
 
 // ---- overflow bench --------------------------------------------------

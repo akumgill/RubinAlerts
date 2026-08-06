@@ -71,7 +71,7 @@
       <div class="hint2">Provide a <b>name</b> or an <b>RA + Dec</b> pair. Submitted to <code>POST /v1/targets</code> for your program.</div>
     </form>
 
-    <h2>Observing plan <span class="hint">in ideal conditions &mdash; the nominal sequence; what&rsquo;s actually observed is decided live (see &ldquo;Right now&rdquo;)</span></h2>
+    <h2>Observing plan <span class="hint">priority order with each target&rsquo;s observable window &mdash; reorder freely; the UTC is only a suggested pace. Do the &ldquo;sets&rdquo; targets first. What&rsquo;s actually observed is decided live (see &ldquo;Right now&rdquo;)</span></h2>
     <div class="exports" id="exports">
       <span class="exports-label">Save this plan:</span>
       <a id="exp-cat" download>Catalog</a>
@@ -79,7 +79,7 @@
       <a id="exp-txt" download>Print sheet</a>
     </div>
     <div class="tablewrap"><table>
-      <thead><tr><th>#</th><th>UTC</th><th>Target</th><th>Program</th><th>Tier</th><th>RA</th><th>Dec</th><th>r</th><th>Exp</th><th>X</th></tr></thead>
+      <thead><tr><th>#</th><th>Target</th><th>Program</th><th>Tier</th><th>Observable</th><th>Best (X)</th><th>r</th><th>Exp</th><th>When</th></tr></thead>
       <tbody id="planbody"></tbody></table></div>
 
     <h2>Overflow bench <span class="hint">submitted but not scheduled &mdash; the pool to swap in if time opens (unscheduled: no fixed UTC/airmass; Exp is the estimate)</span></h2>

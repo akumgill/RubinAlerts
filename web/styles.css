@@ -63,6 +63,10 @@ h2 .hint{font-weight:400;font-size:.8rem;color:var(--faint);margin-left:.4rem;}
 .exports a{color:var(--slate);text-decoration:none;border:1px solid var(--hair);
   border-radius:4px;padding:.15rem .55rem;cursor:pointer;}
 .exports a:hover{color:var(--ink);border-color:var(--slate);}
+/* observing-plan target cell + observability-window flag */
+.tname{font-weight:600;}
+.nominal{display:block;font-size:.68rem;color:var(--faint);font-family:var(--mono);}
+.wflag{font-size:.72rem;white-space:nowrap;}
 .rn-wrap{border:1px solid var(--hair);border-radius:6px;background:var(--panel);padding:1rem 1.1rem;}
 .rn-controls{display:flex;align-items:center;gap:.8rem;flex-wrap:wrap;margin-bottom:.6rem;font-size:.82rem;color:var(--slate);}
 .rn-controls input[type=range]{flex:1;min-width:14rem;accent-color:var(--copper);}

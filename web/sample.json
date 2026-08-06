@@ -202,7 +202,13 @@
     1.18,
     1.21,
     1.24
-   ]
+   ],
+   "obs_start": "04:16",
+   "obs_end": "09:56",
+   "obs_best": "07:26",
+   "min_airmass": 1.05,
+   "window_note": "up most of the night",
+   "window_flag": "flexible"
   },
   {
    "program": "CfA-Villar",
@@ -281,7 +287,13 @@
     1.3,
     1.34,
     1.38
-   ]
+   ],
+   "obs_start": "04:46",
+   "obs_end": "09:56",
+   "obs_best": "07:36",
+   "min_airmass": 1.14,
+   "window_note": "up most of the night",
+   "window_flag": "flexible"
   },
   {
    "program": "CfA-Villar",
@@ -360,7 +372,13 @@
     1.34,
     1.36,
     1.39
-   ]
+   ],
+   "obs_start": "06:06",
+   "obs_end": "09:56",
+   "obs_best": "08:06",
+   "min_airmass": 1.28,
+   "window_note": "rises ~06:06",
+   "window_flag": "late"
   },
   {
    "program": "CfA-Villar",
@@ -439,7 +457,13 @@
     null,
     null,
     null
-   ]
+   ],
+   "obs_start": null,
+   "obs_end": null,
+   "obs_best": null,
+   "min_airmass": 1.62,
+   "window_note": "never reaches airmass 1.6 tonight",
+   "window_flag": "none"
   },
   {
    "program": "CfA-Villar",
@@ -518,7 +542,13 @@
     null,
     null,
     null
-   ]
+   ],
+   "obs_start": "23:36",
+   "obs_end": "01:46",
+   "obs_best": "23:36",
+   "min_airmass": 1.2,
+   "window_note": "observe early \u2014 sets ~01:46",
+   "window_flag": "early"
   },
   {
    "program": "CfA-Villar",
@@ -597,7 +627,13 @@
     null,
     null,
     null
-   ]
+   ],
+   "obs_start": "23:36",
+   "obs_end": "02:16",
+   "obs_best": "23:36",
+   "min_airmass": 1.16,
+   "window_note": "observe early \u2014 sets ~02:16",
+   "window_flag": "early"
   },
   {
    "program": "CfA-Villar",
@@ -676,7 +712,13 @@
     null,
     null,
     null
-   ]
+   ],
+   "obs_start": "23:36",
+   "obs_end": "03:16",
+   "obs_best": "00:26",
+   "min_airmass": 1.25,
+   "window_note": "observe early \u2014 sets ~03:16",
+   "window_flag": "early"
   },
   {
    "program": "CfA-Villar",
@@ -755,7 +797,13 @@
     null,
     null,
     null
-   ]
+   ],
+   "obs_start": "23:36",
+   "obs_end": "04:16",
+   "obs_best": "00:46",
+   "min_airmass": 1.11,
+   "window_note": "observe early \u2014 sets ~04:16",
+   "window_flag": "early"
   },
   {
    "program": "CfA-Villar",
@@ -834,7 +882,13 @@
     null,
     null,
     null
-   ]
+   ],
+   "obs_start": "02:26",
+   "obs_end": "07:46",
+   "obs_best": "04:56",
+   "min_airmass": 1.19,
+   "window_note": "sets ~07:46",
+   "window_flag": "early"
   },
   {
    "program": "CfA-Villar",
@@ -913,7 +967,13 @@
     1.59,
     1.66,
     1.74
-   ]
+   ],
+   "obs_start": "03:56",
+   "obs_end": "09:36",
+   "obs_best": "06:36",
+   "min_airmass": 1.15,
+   "window_note": "sets ~09:36",
+   "window_flag": "early"
   }
  ],
  "grid": [
@@ -983,10 +1043,6 @@
  ],
  "airmass_limit": 1.6,
  "programs": {
-  "CfA-Stubbs": {
-   "kind": "manual",
-   "science": "CfA-Stubbs"
-  },
   "CfA-Villar": {
    "kind": "manual",
    "science": "CfA-Villar"

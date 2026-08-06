@@ -262,7 +262,8 @@ def airmass_grid(service, plan: dict, date: str, instrument: str,
         # No usable night window; still return targets without tracks.
         sched = {e["target"] for e in plan.get("timeline", [])}
         over = {o["target"] for o in plan.get("overflow", [])}
-        targets = [_target_row(t, [], plan, sched, over, estimate_exposure_minutes)
+        targets = [_target_row(t, [], plan, sched, over, estimate_exposure_minutes,
+                               labels=[], airmass_limit=airmass_limit)
                    for t in active]
         return [], targets
 
@@ -285,16 +286,54 @@ def airmass_grid(service, plan: dict, date: str, instrument: str,
         am = [round(float(s), 2) if (a > 0 and 0 < s <= 3.0) else None
               for a, s in zip(aa.alt.deg, aa.secz.value)]
         targets.append(_target_row(t, am, plan, sched, over,
-                                   estimate_exposure_minutes))
+                                   estimate_exposure_minutes,
+                                   labels=labels, airmass_limit=airmass_limit))
     return labels, targets
 
 
-def _target_row(t, airmass, plan, sched, over, estimate_exposure_minutes) -> dict:
+def _obs_window(airmass, labels, limit) -> dict:
+    """Turn an airmass track into an observability window, so the plan can show
+    the observer their *freedom* (when a target is up, when it's best, when it
+    leaves) instead of a single pinned clock slot. This is the flexibility the
+    MAGNETS group asked for: bound + rank, don't dictate the minute.
+
+    Returns start/end/best labels, the minimum airmass, and a human note +
+    category flag: 'early' (sets during the night → do it first), 'late' (rises
+    late), 'flexible' (up most of the night), or 'none' (never above the limit).
+    """
+    n = len(labels)
+    obs = [i for i, a in enumerate(airmass) if a is not None and a <= limit]
+    if not obs:
+        finite = [a for a in airmass if a is not None]
+        return {"obs_start": None, "obs_end": None, "obs_best": None,
+                "min_airmass": (round(min(finite), 2) if finite else None),
+                "window_note": f"never reaches airmass {limit} tonight",
+                "window_flag": "none"}
+    first, last = obs[0], obs[-1]
+    best = min(obs, key=lambda i: airmass[i])
+    sets_during = last < n - 1
+    rises_during = first > 0
+    if sets_during and last < n / 2:
+        note, flag = f"observe early — sets ~{labels[last]}", "early"
+    elif sets_during:
+        note, flag = f"sets ~{labels[last]}", "early"
+    elif rises_during and first > n / 2:
+        note, flag = f"rises ~{labels[first]}", "late"
+    else:
+        note, flag = "up most of the night", "flexible"
+    return {"obs_start": labels[first], "obs_end": labels[last],
+            "obs_best": labels[best], "min_airmass": round(airmass[best], 2),
+            "window_note": note, "window_flag": flag}
+
+
+def _target_row(t, airmass, plan, sched, over, estimate_exposure_minutes,
+                labels=None, airmass_limit=1.6) -> dict:
     """One dashboard target record (matches the frontend's expected shape)."""
     status = ("scheduled" if t.name in sched
               else "overflow" if t.name in over else "queued")
     sched_utc = next((e["utc"] for e in plan.get("timeline", [])
                       if e["target"] == t.name), None)
+    window = _obs_window(airmass, labels or [], airmass_limit)
     return {
         "program": t.program,
         "name": t.name,
@@ -309,6 +348,7 @@ def _target_row(t, airmass, plan, sched, over, estimate_exposure_minutes) -> dic
         "status": status,
         "instrument": t.instrument,
         "airmass": airmass,
+        **window,
     }
 
 

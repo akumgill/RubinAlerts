@@ -44,6 +44,12 @@ def _notes_by_name(dash: dict) -> dict:
     return {t["name"]: (t.get("notes") or "") for t in dash.get("targets", [])}
 
 
+def _windows_by_name(dash: dict) -> dict:
+    """name -> observability-window fields (obs_start/end/best, min_airmass,
+    window_note) so exports can show when a target is up, not just a slot."""
+    return {t["name"]: t for t in dash.get("targets", [])}
+
+
 # ---------------------------------------------------------------------------
 # 1. instrument catalog — what the observing GUI loads
 # ---------------------------------------------------------------------------
@@ -81,14 +87,21 @@ def catalog_text(dash: dict) -> str:
 def observing_csv(dash: dict) -> str:
     plan = dash.get("plan", {})
     notes = _notes_by_name(dash)
+    win = _windows_by_name(dash)
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["seq", "utc", "target", "program", "tier",
-                "ra_deg", "dec_deg", "mag", "exp_min", "airmass", "note"])
+    # nominal_utc is a suggested pace only; observable_start/end + best are the
+    # real freedom the observer works within (reorder as conditions dictate).
+    w.writerow(["seq", "nominal_utc", "target", "program", "tier",
+                "observable_start", "observable_end", "best_utc", "min_airmass",
+                "when", "ra_deg", "dec_deg", "mag", "exp_min", "note"])
     for i, e in enumerate(plan.get("timeline", []), 1):
+        t = win.get(e.get("target", ""), {})
         w.writerow([i, e.get("utc", ""), e.get("target", ""), e.get("program", ""),
-                    e.get("tier", ""), e.get("ra", ""), e.get("dec", ""),
-                    e.get("mag", ""), e.get("exp_min", ""), e.get("airmass", ""),
+                    e.get("tier", ""), t.get("obs_start", ""), t.get("obs_end", ""),
+                    t.get("obs_best", ""), t.get("min_airmass", ""),
+                    t.get("window_note", ""), e.get("ra", ""), e.get("dec", ""),
+                    e.get("mag", ""), e.get("exp_min", ""),
                     notes.get(e.get("target", ""), "")])
     return buf.getvalue()
 
@@ -99,27 +112,35 @@ def observing_csv(dash: dict) -> str:
 def observing_text(dash: dict) -> str:
     plan = dash.get("plan", {})
     notes = _notes_by_name(dash)
+    win = _windows_by_name(dash)
     out = [
         f"MAGNETS observing plan — {plan.get('date','')}  "
         f"{plan.get('instrument','')}  moon={plan.get('moon','')}  "
         f"dark {plan.get('twilight_start','')}-{plan.get('twilight_end','')} UT",
         f"{plan.get('n_scheduled',0)} targets, "
         f"{plan.get('scheduled_science_hours','?')} h science.  "
-        "Nominal sequence — adapt live to conditions (priority order).",
+        "Priority order + observable window — reorder freely; do the 'sets' "
+        "targets first. 'Nominal' UTC is a suggested pace only.",
         "",
-        f"{'#':<3} {'UTC':<13} {'Target':<14} {'Tier':<4} "
-        f"{'RA':<12} {'Dec':<11} {'r':>5} {'Exp':>6} {'X':>5}  Note",
-        "-" * 92,
+        f"{'#':<3} {'Target':<14} {'Tier':<4} {'Observable':<15} {'Best(X)':<14} "
+        f"{'r':>5} {'Exp':>6}  When / note",
+        "-" * 100,
     ]
     for i, e in enumerate(plan.get("timeline", []), 1):
-        ra = "" if e.get("ra") is None else _ra_hms(e["ra"])
-        dec = "" if e.get("dec") is None else _dec_dms(e["dec"])
+        t = win.get(e.get("target", ""), {})
+        obs = (f"{t.get('obs_start')}-{t.get('obs_end')}"
+               if t.get("obs_start") and t.get("obs_end") else "—")
+        best = (f"{t.get('obs_best')} X{t.get('min_airmass')}"
+                if t.get("obs_best") else "—")
         exp = "" if e.get("exp_min") is None else f"{int(e['exp_min'])}m"
+        note = t.get("window_note", "")
+        extra = notes.get(e.get("target", ""), "")
+        if extra:
+            note = f"{note} · {extra}" if note else extra
         out.append(
-            f"{i:<3} {e.get('utc',''):<13} {str(e.get('target','')):<14} "
-            f"{e.get('tier',''):<4} {ra:<12} {dec:<11} "
-            f"{('' if e.get('mag') is None else e['mag']):>5} {exp:>6} "
-            f"{('' if e.get('airmass') is None else e['airmass']):>5}  "
-            f"{notes.get(e.get('target',''),'')}"
+            f"{i:<3} {str(e.get('target','')):<14} {e.get('tier',''):<4} "
+            f"{obs:<15} {best:<14} "
+            f"{('' if e.get('mag') is None else e['mag']):>5} {exp:>6}  "
+            f"nominal ~{e.get('utc','')}  {note}"
         )
     return "\n".join(out) + "\n"

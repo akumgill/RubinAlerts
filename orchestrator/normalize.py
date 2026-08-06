@@ -141,6 +141,26 @@ def estimate_llamas_exposure(redshift: float, mag: float, moon: str = 'grey',
     if config is None:
         config = LLAMAS_CONFIG
 
+    # Strategy 0 (primary, if enabled): S/N-based ETC from Chris's LLAMAS SN Ia
+    # curve — magnitude-driven, so it does not need a redshift and cleanly sizes
+    # redshift-unknown candidates. Floored at snr_min_minutes; a moon multiplier
+    # accounts for the curve being a dark-time calibration. Falls through to the
+    # proposal-table / mag-scaling cascade if disabled or mag is unavailable.
+    if getattr(config, 'use_snr_etc', False) and math.isfinite(mag):
+        try:
+            from core.snr_etc import snr_exposure_minutes, MAX_EXPOSURE_MIN
+            t, _extrap = snr_exposure_minutes(
+                mag, target_snr=config.snr_target_binned, n_bin=config.snr_binning)
+            if math.isfinite(t):
+                moon_mult = config.snr_moon_factor.get(moon, 1.0)
+                t = max(config.snr_min_minutes, t * moon_mult)
+                t = min(MAX_EXPOSURE_MIN, t)
+                logger.debug("mag=%.1f -> %.1f min (S/N-ETC, binned S/N=%.0f, "
+                             "moon=%s)", mag, t, config.snr_target_binned, moon)
+                return float(t), moon
+        except Exception as e:
+            logger.debug("S/N-ETC unavailable (%s); falling back to cascade", e)
+
     # Strategy 1: redshift-based interpolation of proposal Table 1.
     if math.isfinite(redshift):
         table = sorted(config.exposure_table, key=lambda row: row[0])

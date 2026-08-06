@@ -8,7 +8,7 @@ lives in LLAMASConfig; no file/network access.
 
 import math
 
-from orchestrator.config import LLAMAS_CONFIG
+from orchestrator.config import LLAMAS_CONFIG, LLAMASConfig
 from orchestrator.normalize import estimate_llamas_exposure
 
 
@@ -63,14 +63,28 @@ def test_exposure_clamps_above_last_row():
     assert exp == last_min
 
 
-def test_magnitude_fallback_branch_still_works():
-    """With no redshift, the magnitude-scaling branch is used (mag 20 -> 45)."""
-    exp, constraint = estimate_llamas_exposure(float('nan'), 20.0, moon='grey')
+def test_snr_etc_is_primary_when_enabled():
+    """Default config has the S/N ETC on: magnitude drives the exposure via
+    Chris's curve (redshift not needed), floored at snr_min_minutes."""
+    cfg = LLAMASConfig()  # use_snr_etc=True by default
+    # Bright target -> photon time is tiny, so the operational floor governs.
+    exp_bright, moon = estimate_llamas_exposure(float('nan'), 20.0, moon='grey', config=cfg)
+    assert math.isclose(exp_bright, cfg.snr_min_minutes, rel_tol=1e-6)
+    assert moon == 'grey'
+    # Above the floor, fainter -> longer, monotonically.
+    exp_22, _ = estimate_llamas_exposure(float('nan'), 22.0, moon='grey', config=cfg)
+    exp_23, _ = estimate_llamas_exposure(float('nan'), 23.0, moon='grey', config=cfg)
+    assert cfg.snr_min_minutes < exp_22 < exp_23
+
+
+def test_magnitude_scaling_when_etc_disabled():
+    """With the ETC off, the legacy magnitude-scaling branch is used
+    (mag 20 -> 45), preserved as the documented fallback."""
+    cfg = LLAMASConfig(use_snr_etc=False)
+    exp, constraint = estimate_llamas_exposure(float('nan'), 20.0, moon='grey', config=cfg)
     assert math.isclose(exp, 45.0, rel_tol=1e-6)
     assert constraint == 'grey'
-
-    # Fainter target -> longer (but bounded) exposure.
-    exp_faint, _ = estimate_llamas_exposure(float('nan'), 21.0)
+    exp_faint, _ = estimate_llamas_exposure(float('nan'), 21.0, config=cfg)
     assert exp_faint > exp
 
 

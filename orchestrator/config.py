@@ -70,6 +70,22 @@ class LLAMASConfig:
     fallback_exposure_minutes: float = 45.0
 
     # ------------------------------------------------------------------
+    # S/N-based exposure (Chris's LLAMAS SN Ia curve, core.snr_etc). When on,
+    # this is the PRIMARY exposure tier (magnitude-driven), ahead of the
+    # proposal-table/mag-scaling cascade. LLAMAS-only (the curve is
+    # LLAMAS-calibrated; LDSS3 keeps the cascade). snr_target is the BINNED S/N
+    # target — OPEN QUESTION for Chris (10 = comfortable typing default).
+    # ------------------------------------------------------------------
+    use_snr_etc: bool = True
+    snr_target_binned: float = 10.0
+    snr_binning: int = 10                # broad-feature binning; Ia-only (NOT
+                                         # narrow-lined II/IIn — can't bin those)
+    snr_min_minutes: float = 5.0         # operational floor
+    # Moon multiplier on the ETC (the curve is dark-time; longer under moon).
+    snr_moon_factor: dict = field(default_factory=lambda: {
+        'dark': 1.0, 'grey': 1.4, 'bright': 2.0})
+
+    # ------------------------------------------------------------------
     # Light-curve phase preference (per-program peak vs rising)
     # ------------------------------------------------------------------
     # Gaussian width (days) of the phase weight w_time = exp(-dt²/2τ²). Matches

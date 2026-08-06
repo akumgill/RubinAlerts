@@ -407,11 +407,29 @@ wavelength (√10≈3.2× SNR → net exposure ~10× shorter), and SNR∝√t (t
 by (target/5)²). So `t_net(r) = t_curve_pp5(r) × (target_snr/5)² / n_bin`.
 `split_exposure` breaks the net into 300–600 s sub-exposures for CR rejection.
 Sample: r≈23.4 (z≈0.8) → ~8 min net → 2×300 s (why LLAMAS can chase faint SNe).
-Tested (7). REMAINING:
-- **Wire into `estimate_exposure_minutes` (queue) + `estimate_exposure_time`
-  (scheduler)** as the primary tier behind a config flag; mag-scaling stays the
-  fallback. Apply a **minimum-exposure floor** (bright objects return sub-minute,
-  which is overhead-dominated in practice).
+Tested (7). WIRED (2026-08): the ETC is now the PRIMARY tier of the orchestrator
+cascade `estimate_llamas_exposure` (config `use_snr_etc=True`, LLAMAS-only per
+Akum) — magnitude-driven, ahead of the proposal-table/mag-scaling fallback.
+Config: `snr_target_binned=10` (binned typing S/N), `snr_binning=10`,
+`snr_min_minutes=5` floor, `snr_moon_factor` (dark 1.0 / grey 1.4 / bright 2.0).
+Wired values (grey): mag<21 → 5 min floor; r=23.4 → ~44 min; r=24 → ~82 min.
+
+>> OPEN QUESTION FOR CHRIS (raise next discussion): what BINNED S/N does he want
+   for typing? His message gives the curve's PER-PIXEL S/N (5) and the ~10x
+   binning gain, but NOT the target binned S/N. We defaulted to 10 (t = 0.4x the
+   curve). 5 is marginal; 15 ≈ curve-as-is; higher = cosmology/spectral-
+   standardization grade. Also confirm the true LLAMAS acquisition overhead
+   (sets the 5-min floor). Cross-check: Villar's LDSS3 30-min block at mag 20
+   matches our curve stripped of binning + at S/N~20 (~37 min) — calibration is
+   consistent; the ~15x gap is binning (Ia broad-feature only, NOT their
+   narrow-line II) + S/N target.
+
+REMAINING:
+- Wire the ETC into `estimate_exposure_minutes` (service/queue preview) and the
+  pipeline's `estimate_exposure_time` (core.magellan_planning) too, for full
+  consistency (the authoritative plan path — the orchestrator — is done).
+- Consider a `w_z` redshift preference (peak 0.6-0.8) + possibly an
+  expected-future-coverage (cosmology-LC) factor.
 - ~~Precise pixel-digitization~~ DONE: curve extracted from the saved PNG
   (`docs/design/figures/llamas_snia_exptime_vs_z.png`) — y calibrated on the
   10-/60-min dotted refs, x→r via the top-axis ticks; cross-checks held (10-min

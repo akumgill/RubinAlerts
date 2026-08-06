@@ -41,9 +41,10 @@ def test_log_linear_interpolation_between_knots():
 
 
 def test_faint_z08_is_feasible_with_binning():
-    # z~0.8 is r~23.4; with binning it should be a short, feasible net exposure.
-    t, extrap = snr_etc.snr_exposure_minutes(23.4)   # defaults: SNR=5, n_bin=10
-    assert 5.0 < t < 15.0
+    # z~0.8 is r~23.4; with 10x binning at the default binned S/N=10 it should
+    # still be a feasible single-night net exposure (tens of minutes, not hours).
+    t, extrap = snr_etc.snr_exposure_minutes(23.4)   # defaults: SNR=10, n_bin=10
+    assert 20.0 < t < 45.0
     assert extrap is True
 
 

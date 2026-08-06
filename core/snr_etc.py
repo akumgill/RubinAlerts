@@ -42,9 +42,18 @@ _T = [0.061, 0.302, 0.478, 0.751, 1.374, 2.315, 3.521, 6.311,
 _LOGT = [math.log10(t) for t in _T]
 
 FIT_RANGE_MAX_R = 21.0          # solid/dashed boundary on the curve
-REFERENCE_SNR = 5.0             # the curve's per-pixel SNR target
-DEFAULT_TARGET_SNR = 5.0        # SNR=5 is a typing target; cosmology wants more
+REFERENCE_SNR = 5.0             # the curve's PER-PIXEL SNR target (Chris's chart)
+# target_snr here is the BINNED (post-binning) SNR the observer wants. Chris's
+# note gives the per-pixel reference (5) and the binning gain (sqrt(n_bin)); it
+# does NOT state the target binned SNR. 10 is a comfortable typing default (t is
+# 0.4x the curve time at n_bin=10). OPEN QUESTION for Chris — see notebook.
+DEFAULT_TARGET_SNR = 10.0
 DEFAULT_N_BIN = 10              # spectral binning (R~2000 -> ~10x too fine)
+MIN_EXPOSURE_MINUTES = 5.0      # operational floor: LLAMAS acquisition/guiding +
+                                # sky-line calibration + a CR-splittable pair.
+                                # (Confirm the true acquisition overhead with the
+                                # instrument team; LDSS3's floor is ~30 min but
+                                # that's slit overhead + characterization S/N.)
 MAX_EXPOSURE_MIN = 240.0        # cap (4 h); beyond this a target isn't feasible
 DEFAULT_SUB_EXPOSURE_SEC = 300  # cosmic-ray split; 300 or 600 s per Chris
 

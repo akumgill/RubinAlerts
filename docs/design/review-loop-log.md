@@ -364,6 +364,22 @@ Only the top-of-funnel differs; everything downstream is the identical code.
   fits over the network, minutes) to produce the ranked candidates.csv, vs the
   classifier-shortlist `scripts/generate_ztf_candidates.py` gives instantly.
 
+### ZTF light-curve sourcing + photometry blackout guard — DONE
+The first full wide run exposed a gap: discovery came from ZTF, but the LC-fit
+stage still fetched photometry from Fink-LSST (Rubin, dark) → **0/348 light
+curves**. Fixed so light curves come from wherever the object was seen:
+- `fetch_finkztf_photometry_batch` pulls live ZTF light curves from Fink-ZTF
+  `/api/v1/objects` (AB mag → nJy), keyed by ztf_oid. Wired into `fetch_and_fit`:
+  Fink-ZTF preferred for any object carrying a ztf_oid, ALeRCE positional match
+  as fallback, Fink-LSST for Rubin objects. Verified live: 3/3 known ZTF objects
+  return real nJy light curves.
+- `photometry_coverage` + a **PHOTOMETRY BLACKOUT** error: candidates present but
+  0 light curves from ANY source is now a loud, greppable failure (a sourcing
+  problem, not an empty sky), not a silent INFO log found by manual inspection.
+  Tests (`tests/pipeline/test_photometry_sourcing.py`) assert the mag→nJy
+  conversion, coverage counting, and that `fetch_and_fit` emits the blackout
+  error. Suite 317 passed.
+
 ### Open / next
 - **Prior-spectroscopy enrichment (asked 2026-08-06):** flag each candidate with
   TNS classification status (we already ingest TNS; the Fink `(TNS)` prefix is a

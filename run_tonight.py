@@ -296,6 +296,73 @@ def fetch_ztf_photometry_batch(positions, radius_arcsec=2.0):
         return {}
 
 
+def fetch_finkztf_photometry_batch(client, oid_lookup):
+    """Fetch ZTF light curves from Fink's ZTF portal (live), keyed by candidate.
+
+    The downtime-resilient ZTF photometry source: when the alert came from ZTF
+    (the object carries a ``ztf_oid``), pull its light curve straight from
+    Fink-ZTF ``/api/v1/objects`` rather than the Chile-hosted ALeRCE DB (stale
+    during the 2026-08 storm) or Fink-LSST (Rubin, dark). Fink-ZTF quotes AB
+    magnitudes, so they are converted to the pipeline's nJy flux schema here.
+
+    Parameters
+    ----------
+    client : FinkZTFClient
+    oid_lookup : dict   candidate diaObjectId -> ZTF objectId ('ZTF...')
+
+    Returns
+    -------
+    dict of diaObjectId -> nJy-schema DataFrame (mjd, flux, flux_err, magnitude,
+    mag_err, band, survey, source). Objects with no usable photometry are omitted.
+    """
+    results = {}
+    if client is None or not oid_lookup:
+        return results
+    for did, oid in oid_lookup.items():
+        try:
+            lc = client.get_light_curve(str(oid))
+        except Exception as e:
+            logger.debug("Fink-ZTF LC fetch failed for %s (%s): %s", did, oid, e)
+            continue
+        if lc is None or len(lc) == 0:
+            continue
+        mag = pd.to_numeric(lc.get('magnitude'), errors='coerce').values
+        mag_err = pd.to_numeric(lc.get('mag_err'), errors='coerce').values
+        mag_err = np.where(np.isfinite(mag_err), mag_err, 0.05)
+        valid = np.isfinite(mag) & (mag > 0) & (mag < 30)
+        if not valid.any():
+            continue
+        flux = 10 ** ((AB_ZP_NJY - mag) / 2.5)
+        flux_err = flux * np.log(10) / 2.5 * np.abs(mag_err)
+        df = pd.DataFrame({
+            'mjd': pd.to_numeric(lc.get('mjd'), errors='coerce').values,
+            'flux': flux, 'flux_err': flux_err,
+            'magnitude': mag, 'mag_err': mag_err,
+            'band': lc.get('band', pd.Series('?', index=lc.index)).values,
+            'survey': 'ZTF', 'source': 'detection',
+        })
+        results[did] = df[valid].reset_index(drop=True)
+    logger.info("Fink-ZTF photometry: %d/%d candidates have live ZTF light curves",
+                len(results), len(oid_lookup))
+    return results
+
+
+def photometry_coverage(dia_ids, *source_dicts):
+    """How many candidates have a light curve from ANY source.
+
+    Returns (n_covered, n_total). A total>0 with n_covered==0 is a photometry
+    blackout — every source (Fink-LSST/Fink-ZTF/ALeRCE/ATLAS) came back empty —
+    which must be surfaced as a failure, not read as "empty sky". Kept as a
+    standalone function so it is unit-testable and the pipeline can act on it.
+    """
+    total = len(set(str(d) for d in dia_ids))
+    covered = set()
+    for src in source_dicts:
+        for k in (src or {}):
+            covered.add(str(k))
+    return len(covered), total
+
+
 def combine_photometry(fink_lc, ztf_lc=None, atlas_lc=None):
     """Combine light curves from multiple surveys into a single DataFrame.
 
@@ -1437,18 +1504,49 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
         logger.info("ATLAS: no candidates brighter than %.1f mag — skipping",
                      ATLAS_BRIGHT_MAG_CUT)
 
-    # ---- Batch ZTF photometry ----
-    ztf_data = {}  # did -> DataFrame (nJy format)
-    if fetch_ztf and HAS_ALERCE:
-        # Build position list for batch cross-match
-        ztf_positions = []
-        for did in dia_ids:
-            ra, dec = coord_lookup.get(did, (np.nan, np.nan))
-            if np.isfinite(ra) and np.isfinite(dec):
-                ztf_positions.append((str(did), ra, dec))
+    # ---- Batch ZTF photometry: Fink-ZTF (live) preferred, ALeRCE fallback ----
+    # Objects discovered from ZTF carry a ztf_oid; pull their light curves from
+    # the live Fink-ZTF portal first (Rubin/Fink-LSST is dark and ALeRCE stale
+    # during the 2026-08 storm), then fall back to ALeRCE positional match for
+    # anything not yet covered. Get the LC from wherever the object was seen.
+    ztf_data = {}  # str(did) -> DataFrame (nJy format)
+    if fetch_ztf:
+        ztf_oid_lookup = {}
+        for _, row in candidates_df.iterrows():
+            did = str(row['diaObjectId'])
+            for col in ('ztf_oid', 'object_id_Fink-ZTF', 'object_id_ALeRCE-ZTF'):
+                if col in row.index and pd.notna(row.get(col)) and str(row[col]).strip():
+                    ztf_oid_lookup[did] = str(row[col]).strip()
+                    break
+        if ztf_oid_lookup:
+            try:
+                from broker_clients.fink_ztf_client import FinkZTFClient
+                ztf_data = fetch_finkztf_photometry_batch(FinkZTFClient(), ztf_oid_lookup)
+            except Exception as e:
+                logger.warning("Fink-ZTF photometry batch failed: %s", e)
 
-        if ztf_positions:
-            ztf_data = fetch_ztf_photometry_batch(ztf_positions, radius_arcsec=2.0)
+        if HAS_ALERCE:
+            covered = {str(k) for k in ztf_data}
+            ztf_positions = []
+            for did in dia_ids:
+                if str(did) in covered:
+                    continue
+                ra, dec = coord_lookup.get(did, (np.nan, np.nan))
+                if np.isfinite(ra) and np.isfinite(dec):
+                    ztf_positions.append((str(did), ra, dec))
+            if ztf_positions:
+                for pid, df in fetch_ztf_photometry_batch(
+                        ztf_positions, radius_arcsec=2.0).items():
+                    ztf_data.setdefault(pid, df)
+
+    # ---- Photometry coverage guard: 0 light curves is a sourcing failure ----
+    n_cov, n_tot = photometry_coverage(dia_ids, fink_data, ztf_data, atlas_data)
+    if n_tot > 0 and n_cov == 0:
+        logger.error("PHOTOMETRY BLACKOUT: 0/%d candidates have a light curve "
+                     "from ANY source (Fink-LSST / Fink-ZTF / ALeRCE / ATLAS all "
+                     "empty). This is a sourcing failure, not an empty sky — "
+                     "check broker liveness before trusting an empty result.",
+                     n_tot)
 
     # ---- Pass 2: Combine photometry and fit ----
     results = {}

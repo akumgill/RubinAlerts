@@ -71,12 +71,13 @@
       <div class="hint2">Provide a <b>name</b> or an <b>RA + Dec</b> pair. Submitted to <code>POST /v1/targets</code> for your program.</div>
     </form>
 
-    <h2>Observing plan <span class="hint">in ideal conditions &mdash; the nominal sequence; what&rsquo;s actually observed is decided live (see &ldquo;Right now&rdquo;)</span>
-      <span class="exports" id="exports">
-        <a id="exp-cat" download>Catalog</a>
-        <a id="exp-csv" download>CSV</a>
-        <a id="exp-txt" download>Print sheet</a>
-      </span></h2>
+    <h2>Observing plan <span class="hint">in ideal conditions &mdash; the nominal sequence; what&rsquo;s actually observed is decided live (see &ldquo;Right now&rdquo;)</span></h2>
+    <div class="exports" id="exports">
+      <span class="exports-label">Save this plan:</span>
+      <a id="exp-cat" download>Catalog</a>
+      <a id="exp-csv" download>CSV</a>
+      <a id="exp-txt" download>Print sheet</a>
+    </div>
     <div class="tablewrap"><table>
       <thead><tr><th>#</th><th>UTC</th><th>Target</th><th>Program</th><th>Tier</th><th>RA</th><th>Dec</th><th>r</th><th>Exp</th><th>X</th></tr></thead>
       <tbody id="planbody"></tbody></table></div>

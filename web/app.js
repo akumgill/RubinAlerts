@@ -299,8 +299,10 @@ function renderAll() {
 function renderHeader() {
   const p = DATA.plan;
   $("title").firstChild.textContent = "Queue & observing plan — " + p.date;
-  $("meta").textContent =
-    `${p.instrument} · ${p.moon} time · dark ${p.twilight_start}–${p.twilight_end} UT · ${p.dark_hours} h`;
+  const window = (p.twilight_start && p.twilight_end)
+    ? `dark ${p.twilight_start}–${p.twilight_end} UT · ${p.dark_hours ?? 0} h`
+    : "dark window n/a";
+  $("meta").textContent = `${p.instrument} · ${p.moon} time · ${window}`;
 
   const caller = DATA.caller_program;
   const who = $("whoami-line");
@@ -363,9 +365,9 @@ function renderSummary() {
   const activeProgs = new Set((DATA.targets || []).map((t) => t.program)).size;
   $("summary").innerHTML = [
     [DATA.targets.length, "targets in the queue"],
-    [p.n_scheduled, "fit tonight"],
+    [p.n_scheduled ?? 0, "fit tonight"],
     [overflowCount, "in overflow"],
-    [p.scheduled_science_hours + " h", "science planned"],
+    [(p.scheduled_science_hours ?? 0) + " h", "science planned"],
     [activeProgs, activeProgs === 1 ? "group sharing the night" : "groups sharing the night"],
   ].map(([v, l]) => `<div class="stat"><span class="v">${esc(v)}</span><span class="l">${esc(l)}</span></div>`).join("");
 }

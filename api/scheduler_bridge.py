@@ -87,6 +87,32 @@ def _tier_of(target, id_to_tier) -> str:
     return id_to_tier.get((target.program, target.name), "P?")
 
 
+def _empty_night(date: str, moon: str, instrument: str, cfg) -> dict:
+    """Plan dict for a night with nothing queued for this instrument: real
+    twilight/dark-hours from the site geometry, everything else zeroed."""
+    twi_start = twi_end = None
+    dark_h = 0.0
+    try:
+        from orchestrator.planner import calculate_twilight
+        evening, morning = calculate_twilight(date, config=cfg)
+        if evening is not None:
+            twi_start = evening.datetime.strftime("%H:%M")
+        if morning is not None:
+            twi_end = morning.datetime.strftime("%H:%M")
+        if evening is not None and morning is not None:
+            dark_h = round((morning - evening).to_value("hr"), 2)
+    except Exception as e:
+        logger.warning("could not compute twilight for %s: %s", date, e)
+    return {
+        "date": date, "moon": moon, "instrument": instrument,
+        "twilight_start": twi_start, "twilight_end": twi_end,
+        "dark_hours": dark_h,
+        "requested_hours": {}, "scheduled_hours": {},
+        "scheduled_science_hours": 0.0, "n_scheduled": 0,
+        "timeline": [], "overflow": [], "note": "nothing queued for this instrument yet",
+    }
+
+
 def preview_plan(service, date: str, moon: str = None,
                  instrument: str = "LLAMAS") -> dict:
     """Run the orchestrator over the live queue for one instrument; return the
@@ -97,14 +123,15 @@ def preview_plan(service, date: str, moon: str = None,
 
     instrument = (instrument or "LLAMAS").upper()
     active = service.active(instrument=instrument)
-    if not active:
-        return {"date": date, "moon": moon or _moon_phase_for(date),
-                "instrument": instrument, "requested_hours": {},
-                "timeline": [], "overflow": [], "note": "queue is empty"}
-
     moon = moon or _moon_phase_for(date)
     # Slit acquisition dominates LDSS3 per-target overhead; IFU is ~1 min.
     cfg = LLAMASConfig(overhead_minutes=10.0) if instrument == "LDSS3" else LLAMASConfig()
+
+    if not active:
+        # Nothing queued for this instrument yet, but the night still exists:
+        # return its geometry (twilight, dark hours) with zeroed tallies so the
+        # dashboard shows the night rather than "undefined".
+        return _empty_night(date, moon, instrument, cfg)
 
     # requested hours per program (before scheduling)
     summary = service.queue_summary()

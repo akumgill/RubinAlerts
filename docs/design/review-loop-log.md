@@ -411,7 +411,12 @@ Tested (7). WIRED (2026-08): the ETC is now the PRIMARY tier of the orchestrator
 cascade `estimate_llamas_exposure` (config `use_snr_etc=True`, LLAMAS-only per
 Akum) — magnitude-driven, ahead of the proposal-table/mag-scaling fallback.
 Config: `snr_target_binned=10` (binned typing S/N), `snr_binning=10`,
-`snr_min_minutes=5` floor, `snr_moon_factor` (dark 1.0 / grey 1.4 / bright 2.0).
+`snr_min_minutes=10` floor, `snr_moon_factor` (dark 1.0 / grey 1.4 / bright 2.0).
+Floor set to 10 min (from 2→5→10) after a target-switch-overhead analysis: a
+LLAMAS switch costs ~5 min in practice (overhead 1 + acquisition 2 + slew), so
+a 10-min minimum keeps the visit ~2x the overhead (~70% science efficiency)
+instead of churning overhead-dominated ~5-min visits. On Aug-13 this moved the
+plan from 36 sched / 4.1 h to 31 sched / 6.1 h in a 10.3 h dark window.
 Wired values (grey): mag<21 → 5 min floor; r=23.4 → ~44 min; r=24 → ~82 min.
 
 >> OPEN QUESTION FOR CHRIS (raise next discussion): what BINNED S/N does he want

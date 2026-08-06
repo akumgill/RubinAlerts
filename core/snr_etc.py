@@ -49,11 +49,12 @@ REFERENCE_SNR = 5.0             # the curve's PER-PIXEL SNR target (Chris's char
 # 0.4x the curve time at n_bin=10). OPEN QUESTION for Chris — see notebook.
 DEFAULT_TARGET_SNR = 10.0
 DEFAULT_N_BIN = 10              # spectral binning (R~2000 -> ~10x too fine)
-MIN_EXPOSURE_MINUTES = 5.0      # operational floor: LLAMAS acquisition/guiding +
-                                # sky-line calibration + a CR-splittable pair.
-                                # (Confirm the true acquisition overhead with the
-                                # instrument team; LDSS3's floor is ~30 min but
-                                # that's slit overhead + characterization S/N.)
+MIN_EXPOSURE_MINUTES = 10.0     # operational floor. A LLAMAS target switch costs
+                                # ~3-6 min modelled (overhead 1 + acquisition 2 +
+                                # slew) and ~5 min in practice; a 10-min minimum
+                                # keeps the exposure ~2x the switch overhead
+                                # (~70% science efficiency) instead of churning
+                                # through overhead-dominated ~5-min visits.
 MAX_EXPOSURE_MIN = 240.0        # cap (4 h); beyond this a target isn't feasible
 DEFAULT_SUB_EXPOSURE_SEC = 300  # cosmic-ray split; 300 or 600 s per Chris
 

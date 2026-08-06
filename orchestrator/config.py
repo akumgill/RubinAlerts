@@ -80,7 +80,9 @@ class LLAMASConfig:
     snr_target_binned: float = 10.0
     snr_binning: int = 10                # broad-feature binning; Ia-only (NOT
                                          # narrow-lined II/IIn — can't bin those)
-    snr_min_minutes: float = 5.0         # operational floor
+    snr_min_minutes: float = 10.0        # operational floor (~2x the ~5-min
+                                         # target-switch overhead; below this a
+                                         # visit is overhead-dominated)
     # Moon multiplier on the ETC (the curve is dark-time; longer under moon).
     snr_moon_factor: dict = field(default_factory=lambda: {
         'dark': 1.0, 'grey': 1.4, 'bright': 2.0})

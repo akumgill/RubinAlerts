@@ -423,11 +423,17 @@ Wired values (grey): mag<21 → 5 min floor; r=23.4 → ~44 min; r=24 → ~82 mi
    for typing? His message gives the curve's PER-PIXEL S/N (5) and the ~10x
    binning gain, but NOT the target binned S/N. We defaulted to 10 (t = 0.4x the
    curve). 5 is marginal; 15 ≈ curve-as-is; higher = cosmology/spectral-
-   standardization grade. Also confirm the true LLAMAS acquisition overhead
-   (sets the 5-min floor). Cross-check: Villar's LDSS3 30-min block at mag 20
-   matches our curve stripped of binning + at S/N~20 (~37 min) — calibration is
-   consistent; the ~15x gap is binning (Ia broad-feature only, NOT their
-   narrow-line II) + S/N target.
+   standardization grade.
+   (2) MINIMUM time per target on LLAMAS? We set the floor to 10 min (~2x the
+   modelled ~5-min switch overhead). Yize uses a 30-min minimum on LDSS3, but
+   that's a different instrument (slit overhead + characterization S/N), so we
+   shouldn't just copy it — is 10 min right for LLAMAS, or does Chris want a
+   larger minimum?
+   (3) Confirm the true LLAMAS acquisition/switch overhead (it sets both the
+   floor and the schedule's per-target ops time).
+   Cross-check: Villar's LDSS3 30-min block at mag 20 matches our curve stripped
+   of binning + at S/N~20 (~37 min) — calibration is consistent; the ~15x gap is
+   binning (Ia broad-feature only, NOT their narrow-line II) + S/N target.
 
 REMAINING:
 - Wire the ETC into `estimate_exposure_minutes` (service/queue preview) and the

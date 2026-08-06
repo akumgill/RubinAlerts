@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MAGNETS queue — API guide</title>
+  <link rel="stylesheet" href="./styles.css">
+  <style>
+    .doc{max-width:52rem;margin:0 auto;padding:1.5rem 1.2rem 4rem;}
+    .doc .eyebrow{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);}
+    .doc h1{font-size:1.5rem;margin:.2rem 0 .3rem;}
+    .doc h2{font-size:1.05rem;margin:2rem 0 .5rem;border-bottom:1px solid var(--hair);padding-bottom:.3rem;}
+    .doc h3{font-size:.9rem;margin:1.2rem 0 .3rem;}
+    .doc p,.doc li{color:var(--ink);font-size:.9rem;line-height:1.55;}
+    .doc code{font-family:var(--mono);font-size:.82rem;background:var(--panel);
+      border:1px solid var(--hair);border-radius:3px;padding:.05rem .3rem;}
+    .doc pre{background:var(--panel);border:1px solid var(--hair);border-radius:6px;
+      padding:.8rem .9rem;overflow-x:auto;font-family:var(--mono);font-size:.8rem;line-height:1.5;}
+    .doc pre code{background:none;border:none;padding:0;}
+    .doc table{width:100%;border-collapse:collapse;margin:.5rem 0;font-size:.84rem;}
+    .doc th,.doc td{text-align:left;padding:.35rem .5rem;border-bottom:1px solid var(--hair);vertical-align:top;}
+    .doc th{color:var(--slate);font-weight:600;}
+    .doc .m{font-family:var(--mono);font-size:.8rem;white-space:nowrap;}
+    .doc .req{color:var(--err);font-size:.7rem;}
+    .doc .back{display:inline-block;margin-bottom:1rem;color:var(--slate);text-decoration:none;font-size:.85rem;}
+    .doc .back:hover{color:var(--ink);}
+    .doc .verb{font-family:var(--mono);font-weight:700;font-size:.78rem;padding:.05rem .35rem;border-radius:3px;color:#fff;}
+    .verb-get{background:#2f7d6b;} .verb-post{background:#3d6ea5;}
+    .verb-patch{background:#b3802e;} .verb-delete{background:#a5533d;}
+  </style>
+</head>
+<body>
+  <div class="doc">
+    <a class="back" href="./">&larr; Back to the queue</a>
+    <div class="eyebrow">MAGNETS shared queue</div>
+    <h1>API guide</h1>
+    <p>How to push spectroscopic targets into the shared MAGNETS observing queue and read
+      the schedule back &mdash; for both automated pipelines (bearer key) and people
+      (browser login). The queue <b>ranks</b> every group&rsquo;s targets together and the
+      scheduler turns them into per-instrument observing plans (LLAMAS and LDSS3 are two
+      parallel systems). Everyone can <b>see</b> the whole queue; you can only <b>edit</b>
+      your own program&rsquo;s targets.</p>
+
+    <h2>Base URL</h2>
+    <pre><code>https://magnets-collab.onrender.com</code></pre>
+
+    <h2>Authentication</h2>
+    <p>Two interchangeable ways to authenticate; both resolve to your <em>program</em>.
+      Reads accept either; writes are scoped to your own program.</p>
+    <h3>1. Bearer API key (pipelines / scripts)</h3>
+    <pre><code>curl -H "Authorization: Bearer &lt;YOUR_KEY&gt;" \
+     https://magnets-collab.onrender.com/v1/queue</code></pre>
+    <p>Your program&rsquo;s key is issued by the queue admin. Keep it secret.</p>
+    <h3>2. Browser login (people)</h3>
+    <p>Sign in on the <a href="./">dashboard</a> with your program + password; the session
+      cookie then authorizes the same endpoints from the browser.</p>
+
+    <h2>Quickstart &mdash; submit a target</h2>
+    <p><code>POST /v1/targets</code> takes a JSON <b>array</b> (submit one or many). The
+      program is inferred from your key &mdash; do not send it in the body.</p>
+    <pre><code>curl -X POST https://magnets-collab.onrender.com/v1/targets \
+     -H "Authorization: Bearer &lt;YOUR_KEY&gt;" \
+     -H "Content-Type: application/json" \
+     -d '[{"name":"SN2026abc","ra":331.93,"dec":-7.50,
+           "priority":"P1","instrument":"LLAMAS","mag":19.2}]'</code></pre>
+    <p>Response is a per-item result array (one bad target never fails the batch):</p>
+    <pre><code>[{"status":"ok","id":42,"updated":false,
+  "canonical_ra":331.93,"canonical_dec":-7.5,
+  "resolved_from":"coords","shared_with":[]}]</code></pre>
+
+    <h2>The target object</h2>
+    <table>
+      <tr><th>field</th><th>type</th><th>notes</th></tr>
+      <tr><td class="m">name</td><td>string</td><td>Target name / resolvable identifier. Optional if you send <code>ra</code>+<code>dec</code>.</td></tr>
+      <tr><td class="m">ra, dec</td><td>float (deg)</td><td>J2000 degrees. Provide these <b>or</b> a resolvable <code>name</code>.</td></tr>
+      <tr><td class="m">priority <span class="req">req</span></td><td>enum</td><td><code>P0</code> | <code>P1</code> | <code>P2</code> | <code>P3</code> &mdash; see tiers below.</td></tr>
+      <tr><td class="m">instrument</td><td>enum</td><td><code>LLAMAS</code> | <code>LDSS3</code> | <code>EITHER</code>. Default <code>LLAMAS</code>.</td></tr>
+      <tr><td class="m">mag</td><td>float</td><td>Anticipated r-band mag. <b>Required</b> for a coords-only new source (used to size the exposure).</td></tr>
+      <tr><td class="m">redshift</td><td>float</td><td>Optional; improves the exposure estimate.</td></tr>
+      <tr><td class="m">exposure_minutes</td><td>float</td><td>Optional; overrides the estimate.</td></tr>
+      <tr><td class="m">band</td><td>string</td><td>Optional; band of the quoted mag.</td></tr>
+      <tr><td class="m">notes</td><td>string</td><td>Optional free text (classifier, provenance, caveats).</td></tr>
+    </table>
+    <p><b>Dedup / upsert:</b> a submission within <b>2&Prime;</b> of an existing target of the
+      same program <em>updates</em> it (priority, mag, &hellip;) rather than duplicating &mdash;
+      re-submit the same object freely as it evolves.</p>
+
+    <h2>Priority tiers</h2>
+    <table>
+      <tr><th>tier</th><th>meaning</th></tr>
+      <tr><td class="m">P0</td><td><b>Observe-tonight guarantee.</b> A mandatory reservation &mdash; use sparingly (ToO / must-not-miss).</td></tr>
+      <tr><td class="m">P1&nbsp;&gt;&nbsp;P2&nbsp;&gt;&nbsp;P3</td><td>Ordinary priority <em>within your program</em>. This is your delegated authority: your P1 outranks your P2; we never re-sort your internal order. Cross-program fairness is handled by budget availability, not by re-ranking your list.</td></tr>
+    </table>
+
+    <h2>Instruments</h2>
+    <p>LLAMAS (IFU, ~1-min overhead) and LDSS3 (slit, ~10-min overhead) are scheduled as
+      <b>parallel systems</b> with separate budgets. <code>EITHER</code> lets the scheduler
+      place a target on whichever instrument fits. Pick the instrument that matches the night.</p>
+
+    <h2>Endpoint reference</h2>
+    <table>
+      <tr><th>endpoint</th><th>auth</th><th>what</th></tr>
+      <tr><td><span class="verb verb-get">GET</span> <code>/v1/programs</code></td><td>public</td><td>List program names (populates the login screen).</td></tr>
+      <tr><td><span class="verb verb-get">GET</span> <code>/healthz</code></td><td>public</td><td>Liveness probe.</td></tr>
+      <tr><td><span class="verb verb-post">POST</span> <code>/v1/targets</code></td><td>own</td><td>Submit/upsert an array of targets.</td></tr>
+      <tr><td><span class="verb verb-get">GET</span> <code>/v1/targets</code></td><td>own</td><td>List <em>your</em> program&rsquo;s targets.</td></tr>
+      <tr><td><span class="verb verb-patch">PATCH</span> <code>/v1/targets/{id}</code></td><td>own</td><td>Change priority / mag / redshift / exposure_minutes / valid_until.</td></tr>
+      <tr><td><span class="verb verb-delete">DELETE</span> <code>/v1/targets/{id}</code></td><td>own</td><td>Withdraw a target.</td></tr>
+      <tr><td><span class="verb verb-get">GET</span> <code>/v1/queue</code></td><td>any</td><td>Whole shared queue: counts per tier per program + requested hours.</td></tr>
+      <tr><td><span class="verb verb-get">GET</span> <code>/v1/plan/preview?date=&amp;instrument=&amp;moon=</code></td><td>any</td><td>Dry-run schedule over the live queue.</td></tr>
+      <tr><td><span class="verb verb-get">GET</span> <code>/v1/dashboard?date=&amp;instrument=</code></td><td>any</td><td>Full dashboard payload (plan + queue + airmass + windows).</td></tr>
+      <tr><td><span class="verb verb-get">GET</span> <code>/v1/plan/export?date=&amp;instrument=&amp;fmt=</code></td><td>any</td><td>Download the plan: <code>fmt=catalog</code> (instrument &ldquo;click&rdquo; catalog), <code>csv</code>, or <code>text</code>.</td></tr>
+      <tr><td><span class="verb verb-get">GET</span> <code>/v1/whoami</code></td><td>any</td><td>Which program you are.</td></tr>
+    </table>
+    <p><b>own</b> = writes scoped to your program (editing another group&rsquo;s target returns
+      404). <b>any</b> = any authenticated caller sees the whole collaboration&rsquo;s queue.</p>
+
+    <h2>Python example</h2>
+    <pre><code>import requests
+
+BASE = "https://magnets-collab.onrender.com"
+KEY  = "&lt;YOUR_KEY&gt;"
+h = {"Authorization": f"Bearer {KEY}"}
+
+# submit a batch
+targets = [
+    {"name": "SN2026abc", "ra": 331.93, "dec": -7.50,
+     "priority": "P1", "instrument": "LLAMAS", "mag": 19.2,
+     "notes": "Ia, z=0.05, near peak"},
+]
+r = requests.post(f"{BASE}/v1/targets", json=targets, headers=h)
+for item in r.json():
+    print(item["status"], item.get("id"), item.get("error", ""))
+
+# read the shared queue
+print(requests.get(f"{BASE}/v1/queue", headers=h).json())
+
+# download tonight's LLAMAS catalog
+cat = requests.get(f"{BASE}/v1/plan/export",
+                   params={"date": "2026-08-10", "instrument": "LLAMAS", "fmt": "catalog"},
+                   headers=h).text
+print(cat)</code></pre>
+
+    <h2>How the queue treats your targets</h2>
+    <ul>
+      <li><b>Ranked together, order preserved.</b> Your within-program priority is respected; the scheduler decides cross-program placement by observability + budget availability, not by re-ranking your list.</li>
+      <li><b>Charged on observation.</b> Time is docked from your program budget when a target is actually observed (parity queue &mdash; no tokens).</li>
+      <li><b>Static plan.</b> Nights are planned ahead of time; the observer adapts live. The plan shows each target&rsquo;s <em>observable window</em>, not a fixed clock slot.</li>
+    </ul>
+  </div>
+</body>
+</html>

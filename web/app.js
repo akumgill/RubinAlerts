@@ -109,18 +109,32 @@ async function refresh() {
 
 // ---- login view ------------------------------------------------------
 function programChoices() {
-  // Prefer program list from a prior (sample) payload; else a sane default set.
+  // Prefer program list from a prior (sample) payload; else a sane default set
+  // covering every group across both instruments (matches the demo GROUPS).
   if (DATA && DATA.programs) return Object.keys(DATA.programs);
-  return ["CfA / Villar", "UA"];
+  return ["CfA-Villar", "CfA-Stubbs", "UA"];
 }
 
-function showLogin() {
+function fillProgramOptions(opts) {
+  $("lg-prog").innerHTML = opts.map((p) => `<option>${esc(p)}</option>`).join("");
+}
+
+async function showLogin() {
   $("loading").hidden = true;
   $("dashview").hidden = true;
   $("loginview").hidden = false;
-  const sel = $("lg-prog");
-  const opts = programChoices();
-  sel.innerHTML = opts.map((p) => `<option>${esc(p)}</option>`).join("");
+  fillProgramOptions(programChoices());       // instant, from fallback/sample
+  // Then refine from the server's actual configured groups (public endpoint),
+  // so every configured program appears even before anyone signs in.
+  try {
+    const r = await fetch("/v1/programs", { credentials: "include" });
+    if (r.ok) {
+      const body = await r.json();
+      if (Array.isArray(body.programs) && body.programs.length) {
+        fillProgramOptions(body.programs);
+      }
+    }
+  } catch (e) { /* offline / no backend: keep the fallback list */ }
 }
 
 $("loginform").addEventListener("submit", async (e) => {

@@ -79,6 +79,13 @@ def healthz():
     return {"ok": True}
 
 
+@app.get("/v1/programs")
+def programs():
+    """Unauthenticated: the configured program names, so the login screen can
+    offer every group (across both instruments) before anyone signs in."""
+    return {"programs": sorted(GROUPS.keys())}
+
+
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------

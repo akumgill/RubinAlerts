@@ -2061,7 +2061,7 @@ def enrich_finalist_redshifts(summary, fit_results, use_salt=False):
         return summary
     # String columns we may write into can arrive all-NaN (float64); pandas>=3
     # refuses silent object upcasts on assignment.
-    for col in ('tns_name', 'tns_type', 'ned_name'):
+    for col in ('tns_name', 'tns_type', 'ned_name', 'z_source'):
         if col in summary.columns:
             summary[col] = summary[col].astype(object)
     zless = summary[~(pd.to_numeric(summary['redshift'], errors='coerce') > 0)]
@@ -2163,6 +2163,10 @@ def enrich_finalist_redshifts(summary, fit_results, use_salt=False):
         distmod = float(_cosmo.distmod(z).value)
         summary.at[idx, 'distmod'] = distmod
         summary.at[idx, 'ned_name'] = source
+        # Provenance: label the redshift source (was left as the stale 'none'
+        # from wide selection, which made TNS/NED-enriched objects look z-less).
+        summary.at[idx, 'z_source'] = 'tns_specz' if source == 'tns_specz' else 'ned_host'
+        summary.at[idx, 'z_best'] = z
         peak_mag = summary.at[idx, 'peak_mag']
         if np.isfinite(peak_mag):
             summary.at[idx, 'absolute_mag'] = float(peak_mag) - distmod
@@ -2186,8 +2190,21 @@ def enrich_finalist_redshifts(summary, fit_results, use_salt=False):
                 except Exception as e:
                     logger.debug("z-enrichment: SALT refit failed for %s: %s", did, e)
 
+    # Definitive reliable-redshift flag. ONLY a catalog spec-z or host-z counts
+    # as known; a railed or free SALT z (salt_z with salt_z_railed) is NOT a
+    # measured redshift, so those stay z_source='none' and redshift_known=False.
+    # Exposure sizing is magnitude-based regardless, but this stops an observer
+    # from reading salt_z as a real redshift.
+    _reliable = {'tns_specz', 'legacy_photz', 'ned_host'}
+    if 'z_source' in summary.columns:
+        summary['redshift_known'] = summary['z_source'].astype(str).isin(_reliable)
+    else:
+        summary['redshift_known'] = False
+
     logger.info("Redshift enrichment: gained %d (TNS spec-z %d, NED host %d); "
-                "%d SALT fixed-z refits", len(gained), n_tns, n_ned, n_refit)
+                "%d SALT fixed-z refits; %d/%d finalists have a reliable z",
+                len(gained), n_tns, n_ned, n_refit,
+                int(summary['redshift_known'].sum()), len(summary))
     return summary
 
 

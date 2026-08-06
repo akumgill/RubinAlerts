@@ -607,12 +607,14 @@ class TestZEnrichment:
         return pd.DataFrame([
             {'diaObjectId': 'ZTFaaa', 'ra': 150.0, 'dec': -20.0,
              'redshift': np.nan, 'distmod': np.nan, 'ned_name': '',
+             'z_source': 'none',
              'tns_name': '', 'tns_type': np.nan, 'tns_redshift': np.nan,
              'tns_match': False, 'peak_mag': 19.0, 'absolute_mag': np.nan,
              'salt_chi2_dof': 0.5, 'salt_x1': 0.1, 'salt_c': 0.0,
              'salt_z': np.nan, 'salt_peak_mag_B': np.nan},
             {'diaObjectId': 'FK1', 'ra': 200.0, 'dec': 10.0,
              'redshift': 0.2, 'distmod': 40.0, 'ned_name': 'payload',
+             'z_source': 'legacy_photz',
              'tns_name': '', 'tns_type': np.nan, 'tns_redshift': np.nan,
              'tns_match': False, 'peak_mag': 20.5, 'absolute_mag': -19.4,
              'salt_chi2_dof': 1.0, 'salt_x1': 0.0, 'salt_c': 0.0,
@@ -643,9 +645,14 @@ class TestZEnrichment:
         assert np.isfinite(row['distmod'])
         # absolute mag computed from peak mag - distmod
         assert row['absolute_mag'] == pytest.approx(19.0 - row['distmod'])
-        # the already-z'd row is untouched
+        # z_source is now labelled (was the bug: stayed 'none' after enrichment)
+        assert row['z_source'] == 'tns_specz'
+        assert bool(row['redshift_known']) is True
+        # the already-z'd row is untouched and stays reliable
         fk = out[out['diaObjectId'] == 'FK1'].iloc[0]
         assert fk['redshift'] == pytest.approx(0.2)
+        assert fk['z_source'] == 'legacy_photz'
+        assert bool(fk['redshift_known']) is True
 
     def test_ned_fallback(self, monkeypatch):
         import run_tonight as rt
@@ -671,6 +678,8 @@ class TestZEnrichment:
         row = out[out['diaObjectId'] == 'ZTFaaa'].iloc[0]
         assert row['redshift'] == pytest.approx(0.05)
         assert 'ned:' in row['ned_name']
+        assert row['z_source'] == 'ned_host'
+        assert bool(row['redshift_known']) is True
 
     def test_no_sources_no_change(self, monkeypatch):
         import run_tonight as rt
@@ -678,8 +687,11 @@ class TestZEnrichment:
         monkeypatch.setattr(rt, 'HAS_NED', False)
         s = self._summary()
         out = rt.enrich_finalist_redshifts(s.copy(), {}, use_salt=False)
-        assert not (pd.to_numeric(out[out['diaObjectId'] == 'ZTFaaa']['redshift'],
-                                  errors='coerce') > 0).any()
+        za = out[out['diaObjectId'] == 'ZTFaaa'].iloc[0]
+        assert not (pd.to_numeric(pd.Series([za['redshift']]), errors='coerce') > 0).any()
+        # no catalog z gained -> stays unknown (railed/free SALT z doesn't count)
+        assert za['z_source'] == 'none'
+        assert bool(za['redshift_known']) is False
 
 
 class TestTNSDumpCrossmatch:

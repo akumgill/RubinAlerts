@@ -299,7 +299,7 @@ def fetch_ztf_photometry_batch(positions, radius_arcsec=2.0):
 def fetch_finkztf_photometry_batch(client, oid_lookup):
     """Fetch ZTF light curves from Fink's ZTF portal (live), keyed by candidate.
 
-    The downtime-resilient ZTF photometry source: when the alert came from ZTF
+    The live ZTF photometry source: when the alert came from ZTF
     (the object carries a ``ztf_oid``), pull its light curve straight from
     Fink-ZTF ``/api/v1/objects`` rather than the Chile-hosted ALeRCE DB (stale
     during the 2026-08 storm) or Fink-LSST (Rubin, dark). Fink-ZTF quotes AB
@@ -755,7 +755,7 @@ def fetch_finkztf_wide_candidates(mjd_now, min_prob=0.3, days_back=30,
                                   min_gal_b=WIDE_MIN_GAL_B):
     """Fetch live ZTF SN candidates from Fink for wide sky mode.
 
-    The downtime-resilient twin of :func:`fetch_ztf_wide_candidates`: same
+    The Fink-ZTF twin of :func:`fetch_ztf_wide_candidates`: same
     wide-candidate schema and the same screens (Galactic-plane, hostless
     brightness), but sourced from Fink's ZTF portal (France, live) instead of
     the Chile-hosted ALeRCE DB (stale during the 2026-08 storm). It is a pure

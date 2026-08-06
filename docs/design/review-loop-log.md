@@ -231,3 +231,75 @@ Merit-per-hour 0.83 at an 11-min exposure; ranks 2–3 are two more
 confirmed Ia at 18.4–18.6 (13/12 min). The rising Rubin photo-z object
 (wide9's rank 2) sits at rank 4, now Δt = −4.1 d and template-tournament
 preferred as Ia.
+
+---
+
+## 2026-08 — Collaboration tooling + deployment sprint
+
+Shift from the alert pipeline (which the July sprint matured) to the
+*shared-queue service* the MAGNETS collaboration adopted at the July meeting.
+Akum owns the target-submission API; the pipeline is now one of several sources
+feeding a shared scheduler.
+
+### Target-submission API + queue service
+- `api/` — framework-agnostic `TargetQueueService`: submit(upsert, 2" canonical
+  dedup) / list / patch / withdraw / queue-summary / plan-preview. Bearer-key →
+  program. `scheduler_bridge` runs the real orchestrator as a dry-run over the
+  live queue (pipeline RANKS, orchestrator SCHEDULES — one authority).
+- Interface spec circulated as an artifact; parity-queue prioritization (NOT the
+  meeting's token idea — charge observed time, prioritize by parity bucket ×
+  budget); P0 = the "observe tonight" guarantee folded into the priority enum.
+- **Per-target `instrument` field** (LLAMAS | LDSS3 | EITHER): LDSS3 and LLAMAS
+  schedule + budget as **two parallel systems**; `plan_preview(instrument=…)`
+  filters to one universe and applies its overhead (LDSS3 ~10-min slit vs 1-min
+  IFU).
+
+### Budgets, from the real schedule
+- Per-PI, **per-instrument** budgets derived from the nights spreadsheet
+  (`ref/allocations_{LLAMAS,LDSS3}_2026B.yaml`). **Total-per-program budget**
+  (`LLAMASConfig.budget_phase_aware=False`) — the earlier moon-phase-bucketed
+  factor inflated whichever phase a PI's nights landed on (a PI with two grey
+  nights looked like "20 h of grey"); moon still drives feasibility + w_moon,
+  just not budget. Stubbs (Ia) = 20 h LLAMAS; UA = 30 h LDSS3 / 15 h LLAMAS;
+  Villar = 15 h LDSS3 / 30 h LLAMAS.
+
+### Aug 7 LDSS3 (first night) — dry runs
+- Two-group cross-hash proven, then re-run through the service with real LDSS3
+  budgets + instrument routing (10 real Villar/Dong targets + a UA stand-in).
+  The Villar VTDA list is a **general semester-26B LDSS3 queue** (no per-target
+  dates) → seed as standing entries, `ref/seed_villar_ldss3.csv` (Villar only;
+  the Arizona list was a POC fabrication).
+- Insight logged: a P3 can be scheduled ahead of a P2 (airmass window, not
+  priority); and a target can bench for observability (short window), not budget
+  — the total-budget re-run left the Aug 7 schedule unchanged, disproving an
+  earlier "it's the budget" read.
+
+### USDF audit (Akum got access)
+- Probed via TAP (`~/.usdf_token`, works programmatically now): exposes only
+  **dp1** (real ComCam, frozen 2024-12-12) + **dp02_dc2** (simulation). **No
+  live prompt-products / APDB.** So USDF = static data, NOT a live alert feed;
+  the incoming pipeline is unaffected. Corrected an earlier over-claim that USDF
+  might unlock live alerts. (`rsp-tap-static-only` memory updated.)
+
+### Tests + deployment
+- Suite split into two buckets for two audiences: `tests/pipeline/` (Ia
+  candidate generation — brokers, fitting, merit, selection; 170) and
+  `tests/orchestrator/` (the scheduler given inputs — prioritizer, budgets,
+  ledger, standards, normalize, API; 135). `test_smoke` at root. 308 total.
+- **Website deployment** (in progress): `docs/design/deployment-plan.md` — one
+  FastAPI process (JSON API + dashboard + browser login), SQLite, orchestrator
+  in-process, on Render; dual auth (bearer key OR session cookie), writes scoped
+  per-program. Build split across two parallel agents (backend: SQLite + auth +
+  `/v1/dashboard` + Dockerfile + render.yaml; frontend: the live interactive web
+  UI under `web/`).
+- **Plan export** (`api/plan_export.py`): observer-facing outputs from the plan —
+  the instrument catalog (the GUI-loadable file that avoids fat-finger entry),
+  a CSV observing sheet, and a printable text sheet. (Browser print → PDF rather
+  than a bundled PDF lib.)
+
+### Open / next
+Integration pass when the backend agent lands (wire seed → in-repo Villar CSV,
+reconcile program names, add export endpoint + button, tests + live smoke),
+then push so Render builds. Then: LDSS3 native "click" catalog + finder charts,
+the ORACLE/Villar feed adapter, S/N ETC (Chris's curve; focus 0.6<z<0.8, a
+Rubin-era mode our current cuts exclude), real post-night reconcile.

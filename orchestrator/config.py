@@ -86,6 +86,22 @@ class LLAMASConfig:
         'dark': 1.0, 'grey': 1.4, 'bright': 2.0})
 
     # ------------------------------------------------------------------
+    # Redshift preference w_z (composite-score source differentiator). Peaks
+    # (=1.0) inside z_preference_range, Gaussian taper (z_preference_sigma)
+    # outside, floored at z_preference_floor so nearby SNe are down-weighted but
+    # NOT eliminated. Rationale: LLAMAS's niche is efficient FAINT high-z Ia
+    # typing (z~0.6-0.8, Rubin-era) where few instruments compete; nearby SNe
+    # are abundant and covered by everyone. During the ZTF-only Rubin downtime
+    # every source is z<~0.15 -> all sit near the floor (uniformly low, so the
+    # relative schedule is unchanged) until Rubin delivers high-z SNe that then
+    # rise to the top automatically. Unknown z -> neutral (1.0): not penalized.
+    # ------------------------------------------------------------------
+    z_preference_enabled: bool = True
+    z_preference_range: tuple = (0.6, 0.8)
+    z_preference_sigma: float = 0.2
+    z_preference_floor: float = 0.3
+
+    # ------------------------------------------------------------------
     # Light-curve phase preference (per-program peak vs rising)
     # ------------------------------------------------------------------
     # Gaussian width (days) of the phase weight w_time = exp(-dt²/2τ²). Matches

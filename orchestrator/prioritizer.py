@@ -163,6 +163,32 @@ def _phase_factor(target: Target, phase_preference: str = 'peak',
     return 1.0
 
 
+def _redshift_factor(target, config=None):
+    """Redshift-preference weight w_z (source differentiator).
+
+    1.0 inside ``config.z_preference_range``; a Gaussian taper (width
+    ``z_preference_sigma``) outside it; floored at ``z_preference_floor`` so
+    nearby SNe are down-weighted but never eliminated. Neutral (1.0) when the
+    preference is disabled or the redshift is unknown — we don't penalize a
+    target for lacking a z. Clamped to [0, 1] to stay inside the science core.
+    """
+    if config is None:
+        config = LLAMAS_CONFIG
+    if not getattr(config, 'z_preference_enabled', False):
+        return 1.0
+    z = getattr(target, 'redshift', float('nan'))
+    if not math.isfinite(z):
+        return 1.0
+    lo, hi = config.z_preference_range
+    if lo <= z <= hi:
+        w = 1.0
+    else:
+        d = (lo - z) if z < lo else (z - hi)
+        sigma = max(config.z_preference_sigma, 1e-6)
+        w = math.exp(-(d * d) / (2.0 * sigma * sigma))
+    return _clamp01(max(w, config.z_preference_floor))
+
+
 def compute_composite_score(target: Target,
                             accountant: Optional[TimeAccountant] = None,
                             evening: Optional[Time] = None,
@@ -272,8 +298,15 @@ def compute_composite_score(target: Target,
     # scored — they stay a human-readable field.
     kw_adj = _keyword_adjustment(getattr(target, 'keywords', None))
 
+    # Redshift preference (source differentiator): folded into the science core
+    # like phase. Neutral (1.0) when disabled or z unknown, so it never
+    # penalizes a missing redshift; during ZTF-only downtime all sources are
+    # nearby and hit the floor uniformly (relative order preserved).
+    redshift_pref = _redshift_factor(target, config)
+
     # Composite: multiplicative science core + additive observability/keyword.
-    science_term = SCIENCE_SCALE * science * budget * phase * completeness
+    science_term = (SCIENCE_SCALE * science * budget * phase * completeness
+                    * redshift_pref)
     observability_term = OBSERVABILITY_BONUS * observability
     keyword_term = KEYWORD_BONUS * kw_adj
     score = science_term + observability_term + keyword_term
@@ -282,6 +315,7 @@ def compute_composite_score(target: Target,
         'science': science,
         'budget': budget,
         'phase': phase,
+        'redshift_pref': redshift_pref,
         # Label only (which Gaussian center produced ``phase``). Does NOT affect
         # the total == sum-of-terms invariant since phase is folded into
         # science_term.

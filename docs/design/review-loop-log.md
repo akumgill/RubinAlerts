@@ -297,9 +297,24 @@ feeding a shared scheduler.
   a CSV observing sheet, and a printable text sheet. (Browser print → PDF rather
   than a bundled PDF lib.)
 
+### Integration pass — DONE (b750476, pushed to fork/design-review-loop)
+Both parallel agents landed; merged and shipped:
+- Seed rewritten to the in-repo Villar CSV (`api/seed.py` → `ref/seed_villar_ldss3.csv`),
+  no `~/Downloads` / `seed_data.json` dependency; UA seeded only if they hold a key.
+- `/healthz` (unauthenticated) added and `render.yaml` health check pointed at it
+  — the old `/v1/dashboard` probe returned 401 and would have failed the deploy.
+- `/v1/dashboard` and `/v1/plan/export` default to the seeded Aug-7 **LDSS3** night.
+- Export endpoint wired to `api/plan_export.py` (catalog/csv/text) + three download
+  links in the observing-plan header (same-origin GET carries the session cookie).
+- `web/sample.json` regenerated from the live dashboard (Villar-only, program name
+  reconciled to `CfA-Villar`); `data/` + `target_ledger.json` gitignored.
+- **Live smoke test passed**: login (cookie) → dashboard shows exactly the 10 real
+  Villar targets on LDSS3 → submit as UA (bearer + cookie, write-scoped, shows up in
+  the shared queue) → all three exports return correct Content-Disposition. Suite
+  308 passed / 1 skipped. Render builds from the pushed branch.
+
 ### Open / next
-Integration pass when the backend agent lands (wire seed → in-repo Villar CSV,
-reconcile program names, add export endpoint + button, tests + live smoke),
-then push so Render builds. Then: LDSS3 native "click" catalog + finder charts,
-the ORACLE/Villar feed adapter, S/N ETC (Chris's curve; focus 0.6<z<0.8, a
-Rubin-era mode our current cuts exclude), real post-night reconcile.
+LDSS3 native "click" catalog + finder charts, the ORACLE/Villar feed adapter, S/N
+ETC (Chris's curve; focus 0.6<z<0.8, a Rubin-era mode our current cuts exclude),
+real post-night reconcile, and swapping the demo group credentials for real MAGNETS
+logins (`GROUPS_JSON` / `*_KEY` / `*_PASSWORD` in the Render dashboard).

@@ -313,8 +313,58 @@ Both parallel agents landed; merged and shipped:
   the shared queue) → all three exports return correct Content-Disposition. Suite
   308 passed / 1 skipped. Render builds from the pushed branch.
 
+### 2026-08 storm: Rubin dark, ZTF pivot (IMPORTANT — diagnosed this session)
+A Chilean storm took out BOTH Chilean facilities, and it reshaped the data path:
+- **Rubin/LSST (Cerro Pachón) alert stream is dead — no data after 2026-07-14**
+  (Fink statistics table; hard cliff from ~500k alerts/night to zero for 23
+  nights). This is ~26 days *before* the planned 8/9 downtime — a storm, not the
+  scheduled maintenance. The ~3,584 "Rubin"-tagged Fink alerts a run still pulls
+  are a **stale rolling window**, not fresh sky.
+- **ALeRCE (Chile-hosted) is also frozen at 2026-07-08** — connection/creds fine
+  (a broad query returns 50k rows), not the dec cut (142 of 156 survive dec<=+22),
+  just no new ZTF detections ingested. Under the 30-day default window it
+  self-zeros ~8/8, exactly as the downtime begins. Leaning on a Chilean broker to
+  cover a Chilean-weather outage is a single point of failure.
+- **LCO / Magellan (Las Campanas) suspended too** — restart **Aug 11, local
+  observations only** (Yuri Beletsky observing for us). Aug 4/7/10 nights are OFF;
+  next real nights **Aug 13 + Aug 16, both LLAMAS full**. Yize asked for targets.
+
+**Fix (shipped): Fink-ZTF as the live, out-of-region discovery ingress.**
+- Probed `api.ztf.fink-portal.org`: **live to today** (~150k alerts/night), hosted
+  in **France (IN2P3)** so independent of the Chilean outage; ZTF itself is at
+  Palomar (CA), unaffected. Exposes the SN surface we need: `/api/v1/latests`
+  (finkclass `Early SN Ia candidate` / `SN candidate` / `(TNS) SN Ia`), SNN+RF Ia
+  scores, `/api/v1/objects` light curves, conesearch.
+- New `broker_clients/fink_ztf_client.py` (`FinkZTFClient`): forks
+  `FinkLSSTClient`'s `_post` transport, translates the ZTF schema (jd→mjd,
+  fid→band, magpsf-is-mag not flux, `ZTF…` objectId strings, `/objects` not
+  `/sources`+`/fp`, `/latests` not `/tags`, `d:snn_snia_vs_nonia` Ia score).
+  `fetch_fresh_sn_candidates` applies the wide cuts. Unit-tested (schema + cuts).
+- `scripts/generate_ztf_candidates.py`: writes a queue-schema candidate CSV for a
+  night. First real run (Aug-13): **1213 raw → 117 after cuts** (fresh<=15d,
+  dec<=+22, r<=21.5, Ia>=0.5); top 20 written to `ref/stubbs_llamas_2026-08-13.csv`
+  as CfA-Stubbs / LLAMAS. Many are `(TNS) SN Ia` (already spectroscopically
+  classified — see prior-spectroscopy note below).
+
 ### Open / next
-LDSS3 native "click" catalog + finder charts, the ORACLE/Villar feed adapter, S/N
-ETC (Chris's curve; focus 0.6<z<0.8, a Rubin-era mode our current cuts exclude),
-real post-night reconcile, and swapping the demo group credentials for real MAGNETS
-logins (`GROUPS_JSON` / `*_KEY` / `*_PASSWORD` in the Render dashboard).
+- **Wire FinkZTFClient into run_tonight wide mode** (merge co-equally with Fink-LSST
+  in the aggregator — the merge path already supports two sources) so the full
+  LC-fit / merit / nuclear-AGN funnel runs on ZTF candidates, not just the
+  classifier-selected shortlist the script produces.
+- **Prior-spectroscopy enrichment (asked 2026-08-06):** flag each candidate with
+  TNS classification status (we already ingest TNS; the Fink `(TNS)` prefix is a
+  free signal) + WISeREP epoch coverage (`n_spectra`, last phase, group). Decision
+  support, not a hard cut: for a typing program "already classified" → deprioritize;
+  for a spectral-time-series/cosmology program a single near-peak classification
+  spectrum often doesn't satisfy the science, so re-observing at a new phase is
+  still valuable.
+- **Repoint the live site** off the cancelled Aug-7 to Aug-13 LLAMAS + mark
+  Aug 4/7/10 storm-cancelled (Yuri Beletsky observer) — do *after* Aug-13
+  candidates are in the queue so a visitor doesn't see a blank night.
+- **RSP alerts API** (Chris's link, rsp.lsst.io/guides/api/alerts.html): a real
+  queryable Rubin alert-packet API (needs the RSP token Akum now has) — a
+  Fink-independent Rubin path for *when Rubin returns*; useless now (Rubin issuing
+  nothing) and Rubin-only so not a ZTF substitute.
+- LDSS3 native "click" catalog + finder charts, the ORACLE/Villar feed adapter, S/N
+  ETC (Chris's curve; focus 0.6<z<0.8), real post-night reconcile, and swapping the
+  demo group credentials for real MAGNETS logins in the Render dashboard.

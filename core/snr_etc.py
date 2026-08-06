@@ -1,0 +1,83 @@
+"""S/N-based exposure-time estimator (ETC) for LLAMAS SN spectroscopy.
+
+Digitized from Chris Stubbs's calibration curve "LLAMAS: exposure time to reach
+SNR=5 on SN Ia peak vs redshift" (SNR=5 PER PIXEL over 5150-6250 A; 10-min
+reference exposure), indexed by SN Ia peak apparent r magnitude. The curve's
+solid segment (r<21) is within the LLAMAS fit range; r>21 is extrapolated and
+flagged as such.
+
+Two facts from Chris fold in on top of the raw curve:
+
+  * BINNING. SNe have only broad spectral features, and LLAMAS's R~2000 is ~10x
+    finer than needed, so we bin ~n_bin pixels in the wavelength direction.
+    Photon-limited SNR ~ sqrt(N), so binning n_bin pixels gains sqrt(n_bin) in
+    SNR -> to reach the SAME SNR target the net exposure is n_bin x SHORTER
+    than the per-pixel curve (n_bin~10 -> ~10x shorter).
+  * SNR ~ sqrt(t). A target other than SNR=5 scales the time by (target/5)^2.
+
+    t_net(r) = t_curve_pp5(r) * (target_snr / 5)^2 / n_bin
+
+Break the net exposure into 300-600 s sub-exposures for cosmic-ray rejection
+(``split_exposure``). Caveats carried deliberately: the curve is a point-source
+SN Ia *peak* calc (no explicit host-galaxy background term, so faint SNe on
+bright hosts run optimistic), and r>21 is extrapolated beyond the calibration.
+
+The digitized points are eyeballed off the published PNG; good to ~10-20%.
+Replace ``_R``/``_T`` with a precise pixel-digitization before this is science
+load-bearing for a real night.
+"""
+import bisect
+import math
+
+# (SN Ia peak apparent r, minutes to reach SNR=5 PER PIXEL) off the curve.
+# r < 21 is the LLAMAS fit range (solid); r >= 21 is extrapolated (dashed).
+_R = [17.4, 18.0, 18.5, 19.0, 19.5, 20.0, 20.5, 21.0,
+      21.5, 22.0, 22.5, 23.0, 23.4, 24.0, 24.8]
+_T = [0.016, 0.05, 0.12, 0.30, 0.60, 1.20, 2.50, 5.00,
+      8.00, 15.0, 25.0, 55.0, 80.0, 180.0, 380.0]
+_LOGT = [math.log10(t) for t in _T]
+
+FIT_RANGE_MAX_R = 21.0          # solid/dashed boundary on the curve
+REFERENCE_SNR = 5.0             # the curve's per-pixel SNR target
+DEFAULT_TARGET_SNR = 5.0        # SNR=5 is a typing target; cosmology wants more
+DEFAULT_N_BIN = 10              # spectral binning (R~2000 -> ~10x too fine)
+MAX_EXPOSURE_MIN = 240.0        # cap (4 h); beyond this a target isn't feasible
+DEFAULT_SUB_EXPOSURE_SEC = 300  # cosmic-ray split; 300 or 600 s per Chris
+
+
+def snr_exposure_minutes(r_mag, target_snr=DEFAULT_TARGET_SNR,
+                         n_bin=DEFAULT_N_BIN, max_minutes=MAX_EXPOSURE_MIN):
+    """Net LLAMAS exposure (minutes) to reach ``target_snr`` on a binned
+    resolution element for a source of apparent ``r_mag``.
+
+    Returns ``(minutes, extrapolated)`` where ``extrapolated`` is True when
+    r_mag is outside the LLAMAS fit range (r>21, or brighter than the curve's
+    left edge). Returns ``(nan, False)`` for a non-finite magnitude.
+
+    Uses log-linear interpolation of the per-pixel-SNR=5 curve (clamped at the
+    endpoints), then applies the (target/5)^2 photon scaling and the /n_bin
+    spectral-binning gain.
+    """
+    if r_mag is None or not math.isfinite(r_mag):
+        return float("nan"), False
+    r = min(max(r_mag, _R[0]), _R[-1])
+    i = min(max(bisect.bisect_right(_R, r) - 1, 0), len(_R) - 2)
+    frac = (r - _R[i]) / (_R[i + 1] - _R[i])
+    t_pp5 = 10.0 ** (_LOGT[i] + frac * (_LOGT[i + 1] - _LOGT[i]))
+    t = t_pp5 * (target_snr / REFERENCE_SNR) ** 2 / max(n_bin, 1)
+    t = min(t, max_minutes)
+    extrapolated = (r_mag > FIT_RANGE_MAX_R) or (r_mag < _R[0])
+    return t, extrapolated
+
+
+def split_exposure(net_minutes, sub_exposure_sec=DEFAULT_SUB_EXPOSURE_SEC):
+    """Break a net exposure into equal sub-exposures for cosmic-ray rejection.
+
+    Returns ``(n_sub, sub_exposure_sec)`` — at least one sub-exposure for any
+    positive net time; ``(0, sub_exposure_sec)`` for a non-positive/non-finite
+    net time.
+    """
+    if net_minutes is None or not math.isfinite(net_minutes) or net_minutes <= 0:
+        return 0, sub_exposure_sec
+    n = max(1, math.ceil(net_minutes * 60.0 / sub_exposure_sec))
+    return n, sub_exposure_sec

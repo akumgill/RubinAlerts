@@ -395,6 +395,28 @@ curves**. Fixed so light curves come from wherever the object was seen:
   queryable Rubin alert-packet API (needs the RSP token Akum now has) — a
   Fink-independent Rubin path for *when Rubin returns*; useless now (Rubin issuing
   nothing) and Rubin-only so not a ZTF substitute.
-- LDSS3 native "click" catalog + finder charts, the ORACLE/Villar feed adapter, S/N
-  ETC (Chris's curve; focus 0.6<z<0.8), real post-night reconcile, and swapping the
-  demo group credentials for real MAGNETS logins in the Render dashboard.
+- LDSS3 native "click" catalog + finder charts, the ORACLE/Villar feed adapter,
+  real post-night reconcile, and swapping the demo group credentials for real
+  MAGNETS logins in the Render dashboard.
+
+### S/N-based exposure ETC (Chris's curve) — core built
+`core/snr_etc.py` digitizes Chris's "LLAMAS: exposure time to reach SNR=5 on SN Ia
+peak vs redshift" curve (SNR=5 per pixel; indexed by peak apparent r). Two of his
+calibration facts fold in: SNe have broad features so we bin ~n_bin≈10 px in
+wavelength (√10≈3.2× SNR → net exposure ~10× shorter), and SNR∝√t (target scales
+by (target/5)²). So `t_net(r) = t_curve_pp5(r) × (target_snr/5)² / n_bin`.
+`split_exposure` breaks the net into 300–600 s sub-exposures for CR rejection.
+Sample: r≈23.4 (z≈0.8) → ~8 min net → 2×300 s (why LLAMAS can chase faint SNe).
+Tested (7). REMAINING:
+- **Wire into `estimate_exposure_minutes` (queue) + `estimate_exposure_time`
+  (scheduler)** as the primary tier behind a config flag; mag-scaling stays the
+  fallback. Apply a **minimum-exposure floor** (bright objects return sub-minute,
+  which is overhead-dominated in practice).
+- **Precise pixel-digitization** of the PNG before it's load-bearing (current
+  points are eyeballed to ~10–20%); add a **host-background term** (curve is a
+  point-source SN Ia peak calc — faint SNe on bright hosts run optimistic).
+- **Science-scope decision (collaboration, not ours):** Chris wants to focus
+  **0.6<z<0.8** (r≈23.4–24), which is OUTSIDE our current cuts (z≤0.4, r≤21.5) and
+  in the curve's **extrapolated** (r>21) region — pursuing it means relaxing the
+  selection cuts and accepting extrapolated exposures (flagged via the
+  `extrapolated` return).

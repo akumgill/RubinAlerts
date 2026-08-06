@@ -68,6 +68,31 @@ def test_photometry_blackout_is_zero_coverage():
     assert tot == 2 and n == 0            # this is what the guard flags
 
 
+class _RecordingFink:
+    """Fake Fink-LSST client that records which diaObjectIds it was asked for."""
+    def __init__(self):
+        self.fetched = []
+
+    def get_light_curve(self, did, include_forced=True):
+        self.fetched.append(str(did))
+        return pd.DataFrame()          # queried OK, no photometry
+
+
+def test_fink_lsst_skipped_for_ztf_only_candidates():
+    # Optimization: a ZTF-only object (coord-based id, no rubin_dia_object_id)
+    # must NOT trigger a Fink-LSST fetch — only the Rubin-identified one does.
+    fink = _RecordingFink()
+    cands = pd.DataFrame([
+        {"diaObjectId": "123456", "ra": 10.0, "dec": -5.0,
+         "rubin_dia_object_id": "123456", "ztf_oid": None},        # Rubin
+        {"diaObjectId": "329.79_1.36", "ra": 329.79, "dec": 1.36,
+         "rubin_dia_object_id": None, "ztf_oid": "ZTF26aaa"},      # ZTF-only
+    ])
+    rt.fetch_and_fit(fink, cands, mjd_now=61265,
+                     fetch_ztf=False, fetch_atlas=False)
+    assert fink.fetched == ["123456"]      # ZTF-only object was skipped
+
+
 def test_fetch_and_fit_logs_blackout(caplog):
     # Candidates exist but no photometry sources return anything -> the pipeline
     # must emit a loud, greppable error, not swallow it.

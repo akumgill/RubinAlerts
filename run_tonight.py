@@ -1432,7 +1432,21 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
         # pure, testable FinkBreaker helper; the sleep stays here.
         breaker = FinkBreaker()
         fink_empty = 0
+        # Only Rubin-identified candidates can have Fink-LSST photometry. Skip
+        # ZTF-only objects (coord-based diaObjectId, no rubin_dia_object_id) so a
+        # dark Rubin stream (e.g. the 2026-08 storm) doesn't cost one wasted
+        # /sources fetch per candidate — their light curves come from the
+        # Fink-ZTF batch below instead.
+        has_rubin = set()
+        for _, _row in candidates_df.iterrows():
+            _did = str(_row['diaObjectId'])
+            _rid = _row.get('rubin_dia_object_id')
+            if (pd.notna(_rid) and str(_rid).strip()) or _did.isdigit():
+                has_rubin.add(_did)
+        n_no_rubin = sum(1 for d in dia_ids if str(d) not in has_rubin)
         for i, did in enumerate(dia_ids):
+            if str(did) not in has_rubin:
+                continue  # no Rubin ID → Fink-LSST cannot have this object
             action = breaker.decide()
             if action == ACTION_COOLDOWN:
                 logger.warning("Fink: %d consecutive transport failures — "
@@ -1479,9 +1493,9 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
                         bright_for_atlas.append((str(did), ra, dec))
 
         logger.info("Fink photometry: %d/%d candidates have data "
-                    "(%d empty-OK, %d cooldowns)",
+                    "(%d empty-OK, %d cooldowns, %d skipped: no Rubin ID)",
                     len(fink_data), len(dia_ids), fink_empty,
-                    breaker.cooldowns_used)
+                    breaker.cooldowns_used, n_no_rubin)
 
     # ---- Batch ATLAS for bright candidates ----
     atlas_data = {}  # did -> DataFrame (nJy format)

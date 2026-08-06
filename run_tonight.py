@@ -682,6 +682,76 @@ def fetch_ztf_wide_candidates(mjd_now, min_prob=0.3, days_back=30,
     return g, status
 
 
+def fetch_finkztf_wide_candidates(mjd_now, min_prob=0.3, days_back=30,
+                                  dec_limit=WIDE_DEC_LIMIT, max_mag=WIDE_MAX_MAG,
+                                  hostless_max_mag=WIDE_HOSTLESS_MAX_MAG,
+                                  min_gal_b=WIDE_MIN_GAL_B):
+    """Fetch live ZTF SN candidates from Fink for wide sky mode.
+
+    The downtime-resilient twin of :func:`fetch_ztf_wide_candidates`: same
+    wide-candidate schema and the same screens (Galactic-plane, hostless
+    brightness), but sourced from Fink's ZTF portal (France, live) instead of
+    the Chile-hosted ALeRCE DB (stale during the 2026-08 storm). It is a pure
+    top-of-funnel swap — the returned frame slots into the same
+    ``merge_alerts`` call, so everything downstream is identical.
+
+    Fink's SNN Ia-vs-nonIa score is a genuine P(Ia), so it populates
+    ``sn_ia_prob`` directly (unlike ALeRCE, whose class probability is only
+    P(Ia) when the class IS SNIa). Non-Ia SNe are kept via ``sn_score`` exactly
+    as in the ALeRCE path. Returns (DataFrame in the wide-candidate schema,
+    status dict).
+    """
+    status = {'queried': True, 'responded': False, 'n_returned': 0,
+              'error': None}
+    try:
+        from broker_clients.fink_ztf_client import FinkZTFClient
+        client = FinkZTFClient()
+        # min_ia_score=0: keep all SN candidates (non-Ia survive on sn_score,
+        # mirroring ALeRCE); the effective-prob filter downstream applies min_prob.
+        cand = client.fetch_fresh_sn_candidates(
+            mjd_now, days_back=days_back,
+            max_mag=min(max_mag, hostless_max_mag), dec_max=dec_limit,
+            min_ia_score=0.0)
+    except Exception as e:
+        status['error'] = str(e)
+        logger.warning("Fink-ZTF wide query failed: %s", e)
+        return pd.DataFrame(), status
+
+    status['responded'] = True
+    if cand is None or len(cand) == 0:
+        return pd.DataFrame(), status
+
+    # Galactic-plane screen (same rationale/threshold as the ALeRCE-ZTF path)
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+    g = cand.copy()
+    sc = SkyCoord(ra=g['ra'].values * u.deg, dec=g['dec'].values * u.deg)
+    g = g[np.abs(sc.galactic.b.deg) >= min_gal_b].copy()
+
+    # Normalize to the wide-candidate schema (aggregator input) — identical
+    # column set to fetch_ztf_wide_candidates so the merge/downstream is uniform.
+    g['diaObjectId'] = g['objectId'].astype(str)
+    g['object_id'] = g['diaObjectId']
+    g['sn_ia_prob'] = pd.to_numeric(g['ia_score'], errors='coerce')
+    g['sn_score'] = pd.to_numeric(g['sn_score'], errors='coerce')
+    g['early_ia_score'] = np.where(g['fink_class'] == 'Early SN Ia candidate',
+                                   g['sn_ia_prob'], np.nan)
+    g['broker'] = 'Fink-ZTF'
+    g['z_phot'] = np.nan
+    g['z_tns'] = np.nan
+    g['brightest_mag'] = pd.to_numeric(g['magnitude'], errors='coerce')
+    g['last_mjd'] = pd.to_numeric(g['mjd'], errors='coerce')
+    g['ddf_field'] = g.apply(lambda r: is_in_ddf(r['ra'], r['dec']), axis=1)
+
+    status['n_returned'] = len(g)
+    logger.info("Fink-ZTF wide: %d live candidates after |b|>=%.0f and mag<=%.1f "
+                "(classes: %s; %d TNS-classified)",
+                len(g), min_gal_b, min(max_mag, hostless_max_mag),
+                dict(g['fink_class'].value_counts()),
+                int(g.get('tns_classified', pd.Series(dtype=bool)).sum()))
+    return g, status
+
+
 def format_broker_status_lines(broker_status, prefix=''):
     """Return a list of human-readable lines describing per-broker liveness.
 
@@ -875,6 +945,14 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
             mjd_now, min_prob=min_prob, days_back=days_back,
             dec_limit=wk.get('dec_limit', WIDE_DEC_LIMIT),
             max_mag=wk.get('max_mag', WIDE_MAX_MAG))
+        # Fink-ZTF: live, out-of-region ZTF ingress. During the 2026-08 Chilean
+        # storm this is the source that actually returns data (Rubin/Fink-LSST
+        # dark, ALeRCE stalled); it merges co-equally as a third stream. Pure
+        # top-of-funnel addition — identical schema, identical downstream.
+        finkztf_df, finkztf_status = fetch_finkztf_wide_candidates(
+            mjd_now, min_prob=min_prob, days_back=days_back,
+            dec_limit=wk.get('dec_limit', WIDE_DEC_LIMIT),
+            max_mag=wk.get('max_mag', WIDE_MAX_MAG))
 
         status = {
             'Fink': {'queried': fink is not None,
@@ -883,6 +961,7 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
                      'error': None if fink is not None
                               else 'Fink client unavailable'},
             'ALeRCE-ZTF': ztf_status,
+            'Fink-ZTF': finkztf_status,
             'ANTARES': {'queried': False, 'responded': False,
                         'n_returned': 0,
                         'error': 'not queried (wide mode; DDF-cone only)'},
@@ -900,9 +979,10 @@ def fetch_all_broker_candidates(fink, min_prob=0.3, days_back=30, n_fetch=500,
                                      match_tolerance_arcsec=2.0,
                                      apply_extinction=False)
         combined = aggregator.merge_alerts({'Fink': fink_df,
-                                            'ALeRCE-ZTF': ztf_df})
-        logger.info("Wide merge: %d Fink + %d ZTF -> %d unique",
-                    len(fink_df), len(ztf_df), len(combined))
+                                            'ALeRCE-ZTF': ztf_df,
+                                            'Fink-ZTF': finkztf_df})
+        logger.info("Wide merge: %d Fink + %d ALeRCE-ZTF + %d Fink-ZTF -> %d unique",
+                    len(fink_df), len(ztf_df), len(finkztf_df), len(combined))
         if len(combined) == 0:
             return pd.DataFrame(), status
 

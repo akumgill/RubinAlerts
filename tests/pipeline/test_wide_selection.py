@@ -470,6 +470,12 @@ class TestWideFetchIntegration:
                       'n_returned': len(ztf), 'error': None}
         monkeypatch.setattr(rt, 'fetch_ztf_wide_candidates',
                             lambda *a, **k: (ztf, ztf_status))
+        # Fink-ZTF is a third wide source; patch it empty so this test stays
+        # focused on the Fink + ALeRCE-ZTF pairing.
+        fz_status = {'queried': True, 'responded': True, 'n_returned': 0,
+                     'error': None}
+        monkeypatch.setattr(rt, 'fetch_finkztf_wide_candidates',
+                            lambda *a, **k: (pd.DataFrame(), fz_status))
 
         out, status = rt.fetch_all_broker_candidates(
             self._fake_fink(), min_prob=0.3, days_back=30,
@@ -479,6 +485,7 @@ class TestWideFetchIntegration:
         assert status['ANTARES']['queried'] is False
         assert status['ALeRCE-LSST']['queried'] is False
         assert status['ALeRCE-ZTF'] == ztf_status
+        assert status['Fink-ZTF'] == fz_status
         assert status['Fink']['queried'] is True
 
         # Coincident pair collapsed; distinct SNII kept -> 2 unique objects
@@ -517,6 +524,10 @@ class TestWideFetchIntegration:
             rt, 'fetch_ztf_wide_candidates',
             lambda *a, **k: (ztf, {'queried': True, 'responded': True,
                                    'n_returned': len(ztf), 'error': None}))
+        monkeypatch.setattr(
+            rt, 'fetch_finkztf_wide_candidates',
+            lambda *a, **k: (pd.DataFrame(), {'queried': True, 'responded': True,
+                                              'n_returned': 0, 'error': None}))
 
         out, status = rt.fetch_all_broker_candidates(
             None, min_prob=0.3, days_back=30, sky_mode='wide',
@@ -537,6 +548,12 @@ class TestWideFetchIntegration:
                                               'responded': True,
                                               'n_returned': 0,
                                               'error': None}))
+        monkeypatch.setattr(
+            rt, 'fetch_finkztf_wide_candidates',
+            lambda *a, **k: (pd.DataFrame(), {'queried': True,
+                                              'responded': True,
+                                              'n_returned': 0,
+                                              'error': None}))
 
         out, status = rt.fetch_all_broker_candidates(
             None, min_prob=0.3, days_back=30, sky_mode='wide',
@@ -544,6 +561,42 @@ class TestWideFetchIntegration:
 
         assert len(out) == 0
         assert status['ALeRCE-ZTF']['responded'] is True
+        assert status['Fink-ZTF']['responded'] is True
+
+    def test_finkztf_only_stream_downtime(self, monkeypatch):
+        # 2026-08 storm shape: Fink-LSST (Rubin) dark and ALeRCE-ZTF stale
+        # both return empty; the live Fink-ZTF stream carries the night. Its
+        # candidates must flow through the identical downstream funnel.
+        import run_tonight as rt
+
+        fz = pd.DataFrame([{
+            'diaObjectId': 'ZTF26abetmwf', 'object_id': 'ZTF26abetmwf',
+            'ra': 329.79, 'dec': 1.36, 'sn_score': 0.78, 'sn_ia_prob': 0.92,
+            'early_ia_score': np.nan, 'broker': 'Fink-ZTF',
+            'brightest_mag': 18.85, 'last_mjd': MJD_NOW - 5,
+            'z_phot': np.nan, 'z_tns': np.nan, 'ddf_field': None,
+            'fink_class': '(TNS) SN Ia', 'tns_type': 'SN Ia',
+            'tns_classified': True,
+        }])
+        empty = {'queried': True, 'responded': True, 'n_returned': 0, 'error': None}
+        monkeypatch.setattr(rt, 'fetch_ztf_wide_candidates',
+                            lambda *a, **k: (pd.DataFrame(), empty))
+        monkeypatch.setattr(rt, 'fetch_finkztf_wide_candidates',
+                            lambda *a, **k: (fz, {'queried': True, 'responded': True,
+                                                  'n_returned': 1, 'error': None}))
+
+        out, status = rt.fetch_all_broker_candidates(
+            None, min_prob=0.3, days_back=30, sky_mode='wide', mjd_now=MJD_NOW)
+
+        assert len(out) == 1
+        row = out.iloc[0]
+        assert set(out['brokers_detected']) == {'Fink-ZTF'}
+        # genuine P(Ia) from Fink SNN pooled into mean_ia_prob, survives cut
+        assert row['mean_ia_prob'] == pytest.approx(0.92)
+        assert row['effective_prob'] == pytest.approx(0.92)
+        assert row['prob_source'] == 'ml'
+        assert not bool(row['needs_classification'])
+        assert row['ztf_oid'] == 'ZTF26abetmwf'
 
 
 class TestZEnrichment:

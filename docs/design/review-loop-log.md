@@ -346,11 +346,25 @@ A Chilean storm took out BOTH Chilean facilities, and it reshaped the data path:
   as CfA-Stubbs / LLAMAS. Many are `(TNS) SN Ia` (already spectroscopically
   classified — see prior-spectroscopy note below).
 
+### FinkZTF wired into run_tonight wide mode — DONE (apples-to-apples)
+Only the top-of-funnel differs; everything downstream is the identical code.
+- `fetch_finkztf_wide_candidates` (run_tonight.py) mirrors `fetch_ztf_wide_candidates`'s
+  schema + screens (Galactic-plane, hostless brightness) but sources from
+  `FinkZTFClient`. Fink's SNN Ia-vs-nonIa is a genuine P(Ia), so it populates
+  `sn_ia_prob` directly. Added as a **third source in the same `merge_alerts` call**
+  (`{'Fink', 'ALeRCE-ZTF', 'Fink-ZTF'}`), with a `Fink-ZTF` broker-status entry.
+- `core/alert_aggregator.py`: `Fink-ZTF` added to the ddf_field + ztf_oid/sn_score
+  fallback branches (merge-layer plumbing for the new broker; no science change).
+- Verified end-to-end live: 116 Fink-ZTF candidates → same aggregator → coalesce →
+  normalize → `mean_ia_prob` pooled, `effective_prob`, prob_source=ml; 101 after
+  P(Ia)>=0.3. From here the LC-fit / merit / phase / moon / airmass / ranking are
+  the exact same code the Rubin path runs. Tests: new `test_finkztf_only_stream_
+  downtime` + patched wide-path tests; suite 312 passed.
+- REMAINING: a full `run_tonight --sky-mode wide` end-to-end run for Aug-13/16 (LC
+  fits over the network, minutes) to produce the ranked candidates.csv, vs the
+  classifier-shortlist `scripts/generate_ztf_candidates.py` gives instantly.
+
 ### Open / next
-- **Wire FinkZTFClient into run_tonight wide mode** (merge co-equally with Fink-LSST
-  in the aggregator — the merge path already supports two sources) so the full
-  LC-fit / merit / nuclear-AGN funnel runs on ZTF candidates, not just the
-  classifier-selected shortlist the script produces.
 - **Prior-spectroscopy enrichment (asked 2026-08-06):** flag each candidate with
   TNS classification status (we already ingest TNS; the Fink `(TNS)` prefix is a
   free signal) + WISeREP epoch coverage (`n_spectra`, last phase, group). Decision

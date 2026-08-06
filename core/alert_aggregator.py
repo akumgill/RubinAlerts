@@ -322,7 +322,7 @@ class AlertAggregator:
                 if rubin_id:
                     merged['rubin_dia_object_id'] = rubin_id
 
-            if broker in ('ALeRCE', 'ALeRCE-LSST', 'ALeRCE-ZTF'):
+            if broker in ('ALeRCE', 'ALeRCE-LSST', 'ALeRCE-ZTF', 'Fink-ZTF'):
                 merged['ddf_field'] = merged.get('ddf_field') or alert.get('ddf_field', '')
 
             if broker == 'ALeRCE-LSST':
@@ -331,19 +331,19 @@ class AlertAggregator:
                 if lsst_oid:
                     merged['rubin_dia_object_id'] = str(lsst_oid)
 
-            if broker == 'ALeRCE-ZTF':
+            if broker in ('ALeRCE-ZTF', 'Fink-ZTF'):
                 # Wide-schema alias for the ZTF object id
                 ztf_oid = alert.get('object_id', '')
                 if ztf_oid:
                     merged['ztf_oid'] = str(ztf_oid)
-                # Class-level ML confidence fallback: wide mode sets the ZTF
-                # frame's sn_ia_prob to NaN for non-Ia classes (its per-class
-                # probability is a Ia probability only for SNIa), but keeps
-                # the raw class probability in sn_score as a selection /
-                # confidence signal. Carry it onto the merged row so a
-                # ZTF-only SNII still has an ML score downstream. Fink's
-                # block above overwrites this whenever a Fink score exists
-                # (order-independent: it sets sn_score unconditionally).
+                # Class-level ML confidence fallback: the ZTF wide frames keep a
+                # class/SN-vs-all confidence in sn_score. Carry it onto the
+                # merged row so a ZTF-only non-Ia SN still has an ML score
+                # downstream (ALeRCE sets sn_ia_prob NaN for non-Ia; Fink-ZTF's
+                # sn_ia_prob is a real P(Ia), but the sn_score fallback keeps
+                # behaviour uniform). Fink's block above overwrites this
+                # whenever a Fink-LSST score exists (it sets sn_score
+                # unconditionally), so this is order-independent.
                 if 'sn_score' not in merged:
                     ztf_score = alert.get('sn_score')
                     if pd.notna(ztf_score):

@@ -46,3 +46,4 @@ foo.chat
 .idea/
 data/
 target_ledger.json
+.magnets_credentials

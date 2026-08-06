@@ -13,8 +13,12 @@
 // On total fetch failure (no backend during local dev) -> ./sample.json
 // ===================================================================
 
-const INSTRUMENT = "LDSS3";
-const DASH_URL = "/v1/dashboard?instrument=" + encodeURIComponent(INSTRUMENT);
+// Currently-selected observing night. Defaults to the seeded Aug-7 LDSS3 demo;
+// clicking a night in the schedule bar re-points this and re-fetches.
+let NIGHT = { date: "2026-08-07", instrument: "LDSS3" };
+const dashUrl = () =>
+  "/v1/dashboard?date=" + encodeURIComponent(NIGHT.date) +
+  "&instrument=" + encodeURIComponent(NIGHT.instrument);
 
 const TIERS = ["P0", "P1", "P2", "P3"];
 const order = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -51,7 +55,7 @@ function toast(msg, kind = "ok") {
 async function boot() {
   let res;
   try {
-    res = await fetch(DASH_URL, { credentials: "include" });
+    res = await fetch(dashUrl(), { credentials: "include" });
   } catch (e) {
     // No backend at all -> local review fallback
     await loadSample();
@@ -93,7 +97,7 @@ async function refresh() {
     return;
   }
   try {
-    const res = await fetch(DASH_URL, { credentials: "include" });
+    const res = await fetch(dashUrl(), { credentials: "include" });
     if (res.status === 401) { showLogin(); return; }
     if (!res.ok) { toast("Refresh failed (" + res.status + ")", "err"); return; }
     DATA = await res.json();
@@ -267,6 +271,7 @@ function renderAll() {
   $("dashview").hidden = false;
 
   renderHeader();
+  renderNights();
   renderSummary();
   renderRightNow();
   renderWriteControls();
@@ -299,6 +304,41 @@ function renderHeader() {
   } else {
     banner.innerHTML = "";
   }
+}
+
+// ---- 2026B observing schedule ----------------------------------------
+const monthAbbr = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function prettyDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
+  if (!m) return iso || "";
+  return monthAbbr[+m[2] - 1] + " " + (+m[3]) + " " + m[1];
+}
+
+function selectNight(date, instrument) {
+  if (NIGHT.date === date && NIGHT.instrument === instrument) return;
+  NIGHT = { date, instrument };
+  if (usingSample) { renderNights(); return; }  // no backend to re-fetch
+  $("nights").classList.add("loading");
+  refresh().finally(() => $("nights").classList.remove("loading"));
+}
+
+function renderNights() {
+  const box = $("nights");
+  const nights = (DATA && DATA.nights) || [];
+  if (!nights.length) { box.innerHTML = ""; return; }
+  const cur = (DATA.selected_night) || NIGHT;
+  box.innerHTML = nights.map((n) => {
+    const on = n.date === cur.date && n.instrument === cur.instrument;
+    const half = (n.length === "half") ? `<span class="nl">½</span>` : "";
+    return `<button type="button" class="night${on ? " on" : ""}"
+        onclick="selectNight('${esc(n.date)}','${esc(n.instrument)}')"
+        title="${esc(n.observer || "")}${n.program ? " · " + esc(n.program) : ""}">
+      <span class="nd">${esc(prettyDate(n.date))}</span>
+      <span class="ni ni-${esc((n.instrument || "").toLowerCase())}">${esc(n.instrument)}</span>${half}
+      <span class="no">${esc(n.observer || "")}</span>
+    </button>`;
+  }).join("");
 }
 
 function renderSummary() {
@@ -441,7 +481,7 @@ function renderWriteControls() {
 // ---- observing plan --------------------------------------------------
 function renderPlan() {
   // Export links carry the session cookie automatically (same-origin GET).
-  const base = "/v1/plan/export?instrument=" + encodeURIComponent(INSTRUMENT) +
+  const base = "/v1/plan/export?instrument=" + encodeURIComponent(DATA.plan.instrument) +
     "&date=" + encodeURIComponent(DATA.plan.date) + "&fmt=";
   $("exp-cat").href = base + "catalog";
   $("exp-csv").href = base + "csv";

@@ -11,11 +11,32 @@ from __future__ import annotations
 import csv
 import logging
 import math
+import os
 import tempfile
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+_NIGHTS_YAML = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "ref", "observing_nights_2026B.yaml")
+
+
+def load_nights() -> list:
+    """The known MAGNETS observing calendar: one entry per night with its
+    date, instrument, observer, program and length. Sorted by date. Returns an
+    empty list if the calendar file is missing/unreadable (the dashboard then
+    just shows the single requested night)."""
+    try:
+        import yaml
+        with open(_NIGHTS_YAML) as f:
+            data = yaml.safe_load(f) or {}
+        nights = data.get("nights", []) or []
+        return sorted(nights, key=lambda n: str(n.get("date", "")))
+    except Exception as e:
+        logger.warning("could not load observing calendar: %s", e)
+        return []
 
 # API priority tier -> (orchestrator integer priority, mandatory?). P0 is the
 # "observe tonight" guarantee: top ordinary priority PLUS the mandatory
@@ -295,4 +316,6 @@ def dashboard_data(service, date: str, instrument: str = "LLAMAS",
         "airmass_limit": airmass_limit,
         "programs": programs,
         "caller_program": caller_program,
+        "nights": load_nights(),
+        "selected_night": {"date": date, "instrument": instrument},
     }

@@ -42,6 +42,21 @@ h1{font-size:1.6rem;font-weight:760;letter-spacing:-.01em;margin:.15rem 0 .1rem;
 .stat{display:flex;flex-direction:column;gap:.1rem;}
 h2{font-size:1rem;font-weight:700;margin:2rem 0 .3rem;}
 h2 .hint{font-weight:400;font-size:.8rem;color:var(--faint);margin-left:.4rem;}
+/* 2026B observing schedule bar */
+.nights{display:flex;gap:.5rem;overflow-x:auto;padding:.15rem .1rem .5rem;}
+.nights.loading{opacity:.5;pointer-events:none;}
+.night{flex:0 0 auto;display:flex;flex-direction:column;align-items:flex-start;gap:.15rem;
+  min-width:5.6rem;padding:.45rem .6rem;border:1px solid var(--hair);border-radius:6px;
+  background:var(--panel);color:var(--ink);cursor:pointer;text-align:left;font:inherit;}
+.night:hover{border-color:var(--slate);}
+.night.on{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink);}
+.night .nd{font-weight:600;font-size:.82rem;}
+.night .ni{font-family:var(--mono);font-size:.66rem;letter-spacing:.02em;
+  padding:.02rem .3rem;border-radius:3px;color:#fff;}
+.night .ni-llamas{background:#2f7d6b;}
+.night .ni-ldss3{background:#6a4a86;}
+.night .nl{font-size:.66rem;color:var(--faint);margin-left:.25rem;}
+.night .no{font-size:.7rem;color:var(--slate);}
 h2 .exports{float:right;font-weight:400;font-size:.75rem;}
 h2 .exports a{color:var(--slate);text-decoration:none;border:1px solid var(--hair);
   border-radius:4px;padding:.12rem .5rem;margin-left:.35rem;cursor:pointer;}

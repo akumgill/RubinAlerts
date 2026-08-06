@@ -7,15 +7,13 @@
   "twilight_end": "10:00",
   "dark_hours": 10.4,
   "requested_hours": {
-   "CfA-Villar": 7.5,
-   "UA": 0.33
+   "CfA-Villar": 7.5
   },
   "scheduled_hours": {
-   "CfA-Villar": 6.83,
-   "UA": 0.49
+   "CfA-Villar": 6.83
   },
-  "scheduled_science_hours": 7.33,
-  "n_scheduled": 9,
+  "scheduled_science_hours": 6.83,
+  "n_scheduled": 8,
   "timeline": [
    {
     "utc": "23:36-00:18",
@@ -51,7 +49,7 @@
     "airmass": 1.27
    },
    {
-    "utc": "03:09-03:51",
+    "utc": "03:09-03:52",
     "target": "ZTF26abiavoi",
     "program": "CfA-Villar",
     "tier": "P3",
@@ -59,10 +57,10 @@
     "dec": 3.798,
     "mag": 20.0,
     "exp_min": 40.0,
-    "airmass": 1.31
+    "airmass": 1.3
    },
    {
-    "utc": "03:51-05:03",
+    "utc": "03:52-05:04",
     "target": "2020jfv",
     "program": "CfA-Villar",
     "tier": "P1",
@@ -73,7 +71,7 @@
     "airmass": 1.39
    },
    {
-    "utc": "05:03-05:45",
+    "utc": "05:04-05:46",
     "target": "ZTF24abkllyo",
     "program": "CfA-Villar",
     "tier": "P1",
@@ -84,7 +82,7 @@
     "airmass": 1.38
    },
    {
-    "utc": "05:45-06:58",
+    "utc": "05:46-06:58",
     "target": "2017hcc",
     "program": "CfA-Villar",
     "tier": "P1",
@@ -95,7 +93,7 @@
     "airmass": 1.11
    },
    {
-    "utc": "06:58-07:45",
+    "utc": "06:58-07:46",
     "target": "ZTF26abjqico",
     "program": "CfA-Villar",
     "tier": "P2",
@@ -103,7 +101,7 @@
     "dec": 9.2214,
     "mag": 19.0,
     "exp_min": 40.0,
-    "airmass": 1.34
+    "airmass": 1.33
    }
   ],
   "overflow": [
@@ -124,15 +122,6 @@
     "P3": 2
    },
    "requested_hours": 7.5
-  },
-  "UA": {
-   "counts": {
-    "P0": 0,
-    "P1": 0,
-    "P2": 1,
-    "P3": 0
-   },
-   "requested_hours": 0.33
   }
  },
  "targets": [
@@ -146,7 +135,7 @@
    "redshift": null,
    "resolved_from": "coords",
    "exp_est": 240,
-   "sched_utc": "05:45-06:58",
+   "sched_utc": "05:46-06:58",
    "status": "scheduled",
    "instrument": "LDSS3",
    "airmass": [
@@ -225,7 +214,7 @@
    "redshift": null,
    "resolved_from": "coords",
    "exp_est": 45,
-   "sched_utc": "05:03-05:45",
+   "sched_utc": "05:04-05:46",
    "status": "scheduled",
    "instrument": "LDSS3",
    "airmass": [
@@ -304,7 +293,7 @@
    "redshift": null,
    "resolved_from": "coords",
    "exp_est": 18,
-   "sched_utc": "06:58-07:45",
+   "sched_utc": "06:58-07:46",
    "status": "scheduled",
    "instrument": "LDSS3",
    "airmass": [
@@ -778,7 +767,7 @@
    "redshift": null,
    "resolved_from": "coords",
    "exp_est": 45,
-   "sched_utc": "03:09-03:51",
+   "sched_utc": "03:09-03:52",
    "status": "scheduled",
    "instrument": "LDSS3",
    "airmass": [
@@ -857,7 +846,7 @@
    "redshift": null,
    "resolved_from": "coords",
    "exp_est": 112,
-   "sched_utc": "03:51-05:03",
+   "sched_utc": "03:52-05:04",
    "status": "scheduled",
    "instrument": "LDSS3",
    "airmass": [
@@ -994,6 +983,10 @@
  ],
  "airmass_limit": 1.6,
  "programs": {
+  "CfA-Stubbs": {
+   "kind": "manual",
+   "science": "CfA-Stubbs"
+  },
   "CfA-Villar": {
    "kind": "manual",
    "science": "CfA-Villar"
@@ -1003,5 +996,109 @@
    "science": "UA"
   }
  },
- "caller_program": "CfA-Villar"
+ "caller_program": "CfA-Villar",
+ "nights": [
+  {
+   "date": "2026-08-04",
+   "instrument": "LLAMAS",
+   "observer": "Conor Ransome",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-08-07",
+   "instrument": "LDSS3",
+   "observer": "Conor Ransome",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-08-10",
+   "instrument": "LLAMAS",
+   "observer": "Yize Dong",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-08-13",
+   "instrument": "LLAMAS",
+   "observer": "Yize Dong",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-08-16",
+   "instrument": "LLAMAS",
+   "observer": "Yize Dong",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-09-06",
+   "instrument": "LLAMAS",
+   "observer": "Yize Dong",
+   "program": "CfA-Villar",
+   "length": "half"
+  },
+  {
+   "date": "2026-09-07",
+   "instrument": "LLAMAS",
+   "observer": "Yize Dong",
+   "program": "CfA-Villar",
+   "length": "half"
+  },
+  {
+   "date": "2026-09-12",
+   "instrument": "LDSS3",
+   "observer": "Conor Ransome",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-10-03",
+   "instrument": "LLAMAS",
+   "observer": "Yize Dong",
+   "program": "CfA-Villar",
+   "length": "half"
+  },
+  {
+   "date": "2026-10-05",
+   "instrument": "LDSS3",
+   "observer": "Conor Ransome",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-11-02",
+   "instrument": "LLAMAS",
+   "observer": "Conor Ransome",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-12-08",
+   "instrument": "LLAMAS",
+   "observer": "Conor Ransome",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-12-15",
+   "instrument": "LLAMAS",
+   "observer": "Chris Stubbs",
+   "program": "CfA-Stubbs",
+   "length": "full"
+  },
+  {
+   "date": "2027-01-12",
+   "instrument": "LLAMAS",
+   "observer": "Chris Stubbs",
+   "program": "CfA-Stubbs",
+   "length": "full"
+  }
+ ],
+ "selected_night": {
+  "date": "2026-08-07",
+  "instrument": "LDSS3"
+ }
 }

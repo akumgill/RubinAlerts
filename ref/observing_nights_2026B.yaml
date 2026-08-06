@@ -1,0 +1,76 @@
+# MAGNETS 2026B Magellan observing nights (partial — more observers likely TBD).
+# instrument: LLAMAS (IFU, ~1-min overhead) or LDSS3 (slit, ~10-min overhead).
+# length: full | half.  program: the PI budget the night draws against.
+# Source: observing-nights-2026b memory. Rubin downtime (early–end Aug 2026)
+# overlaps several August nights → those lean on ZTF-fed alerts.
+nights:
+  - date: 2026-08-04
+    instrument: LLAMAS
+    observer: Conor Ransome
+    program: CfA-Villar
+    length: full
+  - date: 2026-08-07
+    instrument: LDSS3
+    observer: Conor Ransome
+    program: CfA-Villar
+    length: full
+  - date: 2026-08-10
+    instrument: LLAMAS
+    observer: Yize Dong
+    program: CfA-Villar
+    length: full
+  - date: 2026-08-13
+    instrument: LLAMAS
+    observer: Yize Dong
+    program: CfA-Villar
+    length: full
+  - date: 2026-08-16
+    instrument: LLAMAS
+    observer: Yize Dong
+    program: CfA-Villar
+    length: full
+  - date: 2026-09-06
+    instrument: LLAMAS
+    observer: Yize Dong
+    program: CfA-Villar
+    length: half
+  - date: 2026-09-07
+    instrument: LLAMAS
+    observer: Yize Dong
+    program: CfA-Villar
+    length: half
+  - date: 2026-09-12
+    instrument: LDSS3
+    observer: Conor Ransome
+    program: CfA-Villar
+    length: full
+  - date: 2026-10-03
+    instrument: LLAMAS
+    observer: Yize Dong
+    program: CfA-Villar
+    length: half
+  - date: 2026-10-05
+    instrument: LDSS3
+    observer: Conor Ransome
+    program: CfA-Villar
+    length: full
+  - date: 2026-11-02
+    instrument: LLAMAS
+    observer: Conor Ransome
+    program: CfA-Villar
+    length: full
+  - date: 2026-12-08
+    instrument: LLAMAS
+    observer: Conor Ransome
+    program: CfA-Villar
+    length: full
+  - date: 2026-12-15
+    instrument: LLAMAS
+    observer: Chris Stubbs
+    program: CfA-Stubbs
+    length: full
+  - date: 2027-01-12
+    instrument: LLAMAS
+    observer: Chris Stubbs
+    program: CfA-Stubbs
+    length: full

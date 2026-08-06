@@ -1432,21 +1432,26 @@ def fetch_and_fit(fink, candidates_df, mjd_now, fetch_ztf=True, fetch_atlas=True
         # pure, testable FinkBreaker helper; the sleep stays here.
         breaker = FinkBreaker()
         fink_empty = 0
-        # Only Rubin-identified candidates can have Fink-LSST photometry. Skip
-        # ZTF-only objects (coord-based diaObjectId, no rubin_dia_object_id) so a
-        # dark Rubin stream (e.g. the 2026-08 storm) doesn't cost one wasted
-        # /sources fetch per candidate — their light curves come from the
-        # Fink-ZTF batch below instead.
-        has_rubin = set()
-        for _, _row in candidates_df.iterrows():
-            _did = str(_row['diaObjectId'])
+        # Skip Fink-LSST for objects POSITIVELY identified as ZTF-only: they
+        # carry a ZTF id but no Rubin id, so Fink-LSST can never have them —
+        # one wasted /sources fetch each, and during a dark Rubin stream (the
+        # 2026-08 storm) that is the whole list. Their light curves come from
+        # the Fink-ZTF batch below. Candidates with no ZTF id (DDF/Fink-native)
+        # are always fetched, so this never changes normal-operation behaviour.
+        def _is_ztf_only(_row):
             _rid = _row.get('rubin_dia_object_id')
-            if (pd.notna(_rid) and str(_rid).strip()) or _did.isdigit():
-                has_rubin.add(_did)
-        n_no_rubin = sum(1 for d in dia_ids if str(d) not in has_rubin)
+            has_rubin = (pd.notna(_rid) and str(_rid).strip()) or \
+                str(_row['diaObjectId']).isdigit()
+            has_ztf = any(
+                pd.notna(_row.get(c)) and str(_row.get(c)).strip()
+                for c in ('ztf_oid', 'object_id_Fink-ZTF', 'object_id_ALeRCE-ZTF'))
+            return has_ztf and not has_rubin
+        skip_ztf_only = {str(r['diaObjectId']) for _, r in candidates_df.iterrows()
+                         if _is_ztf_only(r)}
+        n_no_rubin = sum(1 for d in dia_ids if str(d) in skip_ztf_only)
         for i, did in enumerate(dia_ids):
-            if str(did) not in has_rubin:
-                continue  # no Rubin ID → Fink-LSST cannot have this object
+            if str(did) in skip_ztf_only:
+                continue  # ZTF-only object → Fink-LSST cannot have it
             action = breaker.decide()
             if action == ACTION_COOLDOWN:
                 logger.warning("Fink: %d consecutive transport failures — "

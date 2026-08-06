@@ -39,9 +39,10 @@ def test_fetch_fresh_sn_applies_wide_cuts(monkeypatch):
     def jd(mjd):
         return mjd + _JD_TO_MJD
     canned = pd.DataFrame([
-        # fresh, observable, bright, high Ia -> KEEP
+        # fresh, observable, bright, high Ia, TNS-classified -> KEEP
         {"i:objectId": "keep1", "i:jd": jd(61260), "i:magpsf": 19.0,
-         "i:fid": 2, "i:ra": 100.0, "i:dec": -10.0, "d:snn_snia_vs_nonia": 0.9},
+         "i:fid": 2, "i:ra": 100.0, "i:dec": -10.0, "d:snn_snia_vs_nonia": 0.9,
+         "d:tns": "SN Ia"},
         # too far north (dec > +22) -> DROP
         {"i:objectId": "north", "i:jd": jd(61261), "i:magpsf": 19.0,
          "i:fid": 2, "i:ra": 100.0, "i:dec": 40.0, "d:snn_snia_vs_nonia": 0.9},
@@ -63,3 +64,6 @@ def test_fetch_fresh_sn_applies_wide_cuts(monkeypatch):
     assert list(out["objectId"]) == ["keep1"]
     assert out.loc[0, "band"] == "r"
     assert out.loc[0, "ia_score"] == 0.9
+    # prior-spectroscopy signal from Fink's d:tns
+    assert out.loc[0, "tns_type"] == "SN Ia"
+    assert bool(out.loc[0, "tns_classified"]) is True

@@ -185,6 +185,13 @@ class FinkZTFClient(FinkLSSTClient):
         cat["sn_score"] = pd.to_numeric(cat.get("snn_sn_vs_all"), errors="coerce")
         for col in ("ra", "dec", "magnitude", "mjd"):
             cat[col] = pd.to_numeric(cat.get(col), errors="coerce")
+        # Prior spectroscopy: Fink's d:tns carries the TNS spectroscopic type
+        # (e.g. "SN Ia") when the object has been classified, else blank. This
+        # is the "already followed up spectroscopically?" signal, free in the
+        # /latests payload — non-empty means a classification spectrum exists.
+        cat["tns_type"] = (cat.get("tns", "").fillna("").astype(str).str.strip()
+                           if "tns" in cat.columns else "")
+        cat["tns_classified"] = cat["tns_type"].astype(bool) & (cat["tns_type"] != "")
 
         # Dedup by object, keeping the row with the best Ia score.
         cat = (cat.sort_values("ia_score", ascending=False, na_position="last")
@@ -203,7 +210,8 @@ class FinkZTFClient(FinkLSSTClient):
                     n0, len(out), days_back, dec_max, max_mag, min_ia_score)
         out = out.sort_values("ia_score", ascending=False, na_position="last")
         keep = ["objectId", "ra", "dec", "magnitude", "band", "mjd",
-                "ia_score", "sn_score", "fink_class", "classification"]
+                "ia_score", "sn_score", "fink_class", "classification",
+                "tns_type", "tns_classified"]
         return out[[c for c in keep if c in out.columns]].reset_index(drop=True)
 
     # ------------------------------------------------------------------

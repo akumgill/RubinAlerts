@@ -48,6 +48,10 @@ def main():
     ap.add_argument("--dec-max", type=float, default=22.0)
     ap.add_argument("--min-ia", type=float, default=0.5)
     ap.add_argument("--top", type=int, default=20, help="keep the top-N by Ia score")
+    ap.add_argument("--prefer-untyped", action="store_true",
+                    help="for typing-driven programs: rank objects with no TNS "
+                         "classification spectrum ahead of already-typed ones "
+                         "(default off = decision-support only, Ia-score order)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -62,6 +66,10 @@ def main():
     if df.empty:
         raise SystemExit("no candidates survived the cuts")
 
+    if args.prefer_untyped and "tns_classified" in df.columns:
+        # Untyped first (no classification spectrum yet), then by Ia score.
+        df = df.sort_values(["tns_classified", "ia_score"],
+                            ascending=[True, False], na_position="last")
     df = df.head(args.top)
     with open(args.out, "w", newline="") as f:
         w = csv.writer(f)
@@ -69,9 +77,12 @@ def main():
                     "exposure_minutes", "instrument", "notes"])
         for _, r in df.iterrows():
             ia = None if r.get("ia_score") is None else float(r["ia_score"])
+            tns = str(r.get("tns_type") or "").strip()
+            tns_note = (f"TNS-classified {tns} (spectrum exists)" if tns
+                        else "no TNS classification (untyped)")
             note = (f"ZTF/Fink live; class={r.get('fink_class', '')}; "
                     f"Ia_score={ia:.2f}; sn_score={float(r.get('sn_score', 0) or 0):.2f}; "
-                    f"last det MJD {float(r['mjd']):.1f}")
+                    f"{tns_note}; last det MJD {float(r['mjd']):.1f}")
             w.writerow([args.program, r["objectId"], round(float(r["ra"]), 5),
                         round(float(r["dec"]), 5), priority_for(ia),
                         round(float(r["magnitude"]), 2), r.get("band", ""),

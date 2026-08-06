@@ -87,10 +87,32 @@ def _tier_of(target, id_to_tier) -> str:
     return id_to_tier.get((target.program, target.name), "P?")
 
 
+def _night_local(evening, morning):
+    """Convert the night's twilight Times to Las Campanas local clock time
+    (America/Santiago, so DST is handled: UTC-4 in winter, -3 in summer).
+    Returns (start_local, end_local, tz_offset_label) — labels like 'UTC-4'."""
+    def conv(t):
+        if t is None:
+            return None, None
+        try:
+            from datetime import timezone
+            from zoneinfo import ZoneInfo
+            dt = t.datetime.replace(tzinfo=timezone.utc).astimezone(
+                ZoneInfo("America/Santiago"))
+            off = int(dt.utcoffset().total_seconds() // 3600)
+            return dt.strftime("%H:%M"), f"UTC{off:+d}"
+        except Exception:
+            return None, None
+    start_local, tz = conv(evening)
+    end_local, _ = conv(morning)
+    return start_local, end_local, tz
+
+
 def _empty_night(date: str, moon: str, instrument: str, cfg) -> dict:
     """Plan dict for a night with nothing queued for this instrument: real
     twilight/dark-hours from the site geometry, everything else zeroed."""
     twi_start = twi_end = None
+    local_start = local_end = tz_off = None
     dark_h = 0.0
     try:
         from orchestrator.planner import calculate_twilight
@@ -101,11 +123,14 @@ def _empty_night(date: str, moon: str, instrument: str, cfg) -> dict:
             twi_end = morning.datetime.strftime("%H:%M")
         if evening is not None and morning is not None:
             dark_h = round((morning - evening).to_value("hr"), 2)
+        local_start, local_end, tz_off = _night_local(evening, morning)
     except Exception as e:
         logger.warning("could not compute twilight for %s: %s", date, e)
     return {
         "date": date, "moon": moon, "instrument": instrument,
         "twilight_start": twi_start, "twilight_end": twi_end,
+        "twilight_start_local": local_start, "twilight_end_local": local_end,
+        "tz_offset": tz_off,
         "dark_hours": dark_h,
         "requested_hours": {}, "scheduled_hours": {},
         "scheduled_science_hours": 0.0, "n_scheduled": 0,
@@ -191,6 +216,8 @@ def preview_plan(service, date: str, moon: str = None,
     def _iso(t):
         return t.datetime.strftime("%H:%M") if t is not None else None
     twi_start, twi_end = _iso(plan.evening_twilight), _iso(plan.morning_twilight)
+    local_start, local_end, tz_off = _night_local(
+        plan.evening_twilight, plan.morning_twilight)
     dark_h = None
     if plan.evening_twilight is not None and plan.morning_twilight is not None:
         dark_h = round((plan.morning_twilight - plan.evening_twilight).to_value("hr"), 2)
@@ -205,6 +232,8 @@ def preview_plan(service, date: str, moon: str = None,
     return {
         "date": date, "moon": moon, "instrument": instrument,
         "twilight_start": twi_start, "twilight_end": twi_end,
+        "twilight_start_local": local_start, "twilight_end_local": local_end,
+        "tz_offset": tz_off,
         "dark_hours": dark_h,
         "requested_hours": requested,
         "scheduled_hours": sched_by_prog,

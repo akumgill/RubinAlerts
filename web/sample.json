@@ -5,6 +5,9 @@
   "instrument": "LDSS3",
   "twilight_start": "23:36",
   "twilight_end": "10:00",
+  "twilight_start_local": "19:36",
+  "twilight_end_local": "06:00",
+  "tz_offset": "UTC-4",
   "dark_hours": 10.4,
   "requested_hours": {
    "CfA-Villar": 7.5

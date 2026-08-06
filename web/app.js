@@ -304,9 +304,12 @@ function renderAll() {
 function renderHeader() {
   const p = DATA.plan;
   $("title").firstChild.textContent = "Queue & observing plan — " + p.date;
-  const window = (p.twilight_start && p.twilight_end)
-    ? `dark ${p.twilight_start}–${p.twilight_end} UT · ${p.dark_hours ?? 0} h`
-    : "dark window n/a";
+  let window = "dark window n/a";
+  if (p.twilight_start && p.twilight_end) {
+    const local = (p.twilight_start_local && p.twilight_end_local)
+      ? ` (${p.twilight_start_local}–${p.twilight_end_local} Chile ${p.tz_offset || ""})` : "";
+    window = `dark ${p.twilight_start}–${p.twilight_end} UT${local} · ${p.dark_hours ?? 0} h`;
+  }
   $("meta").textContent = `${p.instrument} · ${p.moon} time · ${window}`;
 
   const caller = DATA.caller_program;
@@ -517,7 +520,7 @@ function renderPlan() {
     const t = byName[e.target] || {};
     const win = (t.obs_start && t.obs_end) ? `${esc(t.obs_start)}–${esc(t.obs_end)}` : "—";
     const best = t.obs_best
-      ? `${esc(t.obs_best)}${t.min_airmass == null ? "" : " · X" + esc(t.min_airmass)}` : "—";
+      ? `${esc(t.obs_best)}${t.min_airmass == null ? "" : ` <span class="am">airmass ${esc(t.min_airmass)}</span>`}` : "—";
     const nominal = e.utc ? `<span class="nominal">nominal ≈ ${esc(e.utc)}</span>` : "";
     return `<tr><td class="num">${i + 1}</td>
       <td><span class="tname">${esc(e.target)}</span>${nominal}</td>

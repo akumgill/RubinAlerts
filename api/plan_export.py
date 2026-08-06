@@ -116,13 +116,16 @@ def observing_text(dash: dict) -> str:
     out = [
         f"MAGNETS observing plan — {plan.get('date','')}  "
         f"{plan.get('instrument','')}  moon={plan.get('moon','')}  "
-        f"dark {plan.get('twilight_start','')}-{plan.get('twilight_end','')} UT",
+        f"dark {plan.get('twilight_start','')}-{plan.get('twilight_end','')} UT"
+        + (f" ({plan['twilight_start_local']}-{plan['twilight_end_local']} "
+           f"Chile {plan.get('tz_offset','')})"
+           if plan.get('twilight_start_local') else ""),
         f"{plan.get('n_scheduled',0)} targets, "
         f"{plan.get('scheduled_science_hours','?')} h science.  "
         "Priority order + observable window — reorder freely; do the 'sets' "
         "targets first. 'Nominal' UTC is a suggested pace only.",
         "",
-        f"{'#':<3} {'Target':<14} {'Tier':<4} {'Observable':<15} {'Best(X)':<14} "
+        f"{'#':<3} {'Target':<14} {'Tier':<4} {'Observable(UT)':<15} {'Best(UT airm)':<15} "
         f"{'r':>5} {'Exp':>6}  When / note",
         "-" * 100,
     ]
@@ -130,7 +133,7 @@ def observing_text(dash: dict) -> str:
         t = win.get(e.get("target", ""), {})
         obs = (f"{t.get('obs_start')}-{t.get('obs_end')}"
                if t.get("obs_start") and t.get("obs_end") else "—")
-        best = (f"{t.get('obs_best')} X{t.get('min_airmass')}"
+        best = (f"{t.get('obs_best')} airmass {t.get('min_airmass')}"
                 if t.get("obs_best") else "—")
         exp = "" if e.get("exp_min") is None else f"{int(e['exp_min'])}m"
         note = t.get("window_note", "")

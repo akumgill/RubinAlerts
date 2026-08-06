@@ -13,6 +13,7 @@ import logging
 import math
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -163,4 +164,135 @@ def preview_plan(service, date: str, moon: str = None,
         "n_scheduled": len(plan.scheduled),
         "timeline": timeline,
         "overflow": overflow,
+    }
+
+
+# Las Campanas Observatory (Magellan) — the site both LLAMAS and LDSS3 sit on.
+_LCO = None
+
+
+def _lco_location():
+    """Cached EarthLocation for LCO (astropy import is deferred)."""
+    global _LCO
+    if _LCO is None:
+        from astropy.coordinates import EarthLocation
+        import astropy.units as u
+        _LCO = EarthLocation(lat=-29.00833 * u.deg, lon=-70.68167 * u.deg,
+                             height=2380 * u.m)
+    return _LCO
+
+
+def airmass_grid(service, plan: dict, date: str, instrument: str,
+                 airmass_limit: float = 1.6, step_min: int = 10):
+    """Per-target airmass tracks over the night, on a fixed time grid.
+
+    Ported from the Aug-7 capture: builds a ``step_min``-spaced grid between
+    the plan's evening and morning twilight, transforms every active target
+    (for this instrument) into AltAz at each grid point, and returns
+    (grid_labels, targets) where each target carries its sec(z) track (None
+    above airmass 3 or below the horizon), scheduled/overflow/queued status,
+    exposure estimate and scheduled UTC slot.
+
+    IERS auto-download is disabled and ``auto_max_age`` set to None so the
+    computation works fully offline for near-future (2026) dates.
+    """
+    import numpy as np
+    from astropy.coordinates import AltAz, SkyCoord
+    from astropy.time import Time
+    from astropy.utils import iers
+    import astropy.units as u
+
+    from .service import estimate_exposure_minutes
+
+    iers.conf.auto_download = False
+    iers.conf.auto_max_age = None
+
+    twi_start = plan.get("twilight_start")
+    twi_end = plan.get("twilight_end")
+    active = service.active(instrument=instrument)
+    if not (twi_start and twi_end):
+        # No usable night window; still return targets without tracks.
+        sched = {e["target"] for e in plan.get("timeline", [])}
+        over = {o["target"] for o in plan.get("overflow", [])}
+        targets = [_target_row(t, [], plan, sched, over, estimate_exposure_minutes)
+                   for t in active]
+        return [], targets
+
+    t0 = Time(f"{date}T{twi_start}:00")
+    t1 = Time(f"{date}T{twi_end}:00")
+    if t1 <= t0:
+        t1 = t1 + 1 * u.day
+    n = int(round((t1 - t0).to_value("min") / step_min)) + 1
+    grid = t0 + np.arange(n) * step_min * u.min
+    labels = [g.datetime.strftime("%H:%M") for g in grid]
+    frame = AltAz(obstime=grid, location=_lco_location())
+
+    sched = {e["target"] for e in plan.get("timeline", [])}
+    over = {o["target"] for o in plan.get("overflow", [])}
+
+    targets = []
+    for t in active:
+        aa = SkyCoord(t.canonical_ra * u.deg,
+                      t.canonical_dec * u.deg).transform_to(frame)
+        am = [round(float(s), 2) if (a > 0 and 0 < s <= 3.0) else None
+              for a, s in zip(aa.alt.deg, aa.secz.value)]
+        targets.append(_target_row(t, am, plan, sched, over,
+                                   estimate_exposure_minutes))
+    return labels, targets
+
+
+def _target_row(t, airmass, plan, sched, over, estimate_exposure_minutes) -> dict:
+    """One dashboard target record (matches the frontend's expected shape)."""
+    status = ("scheduled" if t.name in sched
+              else "overflow" if t.name in over else "queued")
+    sched_utc = next((e["utc"] for e in plan.get("timeline", [])
+                      if e["target"] == t.name), None)
+    return {
+        "program": t.program,
+        "name": t.name,
+        "tier": t.priority,
+        "ra": round(t.canonical_ra, 4),
+        "dec": round(t.canonical_dec, 4),
+        "mag": None if not math.isfinite(t.mag) else round(t.mag, 1),
+        "redshift": None if not math.isfinite(t.redshift) else round(t.redshift, 4),
+        "resolved_from": t.resolved_from,
+        "exp_est": round(estimate_exposure_minutes(t.mag, t.redshift)),
+        "sched_utc": sched_utc,
+        "status": status,
+        "instrument": t.instrument,
+        "airmass": airmass,
+    }
+
+
+def dashboard_data(service, date: str, instrument: str = "LLAMAS",
+                   caller_program: Optional[str] = None,
+                   airmass_limit: float = 1.6) -> dict:
+    """The full aggregate the web dashboard renders in one request.
+
+    Runs the live plan preview, computes per-target airmass tracks, and bundles
+    them with the queue summary, program metadata and the caller's program.
+    """
+    plan = service.plan_preview(date, None, instrument)
+    queue = service.queue_summary()
+    grid, targets = airmass_grid(service, plan, date, instrument, airmass_limit)
+
+    # program metadata: seed descriptions where available, else a stub.
+    try:
+        from .seed import load_seed_data
+        seed_meta = load_seed_data().get("programs", {})
+    except Exception:
+        seed_meta = {}
+    programs = {}
+    for prog in sorted(set(service._programs.values())):
+        programs[prog] = seed_meta.get(
+            prog, {"kind": "manual", "science": prog})
+
+    return {
+        "plan": plan,
+        "queue": queue,
+        "targets": targets,
+        "grid": grid,
+        "airmass_limit": airmass_limit,
+        "programs": programs,
+        "caller_program": caller_program,
     }

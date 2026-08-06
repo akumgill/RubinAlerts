@@ -1,78 +1,226 @@
 """FastAPI wrapper over TargetQueueService — the deployment layer.
 
 This is the only part that needs a web framework; the service core does not.
-Run with:  uvicorn api.app:app --reload   (needs `pip install fastapi uvicorn`)
+Run with:  uvicorn api.app:app --host 0.0.0.0 --port 8000
 
-Auth is a bearer key that maps to a program (see the spec, section 6). For a
-trusted ~dozen-user collaboration this is deliberately lightweight.
+Two ways to authenticate, both resolving to a program:
+  * a bearer API key (machine clients / the automated pipeline), or
+  * a signed session cookie set by POST /login (browser users).
+Reads accept either; writes stay scoped to the caller's own program.
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
 
-from fastapi import FastAPI, Header, HTTPException, Body
+from fastapi import FastAPI, Header, HTTPException, Body, Form, Request
+from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
 from .service import TargetQueueService, AuthError, NotFound
 
-# In a real deployment these come from config / a secrets file. Placeholder
-# wiring so the module is runnable; replace with the collaboration's keys.
-PROGRAMS = {
-    os.environ.get("MAGNETS_IA_KEY", "key-ia"): "MAGNETS-Ia",
-    os.environ.get("MAGNETS_EXOTIC_KEY", "key-exotic"): "MAGNETS-Exotic",
-    os.environ.get("MAGNETS_OTHER_KEY", "key-other"): "MAGNETS-Other",
-}
-ALLOCATIONS = os.environ.get("MAGNETS_ALLOCATIONS", "ref/allocations_example.yaml")
+logger = logging.getLogger(__name__)
 
-svc = TargetQueueService(PROGRAMS, ALLOCATIONS)
+
+# ---------------------------------------------------------------------------
+# Group config: program -> {key, password}. From GROUPS_JSON (a JSON blob), or
+# per-program env vars, else the built-in demo groups (UA + CfA/Villar) so a
+# fresh deploy is immediately usable.
+# ---------------------------------------------------------------------------
+def _load_group_config() -> dict:
+    raw = os.environ.get("GROUPS_JSON")
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception as e:
+            logger.error("GROUPS_JSON is not valid JSON (%s); using demo groups", e)
+    from .seed import demo_group_config
+    return demo_group_config()
+
+
+GROUPS = _load_group_config()
+PROGRAMS = {cfg["key"]: prog for prog, cfg in GROUPS.items()}         # key -> program
+PROGRAM_TO_KEY = {prog: cfg["key"] for prog, cfg in GROUPS.items()}   # program -> key
+PASSWORDS = {prog: cfg.get("password") for prog, cfg in GROUPS.items()}
+
+DB_PATH = os.environ.get("DB_PATH", "./data/queue.db")
+DATA_DIR = os.path.dirname(os.path.abspath(DB_PATH)) or "."
+
+# Allocations: explicit path, else the demo allocations written into DATA_DIR.
+ALLOCATIONS = os.environ.get("MAGNETS_ALLOCATIONS")
+if not ALLOCATIONS:
+    from .seed import ensure_demo_allocations
+    ALLOCATIONS = ensure_demo_allocations(DATA_DIR)
+
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "dev-insecure-session-secret")
+if SESSION_SECRET == "dev-insecure-session-secret":
+    logger.warning("SESSION_SECRET is unset; using an insecure dev secret")
+
+svc = TargetQueueService(PROGRAMS, ALLOCATIONS, db_path=DB_PATH)
+
+# One-time demo seed on a fresh (empty) database.
+if os.environ.get("SEED_DEMO") == "1" and not svc.has_targets():
+    try:
+        from .seed import seed_demo
+        seed_demo(svc)
+    except Exception as e:
+        logger.exception("demo seed failed: %s", e)
+
 app = FastAPI(title="MAGNETS Target-Submission API", version="0.3")
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
+                   same_site="lax", https_only=False)
 
 
-def _key(authorization: str | None) -> str:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(401, "missing bearer token")
-    return authorization.split(" ", 1)[1].strip()
+@app.get("/healthz")
+def healthz():
+    """Unauthenticated liveness probe (Render health check)."""
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+def _identity(request: Request, authorization: str | None) -> tuple[str, str]:
+    """Resolve the caller to (api_key, program) from a bearer key OR a session
+    cookie. Raises 401 if neither is present/valid."""
+    # 1. Bearer key
+    if authorization and authorization.lower().startswith("bearer "):
+        key = authorization.split(" ", 1)[1].strip()
+        try:
+            program = svc.program_for(key)
+            return key, program
+        except AuthError:
+            raise HTTPException(401, "invalid API key")
+    # 2. Session cookie
+    program = request.session.get("program")
+    if program and program in PROGRAM_TO_KEY:
+        return PROGRAM_TO_KEY[program], program
+    raise HTTPException(401, "authentication required (bearer key or login)")
 
 
 def _guard(fn):
     try:
         return fn()
     except AuthError as e:
-        raise HTTPException(403, str(e))
+        raise HTTPException(401, str(e))
     except NotFound as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
 
 
+# ---------------------------------------------------------------------------
+# Browser auth
+# ---------------------------------------------------------------------------
+@app.post("/login")
+def login(request: Request, program: str = Form(...), password: str = Form(...)):
+    expected = PASSWORDS.get(program)
+    if expected is None or password != expected:
+        raise HTTPException(401, "invalid program or password")
+    request.session["program"] = program
+    return {"ok": True, "program": program}
+
+
+@app.post("/logout")
+def logout(request: Request):
+    request.session.clear()
+    return {"ok": True}
+
+
+@app.get("/v1/whoami")
+def whoami(request: Request, authorization: str = Header(None)):
+    key, program = _identity(request, authorization)
+    return {"program": program}
+
+
+# ---------------------------------------------------------------------------
+# Target CRUD (writes scoped to the caller's program)
+# ---------------------------------------------------------------------------
 @app.post("/v1/targets")
-def submit(items: list[dict] = Body(...), authorization: str = Header(None)):
-    return _guard(lambda: svc.submit(_key(authorization), items))
+def submit(request: Request, items: list[dict] = Body(...),
+           authorization: str = Header(None)):
+    key, _ = _identity(request, authorization)
+    return _guard(lambda: svc.submit(key, items))
 
 
 @app.get("/v1/targets")
-def list_targets(authorization: str = Header(None)):
-    return _guard(lambda: svc.list_targets(_key(authorization)))
+def list_targets(request: Request, authorization: str = Header(None)):
+    key, _ = _identity(request, authorization)
+    return _guard(lambda: svc.list_targets(key))
 
 
 @app.patch("/v1/targets/{target_id}")
-def patch(target_id: int, changes: dict = Body(...), authorization: str = Header(None)):
-    return _guard(lambda: svc.patch(_key(authorization), target_id, changes))
+def patch(request: Request, target_id: int, changes: dict = Body(...),
+          authorization: str = Header(None)):
+    key, _ = _identity(request, authorization)
+    return _guard(lambda: svc.patch(key, target_id, changes))
 
 
 @app.delete("/v1/targets/{target_id}")
-def withdraw(target_id: int, authorization: str = Header(None)):
-    return _guard(lambda: svc.withdraw(_key(authorization), target_id))
+def withdraw(request: Request, target_id: int, authorization: str = Header(None)):
+    key, _ = _identity(request, authorization)
+    return _guard(lambda: svc.withdraw(key, target_id))
 
 
+# ---------------------------------------------------------------------------
+# Reads (collaboration-wide; require a valid session or bearer)
+# ---------------------------------------------------------------------------
 @app.get("/v1/queue")
-def queue(authorization: str = Header(None)):
-    return _guard(lambda: (svc.program_for(_key(authorization)), svc.queue_summary())[1])
+def queue(request: Request, authorization: str = Header(None)):
+    _identity(request, authorization)
+    return _guard(lambda: svc.queue_summary())
 
 
 @app.get("/v1/plan/preview")
-def plan_preview(date: str, instrument: str = "LLAMAS", moon: str = None,
-                 authorization: str = Header(None)):
-    # preview is collaboration-wide; still require a valid key. LLAMAS and LDSS3
-    # are parallel systems, so a preview is for one instrument at a time.
-    return _guard(lambda: (svc.program_for(_key(authorization)),
-                           svc.plan_preview(date, moon, instrument))[1])
+def plan_preview(request: Request, date: str, instrument: str = "LLAMAS",
+                 moon: str = None, authorization: str = Header(None)):
+    _identity(request, authorization)
+    return _guard(lambda: svc.plan_preview(date, moon, instrument))
+
+
+@app.get("/v1/dashboard")
+def dashboard(request: Request, instrument: str = "LDSS3",
+              date: str = "2026-08-07", authorization: str = Header(None)):
+    """The full aggregate the web dashboard renders: plan + queue + per-target
+    airmass tracks + grid + program metadata. Defaults to the Aug-7 demo night
+    on LDSS3 (the seeded instrument)."""
+    _, program = _identity(request, authorization)
+    from .scheduler_bridge import dashboard_data
+    return _guard(lambda: dashboard_data(svc, date, instrument,
+                                         caller_program=program))
+
+
+@app.get("/v1/plan/export")
+def export_plan(request: Request, instrument: str = "LDSS3",
+                date: str = "2026-08-07", fmt: str = "catalog",
+                authorization: str = Header(None)):
+    """Export the plan the way an observer uses it: fmt=catalog (the instrument
+    catalog the GUI loads), csv (an observing sheet), or text (a printable
+    sheet)."""
+    _, program = _identity(request, authorization)
+    from .scheduler_bridge import dashboard_data
+    from . import plan_export
+    dash = dashboard_data(svc, date, instrument, caller_program=program)
+    fmt = fmt.lower()
+    if fmt == "catalog":
+        body, ext, ctype = plan_export.catalog_text(dash), "cat", "text/plain"
+    elif fmt == "csv":
+        body, ext, ctype = plan_export.observing_csv(dash), "csv", "text/csv"
+    elif fmt in ("text", "sheet"):
+        body, ext, ctype = plan_export.observing_text(dash), "txt", "text/plain"
+    else:
+        raise HTTPException(400, "fmt must be catalog | csv | text")
+    fname = f"MAGNETS_{instrument}_{date}.{ext}"
+    return Response(content=body, media_type=ctype,
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+# ---------------------------------------------------------------------------
+# Static frontend (mounted last so it doesn't shadow the API routes). The web/
+# directory is owned by the frontend build; we only guarantee it exists.
+# ---------------------------------------------------------------------------
+_WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "web")
+os.makedirs(_WEB_DIR, exist_ok=True)
+app.mount("/", StaticFiles(directory=_WEB_DIR, html=True), name="web")

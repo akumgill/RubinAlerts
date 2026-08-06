@@ -44,3 +44,5 @@ foo.chat
 # IDE
 .vscode/
 .idea/
+data/
+target_ledger.json

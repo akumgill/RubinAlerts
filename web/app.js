@@ -1,0 +1,567 @@
+"use strict";
+
+// ===================================================================
+// RubinAlerts MAGNETS shared queue — live web interface
+// Same-origin SPA. All fetches are relative + credentials:'include'.
+// Endpoints consumed:
+//   GET    /v1/dashboard?instrument=LDSS3   -> full dashboard payload
+//   POST   /login   (form-urlencoded: program, password)
+//   POST   /logout
+//   POST   /v1/targets            body: [ {name,ra,dec,priority,instrument,exposure_minutes,mag} ]
+//   PATCH  /v1/targets/{id}        body: { priority }
+//   DELETE /v1/targets/{id}
+// On total fetch failure (no backend during local dev) -> ./sample.json
+// ===================================================================
+
+const INSTRUMENT = "LDSS3";
+const DASH_URL = "/v1/dashboard?instrument=" + encodeURIComponent(INSTRUMENT);
+
+const TIERS = ["P0", "P1", "P2", "P3"];
+const order = { P0: 0, P1: 1, P2: 2, P3: 3 };
+const TIERCOL = { P0: "#b3542e", P1: "#3a4650", P2: "#7a8590", P3: "#c2c8ce" };
+const RAWPAL = ["#6a4a86", "#2f7d6b", "#b3802e", "#3d6ea5", "#a5533d"];
+
+let DATA = null;      // current dashboard payload
+let RAW = {};         // program -> color
+let PROGS = [];       // program names
+let usingSample = false;
+
+const $ = (id) => document.getElementById(id);
+const chip = (t) =>
+  `<span class="chip" style="background:${TIERCOL[t] || "#7a8590"};color:${t === "P3" ? "#2a2f34" : "#fff"}">${t}</span>`;
+const esc = (s) =>
+  String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// stable id for write endpoints: prefer explicit id, fall back to name
+const idOf = (t) => (t.id != null ? t.id : t.name);
+
+// ---- toasts ----------------------------------------------------------
+function toast(msg, kind = "ok") {
+  const box = $("toasts");
+  const el = document.createElement("div");
+  el.className = "toast " + (kind === "err" ? "err" : "ok");
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => el.remove(), 5000);
+}
+
+// ===================================================================
+// Boot / auth flow
+// ===================================================================
+async function boot() {
+  let res;
+  try {
+    res = await fetch(DASH_URL, { credentials: "include" });
+  } catch (e) {
+    // No backend at all -> local review fallback
+    await loadSample();
+    return;
+  }
+  if (res.status === 401) {
+    showLogin();
+    return;
+  }
+  if (!res.ok) {
+    $("loading").textContent = "Dashboard error (" + res.status + ").";
+    return;
+  }
+  try {
+    DATA = await res.json();
+  } catch (e) {
+    $("loading").textContent = "Could not parse dashboard response.";
+    return;
+  }
+  usingSample = false;
+  renderAll();
+}
+
+async function loadSample() {
+  try {
+    const r = await fetch("./sample.json");
+    DATA = await r.json();
+    usingSample = true;
+    renderAll();
+  } catch (e) {
+    $("loading").textContent = "No backend and no local sample.json available.";
+  }
+}
+
+async function refresh() {
+  if (usingSample) {
+    // In local-review mode there is no backend to re-fetch; just re-render.
+    renderAll();
+    return;
+  }
+  try {
+    const res = await fetch(DASH_URL, { credentials: "include" });
+    if (res.status === 401) { showLogin(); return; }
+    if (!res.ok) { toast("Refresh failed (" + res.status + ")", "err"); return; }
+    DATA = await res.json();
+    renderAll();
+  } catch (e) {
+    toast("Network error refreshing dashboard", "err");
+  }
+}
+
+// ---- login view ------------------------------------------------------
+function programChoices() {
+  // Prefer program list from a prior (sample) payload; else a sane default set.
+  if (DATA && DATA.programs) return Object.keys(DATA.programs);
+  return ["CfA / Villar", "UA"];
+}
+
+function showLogin() {
+  $("loading").hidden = true;
+  $("dashview").hidden = true;
+  $("loginview").hidden = false;
+  const sel = $("lg-prog");
+  const opts = programChoices();
+  sel.innerHTML = opts.map((p) => `<option>${esc(p)}</option>`).join("");
+}
+
+$("loginform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = $("lg-err");
+  err.textContent = "";
+  const program = $("lg-prog").value;
+  const password = $("lg-pass").value;
+  try {
+    const res = await fetch("/login", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body:
+        "program=" + encodeURIComponent(program) +
+        "&password=" + encodeURIComponent(password),
+    });
+    if (!res.ok) {
+      err.textContent = res.status === 401 ? "Wrong program or password." : "Login failed (" + res.status + ").";
+      return;
+    }
+    $("loginview").hidden = true;
+    $("loading").hidden = false;
+    $("loading").textContent = "Loading the shared queue…";
+    boot();
+  } catch (ex) {
+    err.textContent = "Could not reach the server.";
+  }
+});
+
+$("logout").addEventListener("click", async () => {
+  try {
+    await fetch("/logout", { method: "POST", credentials: "include" });
+  } catch (e) { /* ignore */ }
+  showLogin();
+});
+
+// ===================================================================
+// Write actions
+// ===================================================================
+async function addTarget(ev) {
+  ev.preventDefault();
+  const name = $("t-name").value.trim();
+  const raS = $("t-ra").value.trim();
+  const decS = $("t-dec").value.trim();
+  const expS = $("t-exp").value.trim();
+  const magS = $("t-mag").value.trim();
+
+  if (!name && !(raS && decS)) {
+    toast("Provide a name or an RA + Dec pair.", "err");
+    return;
+  }
+  const item = {
+    name: name || null,
+    ra: raS === "" ? null : Number(raS),
+    dec: decS === "" ? null : Number(decS),
+    priority: $("t-pri").value,
+    instrument: $("t-inst").value,
+    exposure_minutes: expS === "" ? null : Number(expS),
+    mag: magS === "" ? null : Number(magS),
+  };
+
+  const btn = $("addbtn");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/v1/targets", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([item]),
+    });
+    if (res.status === 401) { showLogin(); return; }
+    let body = null;
+    try { body = await res.json(); } catch (e) { /* non-json */ }
+    reportItemResults(body, res.ok);
+    if (res.ok) {
+      $("addform").reset();
+      $("t-pri").value = "P1";
+      $("t-inst").value = "LDSS3";
+    }
+    await refresh();
+  } catch (e) {
+    toast("Network error adding target", "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// The POST returns an array of per-item results; surface ok/error for each.
+function reportItemResults(body, httpOk) {
+  const items = Array.isArray(body) ? body
+    : (body && Array.isArray(body.results)) ? body.results
+    : null;
+  if (items) {
+    items.forEach((r) => {
+      const label = r.name || r.id || "target";
+      if (r && (r.ok === false || r.error)) toast(label + ": " + (r.error || "rejected"), "err");
+      else toast(label + ": added", "ok");
+    });
+    return;
+  }
+  toast(httpOk ? "Target submitted" : "Submission rejected", httpOk ? "ok" : "err");
+}
+
+async function changePriority(id, priority) {
+  try {
+    const res = await fetch("/v1/targets/" + encodeURIComponent(id), {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ priority }),
+    });
+    if (res.status === 401) { showLogin(); return; }
+    if (!res.ok) { toast("Priority update failed (" + res.status + ")", "err"); }
+    else { toast("Priority → " + priority, "ok"); }
+  } catch (e) {
+    toast("Network error updating priority", "err");
+  }
+  await refresh();
+}
+
+async function withdraw(id, name) {
+  if (!window.confirm("Withdraw " + name + " from the queue?")) return;
+  try {
+    const res = await fetch("/v1/targets/" + encodeURIComponent(id), {
+      method: "DELETE",
+      credentials: "include",
+    });
+    if (res.status === 401) { showLogin(); return; }
+    if (!res.ok) { toast("Withdraw failed (" + res.status + ")", "err"); }
+    else { toast(name + " withdrawn", "ok"); }
+  } catch (e) {
+    toast("Network error withdrawing target", "err");
+  }
+  await refresh();
+}
+
+// ===================================================================
+// Rendering (adapted from the reference dashboard)
+// ===================================================================
+function renderAll() {
+  PROGS = Object.keys(DATA.programs || {});
+  RAW = {};
+  PROGS.forEach((p, i) => (RAW[p] = RAWPAL[i % RAWPAL.length]));
+
+  $("loading").hidden = true;
+  $("loginview").hidden = true;
+  $("dashview").hidden = false;
+
+  renderHeader();
+  renderSummary();
+  renderRightNow();
+  renderWriteControls();
+  renderPlan();
+  renderOverflow();
+  renderPrograms();
+  renderQueue();
+  renderFoot();
+}
+
+function renderHeader() {
+  const p = DATA.plan;
+  $("title").firstChild.textContent = "Queue & observing plan — " + p.date;
+  $("meta").textContent =
+    `${p.instrument} · ${p.moon} time · dark ${p.twilight_start}–${p.twilight_end} UT · ${p.dark_hours} h`;
+
+  const caller = DATA.caller_program;
+  const who = $("whoami-line");
+  if (caller) {
+    who.innerHTML = `signed in as <b>${esc(caller)}</b>` + (usingSample ? " <span style='color:var(--faint)'>(local sample)</span>" : "");
+    $("logout").hidden = usingSample; // no session to end in sample mode
+  } else {
+    who.innerHTML = usingSample ? "<span style='color:var(--faint)'>local sample</span>" : "read-only";
+    $("logout").hidden = usingSample;
+  }
+
+  const banner = $("callerbanner");
+  if (usingSample) {
+    banner.innerHTML = `<div class="banner">No backend reached — rendering <code>./sample.json</code> for local review. Write actions require the live API.</div>`;
+  } else {
+    banner.innerHTML = "";
+  }
+}
+
+function renderSummary() {
+  const p = DATA.plan;
+  const overflowCount = (p.overflow && p.overflow.length) || 0;
+  $("summary").innerHTML = [
+    [DATA.targets.length, "targets in the queue"],
+    [p.n_scheduled, "fit tonight"],
+    [overflowCount, "in overflow"],
+    [p.scheduled_science_hours + " h", "science planned"],
+    [PROGS.length, "groups sharing the night"],
+  ].map(([v, l]) => `<div class="stat"><span class="v">${esc(v)}</span><span class="l">${esc(l)}</span></div>`).join("");
+}
+
+// ---- right now: airmass + eligibility -------------------------------
+let clockInited = false;
+function renderRightNow() {
+  const GRID = DATA.grid, LIMIT = DATA.airmass_limit, N = GRID.length;
+  const AMW = 900, AMH = 240, ML = 34, MR = 14, MT = 10, MB = 26;
+  const PW = AMW - ML - MR, PH = AMH - MT - MB, YMAX = 1.9;
+  const ax = (i) => ML + (N > 1 ? i / (N - 1) : 0) * PW;
+  const ay = (a) => MT + (Math.min(YMAX, Math.max(1, a)) - 1) / (YMAX - 1) * PH;
+
+  function tracePath(am) {
+    let d = "", pen = false;
+    (am || []).forEach((v, i) => {
+      if (v == null || v > YMAX) { pen = false; return; }
+      d += (pen ? "L" : "M") + ax(i).toFixed(1) + " " + ay(v).toFixed(1) + " ";
+      pen = true;
+    });
+    return d.trim();
+  }
+
+  let svg = `<svg class="am-svg" viewBox="0 0 ${AMW} ${AMH}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="airmass through the night">`;
+  [1, 1.2, 1.4, 1.6, 1.8].forEach((a) => {
+    svg += `<line class="gl" x1="${ML}" y1="${ay(a)}" x2="${AMW - MR}" y2="${ay(a)}"/>` +
+      `<text x="3" y="${ay(a) + 3}" style="font:.62rem var(--mono);fill:var(--faint)">${a.toFixed(1)}</text>`;
+  });
+  for (let i = 0; i < N; i += 12) {
+    svg += `<text x="${ax(i)}" y="${AMH - 8}" text-anchor="middle" style="font:.62rem var(--mono);fill:var(--faint)">${esc(GRID[i])}</text>`;
+  }
+  svg += `<line class="limit" x1="${ML}" y1="${ay(LIMIT)}" x2="${AMW - MR}" y2="${ay(LIMIT)}"/>` +
+    `<text x="${AMW - MR}" y="${ay(LIMIT) - 3}" text-anchor="end" style="font:.62rem var(--mono);fill:var(--err,#b3402e)">airmass ${LIMIT} limit</text>`;
+  DATA.targets.forEach((t) => {
+    const d = tracePath(t.airmass);
+    if (d) svg += `<path class="trace" data-name="${esc(t.name)}" stroke="${RAW[t.program]}" d="${d}"></path>`;
+  });
+  svg += `<line class="cursor" id="cursor" x1="${ax(0)}" y1="${MT}" x2="${ax(0)}" y2="${MT + PH}"></line>`;
+  svg += `<circle id="marker" class="am-marker" r="5.5" cx="0" cy="0" style="display:none"></circle></svg>`;
+  $("amplot").innerHTML = svg;
+
+  const amplot = $("amplot");
+  const clock = $("clock");
+  let pinned = null;
+
+  function markerAt(name) {
+    const t = DATA.targets.find((x) => x.name === name);
+    const i = +clock.value, mk = $("marker");
+    if (t && t.airmass && t.airmass[i] != null && t.airmass[i] <= YMAX) {
+      mk.setAttribute("cx", ax(i).toFixed(1));
+      mk.setAttribute("cy", ay(t.airmass[i]).toFixed(1));
+      mk.style.display = "";
+    } else {
+      mk.style.display = "none";
+    }
+    amplot.querySelectorAll("path.trace").forEach((p) => p.classList.toggle("hot", p.dataset.name === name));
+  }
+  function clearMark() {
+    const mk = $("marker");
+    if (mk) mk.style.display = "none";
+    amplot.querySelectorAll("path.trace.hot").forEach((p) => p.classList.remove("hot"));
+  }
+
+  clock.max = N - 1;
+  if (!clockInited) { clock.value = Math.floor(N / 2); clockInited = true; }
+  if (+clock.value > N - 1) clock.value = N - 1;
+
+  function renderNow() {
+    const i = +clock.value;
+    $("clocklab").textContent = GRID[i] + " UT";
+    const cur = $("cursor"), x = ax(i);
+    cur.setAttribute("x1", x); cur.setAttribute("x2", x);
+    const elig = DATA.targets
+      .map((t) => ({ t, am: t.airmass ? t.airmass[i] : null }))
+      .filter((o) => o.am != null && o.am <= LIMIT)
+      .sort((a, b) => order[a.t.tier] - order[b.t.tier] || (a.t.exp_est - b.t.exp_est) || a.am - b.am);
+    const eset = new Set(elig.map((o) => o.t.name));
+    const top = new Set(elig.slice(0, 3).map((o) => o.t.name));
+    amplot.querySelectorAll("path.trace").forEach((p) => {
+      const n = p.dataset.name;
+      p.classList.toggle("hi", top.has(n));
+      p.classList.toggle("up", eset.has(n) && !top.has(n));
+    });
+    $("rnhead").innerHTML =
+      `<b>${elig.length}</b> targets observable at <b>${esc(GRID[i])} UT</b>, ranked by priority then how quickly they can be done. "In plan" = already in tonight's sequence.`;
+    $("rnpanel").innerHTML = elig.length
+      ? elig.map((o, k) => {
+          const t = o.t;
+          const inplan = t.sched_utc
+            ? `<span style="color:var(--ok);font-weight:600">in plan · ${esc(t.sched_utc)}</span>`
+            : "not in plan";
+          return `<div class="rn-card ${k < 3 ? "top" : ""} ${t.name === pinned ? "pinned" : ""}" data-name="${esc(t.name)}" style="border-left-color:${RAW[t.program]}">
+            <span class="rn-rank">${k + 1}</span>${chip(t.tier)}
+            <div class="rn-main"><span class="nm">${esc(t.name)}</span>
+              <div class="sub"><span>${esc(t.program)}</span><span>airmass ${o.am.toFixed(2)}</span><span>r ${t.mag == null ? "—" : esc(t.mag)}</span><span>~${esc(t.exp_est)}m</span><span>${inplan}</span></div>
+            </div></div>`;
+        }).join("")
+      : '<div class="rn-head">Nothing above the airmass limit at this moment.</div>';
+    if (pinned) markerAt(pinned); else clearMark();
+  }
+
+  clock.oninput = renderNow;
+  const rnpanel = $("rnpanel");
+  rnpanel.onmouseover = (e) => {
+    const c = e.target.closest(".rn-card");
+    if (c && c.dataset.name !== pinned) markerAt(c.dataset.name);
+  };
+  rnpanel.onmouseout = (e) => {
+    const c = e.target.closest(".rn-card");
+    if (!c) return;
+    if (pinned) markerAt(pinned); else clearMark();
+  };
+  rnpanel.onclick = (e) => {
+    const c = e.target.closest(".rn-card");
+    if (!c) return;
+    pinned = pinned === c.dataset.name ? null : c.dataset.name;
+    renderNow();
+  };
+  renderNow();
+}
+
+// ---- write controls: show add-form only when we know the caller -----
+function renderWriteControls() {
+  const canWrite = !!DATA.caller_program && !usingSample;
+  const showForm = !!DATA.caller_program; // form visible in sample too, submits are just no-op fallbacks
+  $("addhead").hidden = !showForm;
+  $("addform").hidden = !showForm;
+}
+
+// ---- observing plan --------------------------------------------------
+function renderPlan() {
+  // Export links carry the session cookie automatically (same-origin GET).
+  const base = "/v1/plan/export?instrument=" + encodeURIComponent(INSTRUMENT) +
+    "&date=" + encodeURIComponent(DATA.plan.date) + "&fmt=";
+  $("exp-cat").href = base + "catalog";
+  $("exp-csv").href = base + "csv";
+  $("exp-txt").href = base + "text";
+  $("planbody").innerHTML = DATA.plan.timeline.map((e, i) =>
+    `<tr><td class="num">${i + 1}</td><td class="num">${esc(e.utc)}</td><td>${esc(e.target)}</td>
+     <td><span class="dot" style="background:${RAW[e.program]}"></span>${esc(e.program)}</td><td>${chip(e.tier)}</td>
+     <td class="num">${esc(e.ra)}</td><td class="num">${esc(e.dec)}</td><td class="num">${e.mag == null ? "—" : esc(e.mag)}</td>
+     <td class="num">${e.exp_min == null ? "—" : Math.round(e.exp_min) + "m"}</td><td class="num">${e.airmass == null ? "—" : esc(e.airmass)}</td></tr>`
+  ).join("");
+}
+
+// ---- overflow bench --------------------------------------------------
+function renderOverflow() {
+  const overRows = DATA.targets.filter((t) => t.status === "overflow")
+    .sort((a, b) => order[a.tier] - order[b.tier]);
+  $("overbody").innerHTML = overRows.map((t, i) =>
+    `<tr><td class="num">${i + 1}</td><td class="num">—</td><td>${esc(t.name)}</td>
+     <td><span class="dot" style="background:${RAW[t.program]}"></span>${esc(t.program)}</td><td>${chip(t.tier)}</td>
+     <td class="num">${esc(t.ra)}</td><td class="num">${esc(t.dec)}</td><td class="num">${t.mag == null ? "—" : esc(t.mag)}</td>
+     <td class="num">~${esc(t.exp_est)}m</td><td class="num">—</td></tr>`
+  ).join("") || `<tr><td colspan="10" style="color:var(--faint)">nothing overflowed</td></tr>`;
+}
+
+// ---- by program ------------------------------------------------------
+function renderPrograms() {
+  const req = DATA.plan.requested_hours || {}, sch = DATA.plan.scheduled_hours || {};
+  const counts = {};
+  DATA.targets.forEach((t) => {
+    (counts[t.program] = counts[t.program] || { P0: 0, P1: 0, P2: 0, P3: 0 })[t.tier]++;
+  });
+  $("progs").innerHTML = PROGS.map((p) => {
+    const c = counts[p] || {};
+    const tc = TIERS.filter((t) => c[t]).map((t) => `${t}×${c[t]}`).join(" · ");
+    const mine = p === DATA.caller_program ? " mine" : "";
+    return `<div class="card${mine}" style="border-top-color:${RAW[p]}">
+      <h3><span class="dot" style="background:${RAW[p]}"></span>${esc(p)}</h3>
+      <div class="sci">${esc((DATA.programs[p] || {}).science || "")}</div>
+      <div class="nums"><span>scheduled ${(sch[p] || 0).toFixed(1)} h</span><span>requested ~${esc(req[p] || 0)} h</span></div>
+      <div class="split">${tc}</div></div>`;
+  }).join("");
+}
+
+// ---- the queue (by priority; caller rows are editable) --------------
+let queueFilter = "All";
+function renderQueue() {
+  const caller = DATA.caller_program;
+  const rows = [...DATA.targets].sort(
+    (a, b) => order[a.tier] - order[b.tier] || a.program.localeCompare(b.program)
+  );
+  const qbody = $("qbody");
+  let last = null;
+  qbody.innerHTML = rows.map((t) => {
+    const st = t.status === "scheduled"
+      ? `<span class="st st-sched"><span class="d" style="background:var(--ok)"></span>scheduled</span>`
+      : t.status === "overflow"
+        ? `<span class="st st-over"><span class="d" style="background:var(--faint)"></span>overflow</span>`
+        : `<span class="st st-over"><span class="d" style="background:var(--faint)"></span>${esc(t.status || "queued")}</span>`;
+    const brk = t.tier !== last ? " tierbreak" : ""; last = t.tier;
+    const mine = caller && t.program === caller;
+    const manage = mine ? editControls(t)
+      : `<span class="readonly-note">read-only</span>`;
+    return `<tr class="q${brk}${mine ? " mine" : ""}" data-prog="${esc(t.program)}">
+      <td>${chip(t.tier)}</td><td>${esc(t.name)}</td>
+      <td><span class="dot" style="background:${RAW[t.program]}"></span>${esc(t.program)}</td>
+      <td class="num">${t.mag == null ? "—" : esc(t.mag)}</td><td>${st}</td>
+      <td>${manage}</td></tr>`;
+  }).join("");
+
+  // wire filters
+  const fbar = $("filters");
+  fbar.innerHTML = ["All", ...PROGS].map((p) =>
+    `<button aria-pressed="${p === queueFilter}" data-f="${esc(p)}">${p === "All" ? "All (shared)" : esc(p)}</button>`
+  ).join("");
+  fbar.onclick = (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    queueFilter = b.dataset.f;
+    [...fbar.children].forEach((x) => x.setAttribute("aria-pressed", x === b));
+    applyFilter();
+  };
+  applyFilter();
+
+  // wire per-row edit controls (event delegation)
+  qbody.onchange = (e) => {
+    const sel = e.target.closest("select.pri-select");
+    if (!sel) return;
+    changePriority(sel.dataset.id, sel.value);
+  };
+  qbody.onclick = (e) => {
+    const btn = e.target.closest("button.withdraw");
+    if (!btn) return;
+    withdraw(btn.dataset.id, btn.dataset.name);
+  };
+}
+
+function editControls(t) {
+  const id = esc(idOf(t));
+  const opts = TIERS.map((p) => `<option value="${p}"${p === t.tier ? " selected" : ""}>${p}</option>`).join("");
+  const disabled = usingSample ? "disabled" : "";
+  return `<span class="rowedit">
+    <select class="pri-select" data-id="${id}" aria-label="priority for ${esc(t.name)}" ${disabled}>${opts}</select>
+    <button class="btn danger withdraw" data-id="${id}" data-name="${esc(t.name)}" ${disabled}>Withdraw</button>
+  </span>`;
+}
+
+function applyFilter() {
+  $("qbody").querySelectorAll("tr").forEach((tr) =>
+    tr.classList.toggle("hide", queueFilter !== "All" && tr.dataset.prog !== queueFilter)
+  );
+}
+
+function renderFoot() {
+  $("foot").innerHTML =
+    "Live MAGNETS shared queue for " + esc(DATA.plan.date) + " (" + esc(DATA.plan.instrument) + "). " +
+    "Groups edit their own targets through the API " +
+    "(<code>GET /v1/dashboard</code>, <code>POST/PATCH/DELETE /v1/targets</code>); the scheduler cross-hashes by " +
+    "priority and observability against each group's derived " + esc(DATA.plan.instrument) + " budget.";
+}
+
+// ---- wire the add form + go ------------------------------------------
+$("addform").addEventListener("submit", addTarget);
+boot();

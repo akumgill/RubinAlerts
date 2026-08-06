@@ -5,8 +5,13 @@ A web layer (api.app) is a thin adapter over this; tests drive it directly.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
+import sqlite3
+import threading
+from dataclasses import fields as _dc_fields
 from typing import Callable, Optional
 
 from .models import Target, TIERS, INSTRUMENTS
@@ -14,6 +19,14 @@ from .models import Target, TIERS, INSTRUMENTS
 logger = logging.getLogger(__name__)
 
 MATCH_ARCSEC = 2.0  # canonical-object dedup radius
+
+# Target dataclass fields that are floats and use NaN-as-missing; stored as
+# SQL NULL and restored to float('nan') on load.
+_FLOAT_FIELDS = frozenset({
+    "ra", "dec", "mag", "redshift", "exposure_minutes",
+    "canonical_ra", "canonical_dec",
+})
+_COLUMNS = [f.name for f in _dc_fields(Target)]
 
 
 class AuthError(Exception):
@@ -43,17 +56,96 @@ def estimate_exposure_minutes(mag: float, redshift: float = float("nan")) -> flo
 
 class TargetQueueService:
     def __init__(self, programs: dict, allocations_path: str,
-                 resolver: Optional[Callable[[str], Optional[dict]]] = None):
+                 resolver: Optional[Callable[[str], Optional[dict]]] = None,
+                 db_path: Optional[str] = None):
         """
         programs : {api_key: program_name}
         allocations_path : YAML consumed by the orchestrator for budgets
         resolver : name -> {ra, dec, mag?, redshift?, scheme?} or None
+        db_path : SQLite file path. If None, falls back to env ``DB_PATH``;
+                  if that is also unset, an in-memory database is used (the
+                  historical behavior — nothing is persisted). The deployment
+                  layer (api.app) passes ``DB_PATH`` (default ./data/queue.db).
         """
-        self._programs = dict(programs)
         self.allocations_path = allocations_path
         self._resolver = resolver
         self._targets: list[Target] = []
         self._next_id = 1
+        self._lock = threading.RLock()
+
+        # ---- open / init the backing store ----
+        if db_path is None:
+            db_path = os.environ.get("DB_PATH")
+        self._db_path = db_path or ":memory:"
+        if self._db_path != ":memory:":
+            parent = os.path.dirname(os.path.abspath(self._db_path))
+            os.makedirs(parent, exist_ok=True)
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+        # ---- program/keys config: constructor wins, else load from DB ----
+        programs = dict(programs or {})
+        if programs:
+            self._programs = programs
+            self._persist_config()
+        else:
+            self._programs = self._load_config()
+
+        # ---- load persisted targets ----
+        self._load_targets()
+
+    # ---- persistence ----
+    def _init_schema(self) -> None:
+        cols = ", ".join(
+            f"{c} INTEGER PRIMARY KEY" if c == "id" else f"{c}"
+            for c in _COLUMNS
+        )
+        with self._conn:
+            self._conn.execute(f"CREATE TABLE IF NOT EXISTS targets ({cols})")
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS config "
+                "(key TEXT PRIMARY KEY, value TEXT)")
+
+    def _persist_config(self) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO config(key, value) VALUES (?, ?)",
+                ("programs", json.dumps(self._programs)))
+
+    def _load_config(self) -> dict:
+        row = self._conn.execute(
+            "SELECT value FROM config WHERE key = 'programs'").fetchone()
+        return json.loads(row["value"]) if row else {}
+
+    @staticmethod
+    def _row_to_target(row: sqlite3.Row) -> Target:
+        kwargs = {}
+        for c in _COLUMNS:
+            v = row[c]
+            if v is None and c in _FLOAT_FIELDS:
+                v = float("nan")
+            kwargs[c] = v
+        return Target(**kwargs)
+
+    def _persist(self, t: Target) -> None:
+        vals = []
+        for c in _COLUMNS:
+            v = getattr(t, c)
+            if isinstance(v, float) and math.isnan(v):
+                v = None
+            vals.append(v)
+        placeholders = ", ".join("?" for _ in _COLUMNS)
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO targets ({', '.join(_COLUMNS)}) "
+                f"VALUES ({placeholders})", vals)
+
+    def _load_targets(self) -> None:
+        rows = self._conn.execute(
+            "SELECT * FROM targets ORDER BY id").fetchall()
+        self._targets = [self._row_to_target(r) for r in rows]
+        self._next_id = (max((t.id for t in self._targets), default=0) + 1)
 
     # ---- auth ----
     def program_for(self, api_key: str) -> str:
@@ -95,13 +187,18 @@ class TargetQueueService:
         array so one bad target doesn't fail the batch."""
         program = self.program_for(api_key)
         results = []
-        for raw in items:
-            try:
-                results.append(self._submit_one(program, raw))
-            except Exception as e:               # never let one item 500 the batch
-                results.append({"status": "error", "error": str(e),
-                                "submitted": raw})
+        with self._lock:
+            for raw in items:
+                try:
+                    results.append(self._submit_one(program, raw))
+                except Exception as e:           # never let one item 500 the batch
+                    results.append({"status": "error", "error": str(e),
+                                    "submitted": raw})
         return results
+
+    def has_targets(self) -> bool:
+        """True if any targets are stored (used to gate demo seeding)."""
+        return bool(self._targets)
 
     def _submit_one(self, program: str, raw: dict) -> dict:
         pri = str(raw.get("priority", "")).upper()
@@ -179,6 +276,7 @@ class TargetQueueService:
             self._targets.append(t)
             updated = False
 
+        self._persist(t)
         return {"status": "ok", "id": t.id, "updated": updated,
                 "canonical_ra": round(ra, 5), "canonical_dec": round(dec, 5),
                 "resolved_from": resolved_from,
@@ -207,11 +305,13 @@ class TargetQueueService:
                 setattr(t, k, float(changes[k]))
         if "valid_until" in changes:
             t.valid_until = changes["valid_until"]
+        self._persist(t)
         return t.to_dict()
 
     def withdraw(self, api_key: str, target_id: int) -> dict:
         t = self._owned(api_key, target_id)
         t.status = "withdrawn"
+        self._persist(t)
         return {"status": "ok", "id": target_id, "new_status": "withdrawn"}
 
     def queue_summary(self) -> dict:

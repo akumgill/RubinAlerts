@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MAGNETS shared queue</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <!-- Login view (hidden until 401) -->
+  <div class="wrap" id="loginview" hidden>
+    <div class="eyebrow">MAGNETS shared queue</div>
+    <div class="login">
+      <h2>Sign in to your program</h2>
+      <form id="loginform">
+        <label for="lg-prog">Program</label>
+        <select id="lg-prog" name="program" required></select>
+        <label for="lg-pass">Password</label>
+        <input type="password" id="lg-pass" name="password" autocomplete="current-password" required>
+        <button class="btn primary" type="submit">Sign in</button>
+        <div class="err" id="lg-err" role="alert"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Dashboard view -->
+  <div class="wrap" id="dashview" hidden>
+    <div class="topbar">
+      <div>
+        <div class="eyebrow">MAGNETS shared queue</div>
+        <h1 id="title">Queue &amp; observing plan<span class="proto">live</span></h1>
+        <div class="meta" id="meta"></div>
+      </div>
+      <div class="whoami">
+        <div id="whoami-line"></div>
+        <button class="btn" id="logout" style="margin-top:.4rem" hidden>Log out</button>
+      </div>
+    </div>
+
+    <div id="callerbanner"></div>
+    <div class="summary" id="summary"></div>
+
+    <h2>Right now <span class="hint">drag through the night: which targets are observable and how they rank &mdash; how the observer picks what&rsquo;s next</span></h2>
+    <div class="rn-wrap">
+      <div class="rn-controls"><label for="clock">Time of night</label>
+        <input type="range" id="clock" min="0" value="0" aria-label="time of night">
+        <span class="rn-now" id="clocklab"></span></div>
+      <div class="am-wrap"><div id="amplot"></div></div>
+      <div class="rn-head" id="rnhead"></div>
+      <div class="rn-panel" id="rnpanel"></div>
+    </div>
+
+    <h2 id="addhead" hidden>Add a target <span class="hint">pushed to your program&rsquo;s queue via the API</span></h2>
+    <form class="addform" id="addform" hidden>
+      <div class="row">
+        <div class="fld"><label for="t-name">Name</label><input class="w-name" id="t-name" placeholder="e.g. 2026abc"></div>
+        <div class="fld"><label for="t-ra">RA (deg)</label><input class="w-num" id="t-ra" inputmode="decimal" placeholder="—"></div>
+        <div class="fld"><label for="t-dec">Dec (deg)</label><input class="w-num" id="t-dec" inputmode="decimal" placeholder="—"></div>
+        <div class="fld"><label for="t-pri">Priority</label>
+          <select id="t-pri"><option>P0</option><option selected>P1</option><option>P2</option><option>P3</option></select></div>
+        <div class="fld"><label for="t-inst">Instrument</label>
+          <select id="t-inst"><option>LLAMAS</option><option selected>LDSS3</option><option>EITHER</option></select></div>
+        <div class="fld"><label for="t-exp">Exp (min)</label><input class="w-num" id="t-exp" inputmode="numeric" placeholder="auto"></div>
+        <div class="fld"><label for="t-mag">r mag</label><input class="w-num" id="t-mag" inputmode="decimal" placeholder="—"></div>
+        <div class="fld"><label>&nbsp;</label><button class="btn primary" type="submit" id="addbtn">Add target</button></div>
+      </div>
+      <div class="hint2">Provide a <b>name</b> or an <b>RA + Dec</b> pair. Submitted to <code>POST /v1/targets</code> for your program.</div>
+    </form>
+
+    <h2>Observing plan <span class="hint">in ideal conditions &mdash; the nominal sequence; what&rsquo;s actually observed is decided live (see &ldquo;Right now&rdquo;)</span>
+      <span class="exports" id="exports">
+        <a id="exp-cat" download>Catalog</a>
+        <a id="exp-csv" download>CSV</a>
+        <a id="exp-txt" download>Print sheet</a>
+      </span></h2>
+    <div class="tablewrap"><table>
+      <thead><tr><th>#</th><th>UTC</th><th>Target</th><th>Program</th><th>Tier</th><th>RA</th><th>Dec</th><th>r</th><th>Exp</th><th>X</th></tr></thead>
+      <tbody id="planbody"></tbody></table></div>
+
+    <h2>Overflow bench <span class="hint">submitted but not scheduled &mdash; the pool to swap in if time opens (unscheduled: no fixed UTC/airmass; Exp is the estimate)</span></h2>
+    <div class="tablewrap"><table>
+      <thead><tr><th>#</th><th>UTC</th><th>Target</th><th>Program</th><th>Tier</th><th>RA</th><th>Dec</th><th>r</th><th>Exp</th><th>X</th></tr></thead>
+      <tbody id="overbody"></tbody></table></div>
+
+    <h2>By program <span class="hint">each group&rsquo;s scheduled vs requested time on this night</span></h2>
+    <div class="progs" id="progs"></div>
+
+    <h2>The queue <span class="hint">the shared queue, by priority &mdash; pick a program to see just that group&rsquo;s targets. Your own rows are editable.</span></h2>
+    <div class="filters" id="filters"></div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Tier</th><th>Target</th><th>Program</th><th>r</th><th>Status</th><th>Manage</th></tr></thead>
+      <tbody id="qbody"></tbody></table></div>
+
+    <div class="foot" id="foot"></div>
+  </div>
+
+  <div class="loading" id="loading">Loading the shared queue&hellip;</div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

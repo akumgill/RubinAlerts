@@ -1,0 +1,11 @@
+# MAGNETS 2026B — LLAMAS budget universe.
+# Total hours per program (from the nights schedule). Budget is a single total
+# pool per program (LLAMASConfig.budget_phase_aware=False); the dark/grey/bright
+# split is informational — moon phase drives feasibility and w_moon, not budget.
+# LLAMAS and LDSS3 are parallel systems (a PI on both has separate budgets).
+semester: "2026B"
+default_program: "CfA-Stubbs"
+programs:
+  - {program: "CfA-Stubbs", pi: "Stubbs", ranking_profile: "ia", allocated_hours: {dark: 10, grey: 10, bright: 0}}   # 20 h (Dec 15, Jan 12) — the Ia program
+  - {program: "CfA-Villar", pi: "Dong", ranking_profile: "exotic", allocated_hours: {dark: 25, grey: 5, bright: 0}}   # 30 h (Aug 13, Aug 16, Sep 6/7 halves)
+  - {program: "UA", pi: "Ransome", ranking_profile: "exotic", allocated_hours: {dark: 5, grey: 5, bright: 5}}          # 15 h (Aug 4, Nov 2, Dec 8 halves)

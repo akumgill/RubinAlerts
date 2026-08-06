@@ -1,0 +1,22 @@
+# Pinned dependencies for the MAGNETS queue API + orchestrator SCHEDULING path
+# ONLY. Determined empirically: importing api.app and running plan_preview pulls
+# in astropy/pandas/numpy/pyyaml but NOT sncosmo/iminuit/scipy/matplotlib (the
+# one heavy import, core.magellan_planning's RANKING_PROFILES, is wrapped in
+# try/except in orchestrator.prioritizer and degrades gracefully when absent).
+#
+# Web layer
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+python-multipart==0.0.32
+itsdangerous==2.2.0
+# (starlette/pydantic are pulled by fastapi; pinned transitively)
+starlette==1.4.1
+pydantic==2.13.4
+#
+# Scheduling / astronomy
+astropy==7.2.0
+pyerfa==2.0.1.5
+pandas==3.0.1
+numpy==2.4.3
+pyyaml==6.0.3
+requests==2.32.5

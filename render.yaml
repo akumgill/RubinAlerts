@@ -1,0 +1,35 @@
+# Render blueprint for the MAGNETS queue API.
+# One Docker web service with a persistent disk for the SQLite database.
+services:
+  - type: web
+    name: magnets-queue-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /healthz    # unauthenticated liveness probe
+    disk:
+      name: queue-data
+      mountPath: /app/data      # DB_PATH=./data/queue.db lives here (persisted)
+      sizeGB: 1
+    envVars:
+      - key: DB_PATH
+        value: ./data/queue.db
+      - key: SEED_DEMO
+        value: "1"              # seed the Aug-7 demo on a fresh (empty) disk
+      - key: SESSION_SECRET
+        generateValue: true     # signed-cookie secret
+      # Group config: program -> {key, password}. Provide real credentials here
+      # in production. If GROUPS_JSON is unset the API falls back to the built-in
+      # demo groups (UA + CfA/Villar) so the seeded demo is immediately usable.
+      - key: GROUPS_JSON
+        sync: false             # set in the Render dashboard (secret)
+      # Demo-group credential overrides (used only when GROUPS_JSON is unset):
+      - key: UA_KEY
+        sync: false
+      - key: UA_PASSWORD
+        sync: false
+      - key: CFA_KEY
+        sync: false
+      - key: CFA_PASSWORD
+        sync: false
+      # PORT is injected by Render; the CMD honors ${PORT:-8000}.

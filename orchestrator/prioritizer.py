@@ -233,7 +233,8 @@ def compute_composite_score(target: Target,
     # defensively in case a future accountant returns out-of-range values.
     budget = 1.0
     if accountant is not None:
-        budget = accountant.get_budget_factor(target.program, moon_phase)
+        budget_phase = moon_phase if getattr(config, 'budget_phase_aware', False) else None
+        budget = accountant.get_budget_factor(target.program, budget_phase)
     budget = _clamp01(budget)
 
     # Observability fraction, clamped to [0, 1].
@@ -358,7 +359,9 @@ def rank_targets(targets: list,
         logger.debug("Rank %2d: %-18s score=%.1f P%d budget=%.1f phase=%.2f "
                      "(%s) complete=%.2f",
                      i + 1, t.name, t.merit_score, t.priority,
-                     accountant.get_budget_factor(t.program, moon_phase)
+                     accountant.get_budget_factor(
+                         t.program,
+                         moon_phase if getattr(config, 'budget_phase_aware', False) else None)
                      if accountant else 1.0,
                      bd.get('phase', _phase_factor(t, pref, config)),
                      pref, bd.get('completeness', 1.0))

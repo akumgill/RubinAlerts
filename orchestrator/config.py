@@ -35,6 +35,11 @@ class LLAMASConfig:
     # conditioned, so it never wastes sky). 0 disables the band; the
     # prospective nudge still applies. Within the band, merit rules.
     fairness_tolerance: float = 0.15
+    # Budget is a single total pool per program (per instrument), NOT split by
+    # moon phase — the collaboration allocates nights, not per-phase quotas. Moon
+    # phase still drives feasibility and w_moon; it just isn't a budget dimension.
+    # Set True to restore the phase-bucketed budget factor.
+    budget_phase_aware: bool = False
     max_airmass: float = 1.6
     gap_fill_max_minutes: float = 5.0
 

@@ -358,12 +358,15 @@ function renderNights() {
 function renderSummary() {
   const p = DATA.plan;
   const overflowCount = (p.overflow && p.overflow.length) || 0;
+  // Groups actually populating tonight's queue — distinct programs among the
+  // targets for this night/instrument, not the count of all configured groups.
+  const activeProgs = new Set((DATA.targets || []).map((t) => t.program)).size;
   $("summary").innerHTML = [
     [DATA.targets.length, "targets in the queue"],
     [p.n_scheduled, "fit tonight"],
     [overflowCount, "in overflow"],
     [p.scheduled_science_hours + " h", "science planned"],
-    [PROGS.length, "groups sharing the night"],
+    [activeProgs, activeProgs === 1 ? "group sharing the night" : "groups sharing the night"],
   ].map(([v, l]) => `<div class="stat"><span class="v">${esc(v)}</span><span class="l">${esc(l)}</span></div>`).join("");
 }
 

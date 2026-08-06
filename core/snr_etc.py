@@ -22,19 +22,23 @@ Break the net exposure into 300-600 s sub-exposures for cosmic-ray rejection
 SN Ia *peak* calc (no explicit host-galaxy background term, so faint SNe on
 bright hosts run optimistic), and r>21 is extrapolated beyond the calibration.
 
-The digitized points are eyeballed off the published PNG; good to ~10-20%.
-Replace ``_R``/``_T`` with a precise pixel-digitization before this is science
-load-bearing for a real night.
+The digitized points are a pixel-extraction of the published PNG (see the _R/_T
+note below), good to a few percent within the fit range; the r>21 extrapolated
+segment inherits the curve author's extrapolation and is flagged on return.
 """
 import bisect
 import math
 
-# (SN Ia peak apparent r, minutes to reach SNR=5 PER PIXEL) off the curve.
-# r < 21 is the LLAMAS fit range (solid); r >= 21 is extrapolated (dashed).
+# (SN Ia peak apparent r, minutes to reach SNR=5 PER PIXEL) — PIXEL-DIGITIZED
+# from docs/design/figures/llamas_snia_exptime_vs_z.png (blue curve extracted;
+# y calibrated on the 10-min/60-min dotted reference lines, x->r via the top
+# axis ticks). Cross-checks that held: curve crosses 10 min at r=21.4 and 60 min
+# at r=23.2, box bottom reads t=0.0096 (=10^-2). r < 21 is the LLAMAS fit range
+# (solid); r >= 21 is extrapolated (dashed).
 _R = [17.4, 18.0, 18.5, 19.0, 19.5, 20.0, 20.5, 21.0,
-      21.5, 22.0, 22.5, 23.0, 23.4, 24.0, 24.8]
-_T = [0.016, 0.05, 0.12, 0.30, 0.60, 1.20, 2.50, 5.00,
-      8.00, 15.0, 25.0, 55.0, 80.0, 180.0, 380.0]
+      21.5, 22.0, 22.5, 23.0, 23.5, 24.0, 24.5, 24.8]
+_T = [0.061, 0.302, 0.478, 0.751, 1.374, 2.315, 3.521, 6.311,
+      11.787, 17.998, 28.753, 51.325, 88.291, 146.969, 244.645, 420.846]
 _LOGT = [math.log10(t) for t in _T]
 
 FIT_RANGE_MAX_R = 21.0          # solid/dashed boundary on the curve

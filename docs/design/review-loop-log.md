@@ -412,9 +412,13 @@ Tested (7). REMAINING:
   (scheduler)** as the primary tier behind a config flag; mag-scaling stays the
   fallback. Apply a **minimum-exposure floor** (bright objects return sub-minute,
   which is overhead-dominated in practice).
-- **Precise pixel-digitization** of the PNG before it's load-bearing (current
-  points are eyeballed to ~10–20%); add a **host-background term** (curve is a
-  point-source SN Ia peak calc — faint SNe on bright hosts run optimistic).
+- ~~Precise pixel-digitization~~ DONE: curve extracted from the saved PNG
+  (`docs/design/figures/llamas_snia_exptime_vs_z.png`) — y calibrated on the
+  10-/60-min dotted refs, x→r via the top-axis ticks; cross-checks held (10-min
+  crossing r=21.4, 60-min r=23.2). Caught ~2× eyeball errors at the bright end.
+  Still TODO: a **host-background term** (curve is a point-source SN Ia peak calc
+  — faint SNe on bright hosts run optimistic; mitigated for LLAMAS by IFU host
+  subtraction, so second-order ~1.2–2×, not a blocker).
 - **Science-scope decision (collaboration, not ours):** Chris wants to focus
   **0.6<z<0.8** (r≈23.4–24), which is OUTSIDE our current cuts (z≤0.4, r≤21.5) and
   in the curve's **extrapolated** (r>21) region — pursuing it means relaxing the

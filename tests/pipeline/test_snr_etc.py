@@ -7,12 +7,11 @@ from core import snr_etc
 
 
 def test_binning_shortens_by_n_bin():
-    # SNR=5 target, no binning, at a curve knot (r=23.4 -> 80 min per pixel).
-    t_raw, _ = snr_etc.snr_exposure_minutes(23.4, target_snr=5, n_bin=1)
-    assert t_raw == pytest.approx(80.0, rel=0.02)
-    # n_bin=10 -> 10x shorter (Chris: bin ~10 px, gain sqrt(10) in SNR).
-    t_bin, _ = snr_etc.snr_exposure_minutes(23.4, target_snr=5, n_bin=10)
-    assert t_bin == pytest.approx(8.0, rel=0.02)
+    # n_bin=10 -> exactly 10x shorter (Chris: bin ~10 px, gain sqrt(10) in SNR).
+    # Table-agnostic: assert the ratio, not an absolute time.
+    t_raw, _ = snr_etc.snr_exposure_minutes(23.5, target_snr=5, n_bin=1)
+    t_bin, _ = snr_etc.snr_exposure_minutes(23.5, target_snr=5, n_bin=10)
+    assert t_raw / t_bin == pytest.approx(10.0, rel=1e-6)
 
 
 def test_target_snr_scales_as_square():
@@ -30,13 +29,15 @@ def test_extrapolated_flag_beyond_fit_range():
 
 
 def test_log_linear_interpolation_between_knots():
-    # midpoint in mag between two knots should sit between their times, and
-    # closer (in log) to the geometric mean than the arithmetic mean.
-    t_lo, _ = snr_etc.snr_exposure_minutes(22.0, n_bin=1)   # 15 min knot
-    t_hi, _ = snr_etc.snr_exposure_minutes(22.5, n_bin=1)   # 25 min knot
-    t_mid, _ = snr_etc.snr_exposure_minutes(22.25, n_bin=1)
+    # Log-linear interp: the mag-midpoint between two consecutive knots must be
+    # the GEOMETRIC mean of their times. Read the knots straight from the table
+    # so the test is independent of the digitized values.
+    r_lo, r_hi = snr_etc._R[9], snr_etc._R[10]
+    t_lo, _ = snr_etc.snr_exposure_minutes(r_lo, n_bin=1)
+    t_hi, _ = snr_etc.snr_exposure_minutes(r_hi, n_bin=1)
+    t_mid, _ = snr_etc.snr_exposure_minutes((r_lo + r_hi) / 2, n_bin=1)
     assert t_lo < t_mid < t_hi
-    assert t_mid == pytest.approx(math.sqrt(15.0 * 25.0), rel=0.02)
+    assert t_mid == pytest.approx(math.sqrt(t_lo * t_hi), rel=1e-6)
 
 
 def test_faint_z08_is_feasible_with_binning():

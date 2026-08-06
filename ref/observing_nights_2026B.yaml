@@ -9,26 +9,34 @@ nights:
     observer: Conor Ransome
     program: CfA-Villar
     length: full
+    status: cancelled
+    note: storm — LCO suspended (restart Aug 11)
   - date: 2026-08-07
     instrument: LDSS3
     observer: Conor Ransome
     program: CfA-Villar
     length: full
+    status: cancelled
+    note: storm — LCO suspended (restart Aug 11)
   - date: 2026-08-10
     instrument: LLAMAS
     observer: Yize Dong
     program: CfA-Villar
     length: full
+    status: cancelled
+    note: storm — LCO suspended (restart Aug 11)
   - date: 2026-08-13
     instrument: LLAMAS
-    observer: Yize Dong
+    observer: Yuri Beletsky
     program: CfA-Villar
     length: full
+    note: first night post-storm; LCO local-only (Yuri Beletsky observing for Yize)
   - date: 2026-08-16
     instrument: LLAMAS
-    observer: Yize Dong
+    observer: Yuri Beletsky
     program: CfA-Villar
     length: full
+    note: LCO local-only (Yuri Beletsky observing for Yize)
   - date: 2026-09-06
     instrument: LLAMAS
     observer: Yize Dong

@@ -13,9 +13,9 @@
 // On total fetch failure (no backend during local dev) -> ./sample.json
 // ===================================================================
 
-// Currently-selected observing night. Defaults to the seeded Aug-7 LDSS3 demo;
-// clicking a night in the schedule bar re-points this and re-fetches.
-let NIGHT = { date: "2026-08-07", instrument: "LDSS3" };
+// Currently-selected observing night. Defaults to the first post-storm night
+// (Aug-13 LLAMAS); clicking a night in the schedule bar re-points and re-fetches.
+let NIGHT = { date: "2026-08-13", instrument: "LLAMAS" };
 const dashUrl = () =>
   "/v1/dashboard?date=" + encodeURIComponent(NIGHT.date) +
   "&instrument=" + encodeURIComponent(NIGHT.instrument);
@@ -340,6 +340,13 @@ function prettyDate(iso) {
 }
 
 function selectNight(date, instrument) {
+  // Storm-cancelled nights are not selectable.
+  const n = ((DATA && DATA.nights) || []).find(
+    (x) => x.date === date && x.instrument === instrument);
+  if (n && n.status === "cancelled") {
+    toast(`${prettyDate(date)} ${instrument} — cancelled (${n.note || "no observations"})`, "err");
+    return;
+  }
   if (NIGHT.date === date && NIGHT.instrument === instrument) return;
   NIGHT = { date, instrument };
   if (usingSample) { renderNights(); return; }  // no backend to re-fetch
@@ -354,13 +361,18 @@ function renderNights() {
   const cur = (DATA.selected_night) || NIGHT;
   box.innerHTML = nights.map((n) => {
     const on = n.date === cur.date && n.instrument === cur.instrument;
+    const cancelled = n.status === "cancelled";
     const half = (n.length === "half") ? `<span class="nl">½</span>` : "";
-    return `<button type="button" class="night${on ? " on" : ""}"
-        onclick="selectNight('${esc(n.date)}','${esc(n.instrument)}')"
-        title="${esc(n.observer || "")}${n.program ? " · " + esc(n.program) : ""}">
+    const cls = "night" + (on ? " on" : "") + (cancelled ? " cancelled" : "");
+    const title = esc((cancelled ? (n.note || "cancelled") : (n.observer || ""))
+                      + (n.program ? " · " + n.program : ""));
+    const mark = cancelled ? `<span class="nx" aria-label="cancelled">✕</span>` : "";
+    return `<button type="button" class="${cls}"${cancelled ? " disabled" : ""}
+        onclick="selectNight('${esc(n.date)}','${esc(n.instrument)}')" title="${title}">
+      ${mark}
       <span class="nd">${esc(prettyDate(n.date))}</span>
       <span class="ni ni-${esc((n.instrument || "").toLowerCase())}">${esc(n.instrument)}</span>${half}
-      <span class="no">${esc(n.observer || "")}</span>
+      <span class="no">${esc(cancelled ? "cancelled" : (n.observer || ""))}</span>
     </button>`;
   }).join("");
 }

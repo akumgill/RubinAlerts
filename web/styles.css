@@ -57,6 +57,12 @@ h2 .hint{font-weight:400;font-size:.8rem;color:var(--faint);margin-left:.4rem;}
 .night .ni-ldss3{background:#6a4a86;}
 .night .nl{font-size:.66rem;color:var(--faint);margin-left:.25rem;}
 .night .no{font-size:.7rem;color:var(--slate);}
+.night.cancelled{position:relative;opacity:.45;cursor:not-allowed;
+  background:repeating-linear-gradient(-45deg,transparent,transparent 5px,var(--hair2) 5px,var(--hair2) 6px);}
+.night.cancelled .nd{text-decoration:line-through;}
+.night.cancelled .no{color:var(--err);}
+.night.cancelled:hover{border-color:var(--hair);}
+.night .nx{position:absolute;top:.15rem;right:.3rem;color:var(--err);font-weight:700;font-size:.85rem;line-height:1;}
 .exports{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;
   margin:.1rem 0 .6rem;font-size:.75rem;}
 .exports .exports-label{color:var(--faint);margin-right:.15rem;}

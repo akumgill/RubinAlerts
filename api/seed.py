@@ -17,35 +17,47 @@ import os
 logger = logging.getLogger(__name__)
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_SEED_CSV = os.path.join(_REPO, "ref", "seed_villar_ldss3.csv")
-_ALLOCATIONS = os.path.join(_REPO, "ref", "allocations_LDSS3_2026B.yaml")
+# Seed sources, in queue-CSV schema (program column drives which program owns
+# each target): the Villar LDSS3 standing list + the live-ZTF Ia candidates for
+# the first post-storm night (Aug-13 LLAMAS, CfA-Stubbs).
+_SEED_CSVS = [
+    os.path.join(_REPO, "ref", "seed_villar_ldss3.csv"),
+    os.path.join(_REPO, "ref", "stubbs_llamas_2026-08-13.csv"),
+]
+# The demo default night is Aug-13 LLAMAS, so use the LLAMAS allocations (they
+# define CfA-Stubbs, CfA-Villar and UA budgets).
+_ALLOCATIONS = os.path.join(_REPO, "ref", "allocations_LLAMAS_2026B.yaml")
 
 
 def load_seed_submissions() -> dict:
-    """program -> list of submission dicts, parsed from the Villar seed CSV."""
+    """program -> list of submission dicts, parsed from every seed CSV."""
     subs: dict = {}
-    with open(_SEED_CSV, newline="") as f:
-        for row in csv.DictReader(f):
-            item = {
-                "name": row["name"].strip(),
-                "ra": float(row["ra"]), "dec": float(row["dec"]),
-                "priority": row["priority"].strip(),
-                "instrument": row.get("instrument", "LDSS3").strip() or "LDSS3",
-                "notes": (row.get("notes") or "").strip(),
-            }
-            if row.get("mag") not in (None, ""):
-                item["mag"] = float(row["mag"])
-            if row.get("band"):
-                item["band"] = row["band"].strip()
-            if row.get("exposure_minutes") not in (None, ""):
-                item["exposure_minutes"] = float(row["exposure_minutes"])
-            subs.setdefault(row["program"].strip(), []).append(item)
+    for path in _SEED_CSVS:
+        if not os.path.exists(path):
+            logger.warning("seed CSV missing, skipping: %s", path)
+            continue
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                item = {
+                    "name": row["name"].strip(),
+                    "ra": float(row["ra"]), "dec": float(row["dec"]),
+                    "priority": row["priority"].strip(),
+                    "instrument": row.get("instrument", "LLAMAS").strip() or "LLAMAS",
+                    "notes": (row.get("notes") or "").strip(),
+                }
+                if row.get("mag") not in (None, ""):
+                    item["mag"] = float(row["mag"])
+                if row.get("band"):
+                    item["band"] = row["band"].strip()
+                if row.get("exposure_minutes") not in (None, ""):
+                    item["exposure_minutes"] = float(row["exposure_minutes"])
+                subs.setdefault(row["program"].strip(), []).append(item)
     return subs
 
 
 def ensure_demo_allocations(data_dir: str) -> str:
-    """Path to the real LDSS3 allocations (the seeded night is LDSS3). ``data_dir``
-    is accepted for signature compatibility but unused — we ship the file."""
+    """Path to the shipped LLAMAS allocations (the seeded default night is
+    LLAMAS). ``data_dir`` is accepted for signature compatibility but unused."""
     return _ALLOCATIONS
 
 
@@ -56,6 +68,8 @@ def demo_group_config() -> dict:
     return {
         "CfA-Villar": {"key": os.environ.get("CFA_KEY", "demo-cfa"),
                        "password": os.environ.get("CFA_PASSWORD", "cfa-demo")},
+        "CfA-Stubbs": {"key": os.environ.get("STUBBS_KEY", "demo-stubbs"),
+                       "password": os.environ.get("STUBBS_PASSWORD", "stubbs-demo")},
         "UA": {"key": os.environ.get("UA_KEY", "demo-ua"),
                "password": os.environ.get("UA_PASSWORD", "ua-demo")},
     }

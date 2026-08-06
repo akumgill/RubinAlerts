@@ -188,11 +188,11 @@ def plan_preview(request: Request, date: str, instrument: str = "LLAMAS",
 
 
 @app.get("/v1/dashboard")
-def dashboard(request: Request, instrument: str = "LDSS3",
-              date: str = "2026-08-07", authorization: str = Header(None)):
+def dashboard(request: Request, instrument: str = "LLAMAS",
+              date: str = "2026-08-13", authorization: str = Header(None)):
     """The full aggregate the web dashboard renders: plan + queue + per-target
-    airmass tracks + grid + program metadata. Defaults to the Aug-7 demo night
-    on LDSS3 (the seeded instrument)."""
+    airmass tracks + grid + program metadata. Defaults to the first post-storm
+    night (Aug-13 LLAMAS), which carries the live-ZTF Ia candidates."""
     _, program = _identity(request, authorization)
     from .scheduler_bridge import dashboard_data
     return _guard(lambda: dashboard_data(svc, date, instrument,
@@ -200,8 +200,8 @@ def dashboard(request: Request, instrument: str = "LDSS3",
 
 
 @app.get("/v1/plan/export")
-def export_plan(request: Request, instrument: str = "LDSS3",
-                date: str = "2026-08-07", fmt: str = "catalog",
+def export_plan(request: Request, instrument: str = "LLAMAS",
+                date: str = "2026-08-13", fmt: str = "catalog",
                 authorization: str = Header(None)):
     """Export the plan the way an observer uses it: fmt=catalog (the instrument
     catalog the GUI loads), csv (an observing sheet), or text (a printable

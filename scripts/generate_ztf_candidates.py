@@ -52,6 +52,10 @@ def main():
                     help="for typing-driven programs: rank objects with no TNS "
                          "classification spectrum ahead of already-typed ones "
                          "(default off = decision-support only, Ia-score order)")
+    ap.add_argument("--priority", default=None,
+                    help="force ALL rows to this tier (e.g. P5) instead of the "
+                         "Ia-score mapping — use for low/opportunistic fills "
+                         "(e.g. nearby SNe during a survey gap)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -83,8 +87,9 @@ def main():
             note = (f"ZTF/Fink live; class={r.get('fink_class', '')}; "
                     f"Ia_score={ia:.2f}; sn_score={float(r.get('sn_score', 0) or 0):.2f}; "
                     f"{tns_note}; last det MJD {float(r['mjd']):.1f}")
+            tier = args.priority or priority_for(ia)
             w.writerow([args.program, r["objectId"], round(float(r["ra"]), 5),
-                        round(float(r["dec"]), 5), priority_for(ia),
+                        round(float(r["dec"]), 5), tier,
                         round(float(r["magnitude"]), 2), r.get("band", ""),
                         "", args.instrument, note])
     print(f"\nwrote {len(df)} candidates -> {args.out}")

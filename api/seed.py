@@ -17,12 +17,14 @@ import os
 logger = logging.getLogger(__name__)
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# Seed sources, in queue-CSV schema (program column drives which program owns
-# each target): the Villar LDSS3 standing list + the live-ZTF Ia candidates for
-# the first post-storm night (Aug-13 LLAMAS, CfA-Stubbs).
+# Seed source, in queue-CSV schema. Initial queue = empty + the Villar list only
+# (their real semester-26B standing targets); other groups (CfA-Stubbs, UA)
+# populate via the API/UI. The earlier Stubbs Aug-13 ZTF fills are NOT seeded —
+# they were a demo/opportunistic set, and the collaboration launch starts from
+# real submissions only. (ref/stubbs_llamas_2026-08-13.csv is kept for manual
+# review / re-seeding if wanted.)
 _SEED_CSVS = [
     os.path.join(_REPO, "ref", "seed_villar_ldss3.csv"),
-    os.path.join(_REPO, "ref", "stubbs_llamas_2026-08-13.csv"),
 ]
 # The demo default night is Aug-13 LLAMAS, so use the LLAMAS allocations (they
 # define CfA-Stubbs, CfA-Villar and UA budgets).

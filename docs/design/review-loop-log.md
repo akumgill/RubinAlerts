@@ -488,3 +488,56 @@ REMAINING:
   in the curve's **extrapolated** (r>21) region — pursuing it means relaxing the
   selection cuts and accepting extrapolated exposures (flagged via the
   `extrapolated` return).
+
+### SHIP BURNDOWN (2026-08-07) — tracking list, prioritized, with decisions
+Two gates: (A) put in front of collaborators for a sandbox/validation round;
+(B) rely on it for real observing.
+
+TIER 0 — before collaborators touch it:
+1. [Akum: WILL DO] Persistent disk on Render (1 GB, DB_PATH=/var/data/queue.db)
+   — else submissions vanish on redeploy.
+2. Credentials. DECISION: the GROUPS_JSON env-var approach IS sufficient at this
+   scale (one key+password per program). Work is operational — strong keys
+   (generated), keep secret in Render env, distribute per group — NOT code.
+   Optional hardening: fail-closed if GROUPS_JSON is unset in prod so it can't
+   silently fall back to the public demo keys. Known limits: group-level (not
+   per-person) logins; key rotation = edit env + redeploy.
+3. [DONE] Initial queue = empty + Villar only. Seed drops the Stubbs Aug-13 ZTF
+   fills; seeds just the Villar LDSS3 standing list; other groups populate via
+   API/UI. (Villar instrument still unconfirmed — see @Villar below.)
+4. [DONE] Getting-started for collaborators: a 30-sec quickstart at the top of
+   the API guide + a prominent "New here? Start with the guide" callout on the
+   login page.
+
+TIER 1 — before real observing:
+5. Observed-tracking: MANUAL for now (decision) — revisit once we see the
+   observer's per-night output, then build a reconciliation ledger.
+6. Charging rule DECIDED (Akum, needs group ratification): charge a group for the
+   OBSERVED time (exposure + overhead) of ITS OWN enqueued targets, regardless of
+   whose night it is (if C group's targets fill my night, C is charged). Matches
+   the existing accounting (budget factor keyed by the target's program); feeds
+   the allocation "used" bars once reconciliation (#5) exists.
+7. [Villar: WILL DO] Confirm the list's instrument (LDSS3 vs LLAMAS) + get Yize's
+   LLAMAS list.
+8. [Chris: WILL DO] Exposure answers (target S/N, min exposure, switch overhead).
+   NOT a launch blocker — sensible defaults now.
+
+TIER 2 — quality/tuning, post-launch:
+9. Wire the ETC into the queue-preview estimator (api.service.estimate_exposure_
+   minutes) — the ONLY remaining wiring (the authoritative orchestrator path is
+   done; the pipeline's magellan_planning estimator is retired). Low effort.
+10. LDSS3 S/N curve — PARKED: no LDSS3 calibration data (can't build now) AND it
+    doesn't matter for the current programs (Stubbs/the Ia+ETC program is
+    LLAMAS-only; the LDSS3 users do narrow-line characterization the Ia-binning
+    ETC doesn't model). LDSS3 keeps the old cascade. Host-background term also
+    deferred (second-order; LLAMAS IFU subtracts host locally).
+11. Cold-load latency (~3.5 s first hit, then cached). Low-hanging fruit w/o a DB:
+    (a) vectorize the airmass AltAz transform (one array call vs per-target loop);
+    (b) background cache-warm the default night at startup.
+12. Observer polish: finder charts (annotated sky cutouts per target to confirm
+    pointing) + LDSS3 native "click" catalog (LDSS3-GUI-specific target-list
+    format; we ship a generic catalog export today). Partly blocked on the exact
+    LDSS3 GUI format.
+
+VALIDATION GATE: run the sandbox "fake night" round with a group before real
+reliance. Critical path to a first invite: #1 -> #2 -> #3 -> #4 -> sandbox.

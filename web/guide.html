@@ -42,6 +42,15 @@
       parallel systems). Everyone can <b>see</b> the whole queue; you can only <b>edit</b>
       your own program&rsquo;s targets.</p>
 
+    <h2>Getting started (30 seconds)</h2>
+    <ol>
+      <li><b>Log in</b> — open <a href="./">the dashboard</a> and sign in with your <b>program + password</b> (from the queue admin). Scripts/pipelines use a <b>bearer API key</b> instead (see Authentication).</li>
+      <li><b>See the shared queue</b> — everyone's targets, split by instrument (LLAMAS / LDSS3) and ranked by priority. You can edit only your own program's rows.</li>
+      <li><b>Add a target</b> — the add-form (or <code>POST /v1/targets</code>): a <b>name</b> or <b>RA+Dec</b>, a <b>priority</b> (1 = highest … 5 = lowest; P0 = must-observe), instrument, and an anticipated <b>mag</b>.</li>
+      <li><b>Read tonight's plan</b> — the observing plan shows what fits, each target's observable window, and downloadable exports (catalog / CSV / print sheet).</li>
+    </ol>
+    <p>That's it. The rest of this page is the full reference.</p>
+
     <h2>Base URL</h2>
     <pre><code>https://magnets-collab.onrender.com</code></pre>
 

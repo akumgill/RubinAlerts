@@ -99,7 +99,7 @@ def cmd_plan(args):
     for t in targets:
         if not math.isfinite(t.exposure_minutes):
             exp_min, moon_c = estimate_llamas_exposure(
-                t.redshift, t.mag, args.moon
+                t.redshift, t.mag, args.moon, delta_t=t.delta_t
             )
             t.exposure_minutes = exp_min
             if t.moon_constraint == 'any':

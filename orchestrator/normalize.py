@@ -111,9 +111,34 @@ def parse_magnitude(mag_str: str) -> tuple:
     return mag, filt
 
 
+def predicted_mag_at_observation(peak_mag: float, delta_t: float,
+                                 config: LLAMASConfig = None) -> float:
+    """Apparent mag at the observation epoch, from the light-curve peak.
+
+    A SN observed at phase ``delta_t`` (signed days from peak, at the observation
+    night) is fainter than its peak: rising (delta_t<0) and declining (delta_t>0)
+    both add magnitudes. Uses coarse optical fade rates from ``config`` (not a
+    template) — adequate for exposure sizing. Returns ``peak_mag`` unchanged when
+    either input is non-finite (e.g. the manual path, where mag is already the
+    anticipated-at-observation value and delta_t is NaN)."""
+    if config is None:
+        config = LLAMAS_CONFIG
+    if not (math.isfinite(peak_mag) and math.isfinite(delta_t)):
+        return peak_mag
+    rate = (getattr(config, 'mag_rise_per_day', 0.0) if delta_t < 0
+            else getattr(config, 'mag_decline_per_day', 0.0))
+    fade = min(abs(delta_t) * rate, getattr(config, 'mag_fade_cap', 3.0))
+    return peak_mag + fade
+
+
 def estimate_llamas_exposure(redshift: float, mag: float, moon: str = 'grey',
-                             config: LLAMASConfig = None) -> tuple:
+                             config: LLAMASConfig = None,
+                             delta_t: float = float('nan')) -> tuple:
     """Estimate LLAMAS exposure time from target properties.
+
+    ``mag`` is the light-curve peak; with a finite ``delta_t`` (phase at the
+    observation night) it is faded to the mag AT OBSERVATION before sizing, so a
+    target scheduled off peak isn't under-exposed. delta_t NaN -> mag used as-is.
 
     Strategy:
     1. If redshift is finite, interpolate proposal Table 1 (z -> minutes).
@@ -140,6 +165,9 @@ def estimate_llamas_exposure(redshift: float, mag: float, moon: str = 'grey',
     """
     if config is None:
         config = LLAMAS_CONFIG
+
+    # Fade the peak mag to the observation epoch (no-op when delta_t is NaN).
+    mag = predicted_mag_at_observation(mag, delta_t, config)
 
     # Strategy 0 (primary, if enabled): S/N-based ETC from Chris's LLAMAS SN Ia
     # curve — magnitude-driven, so it does not need a redshift and cleanly sizes

@@ -226,7 +226,7 @@ def run_nightly(date: str,
             moon_c = t.moon_constraint
         else:
             required_full, moon_c = estimate_llamas_exposure(
-                t.redshift, t.mag, moon_phase,
+                t.redshift, t.mag, moon_phase, delta_t=t.delta_t,
             )
             if t.moon_constraint == 'any':
                 t.moon_constraint = moon_c

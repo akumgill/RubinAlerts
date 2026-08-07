@@ -87,6 +87,17 @@ class LLAMASConfig:
     snr_moon_factor: dict = field(default_factory=lambda: {
         'dark': 1.0, 'grey': 1.4, 'bright': 2.0})
 
+    # Size exposures at the mag AT OBSERVATION, not at the light-curve peak. A SN
+    # observed off peak is fainter than peak_mag (both rising and declining), so
+    # sizing at peak under-exposes it — and the pipeline schedules out to ~+/-25 d.
+    # From the phase delta_t (signed days from peak, at the observation night) we
+    # add an approximate optical fade. These are coarse rates (NOT a template) —
+    # exposure sizing only needs ~few-tenths-mag accuracy. Set both rates to 0 to
+    # size at peak_mag (the old behavior).
+    mag_rise_per_day: float = 0.10       # pre-peak (delta_t < 0), r/g optical
+    mag_decline_per_day: float = 0.05    # post-peak (delta_t > 0)
+    mag_fade_cap: float = 3.0            # cap on magnitudes of fade applied
+
     # ------------------------------------------------------------------
     # Redshift preference w_z (composite-score source differentiator). Peaks
     # (=1.0) inside z_preference_range, Gaussian taper (z_preference_sigma)

@@ -2026,4 +2026,158 @@
  "caller_program": "CfA-Stubbs",
  "nights": [
   {
-   "date": 
+   "date": "2026-08-04",
+   "instrument": "LLAMAS",
+   "observer": "Conor Ransome",
+   "program": "CfA-Villar",
+   "length": "full",
+   "status": "cancelled",
+   "note": "storm \u2014 LCO suspended (restart Aug 11)"
+  },
+  {
+   "date": "2026-08-07",
+   "instrument": "LDSS3",
+   "observer": "Conor Ransome",
+   "program": "CfA-Villar",
+   "length": "full",
+   "status": "cancelled",
+   "note": "storm \u2014 LCO suspended (restart Aug 11)"
+  },
+  {
+   "date": "2026-08-10",
+   "instrument": "LLAMAS",
+   "observer": "Yize Dong",
+   "program": "CfA-Villar",
+   "length": "full",
+   "status": "cancelled",
+   "note": "storm \u2014 LCO suspended (restart Aug 11)"
+  },
+  {
+   "date": "2026-08-13",
+   "instrument": "LLAMAS",
+   "observer": "Yuri Beletsky",
+   "program": "CfA-Villar",
+   "length": "full",
+   "note": "first night post-storm; LCO local-only (Yuri Beletsky observing for Yize)"
+  },
+  {
+   "date": "2026-08-16",
+   "instrument": "LLAMAS",
+   "observer": "Yuri Beletsky",
+   "program": "CfA-Villar",
+   "length": "full",
+   "note": "LCO local-only (Yuri Beletsky observing for Yize)"
+  },
+  {
+   "date": "2026-09-06",
+   "instrument": "LLAMAS",
+   "observer": "Yize Dong",
+   "program": "CfA-Villar",
+   "length": "half"
+  },
+  {
+   "date": "2026-09-07",
+   "instrument": "LLAMAS",
+   "observer": "Yize Dong",
+   "program": "CfA-Villar",
+   "length": "half"
+  },
+  {
+   "date": "2026-09-12",
+   "instrument": "LDSS3",
+   "observer": "Conor Ransome",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-10-03",
+   "instrument": "LLAMAS",
+   "observer": "Yize Dong",
+   "program": "CfA-Villar",
+   "length": "half"
+  },
+  {
+   "date": "2026-10-05",
+   "instrument": "LDSS3",
+   "observer": "Conor Ransome",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-11-02",
+   "instrument": "LLAMAS",
+   "observer": "Conor Ransome",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-12-08",
+   "instrument": "LLAMAS",
+   "observer": "Conor Ransome",
+   "program": "CfA-Villar",
+   "length": "full"
+  },
+  {
+   "date": "2026-12-15",
+   "instrument": "LLAMAS",
+   "observer": "Chris Stubbs",
+   "program": "CfA-Stubbs",
+   "length": "full"
+  },
+  {
+   "date": "2027-01-12",
+   "instrument": "LLAMAS",
+   "observer": "Chris Stubbs",
+   "program": "CfA-Stubbs",
+   "length": "full"
+  }
+ ],
+ "selected_night": {
+  "date": "2026-08-13",
+  "instrument": "LLAMAS"
+ },
+ "allocations": {
+  "instruments": [
+   "LLAMAS",
+   "LDSS3"
+  ],
+  "programs": {
+   "CfA-Stubbs": {
+    "LLAMAS": {
+     "initial": 20.0,
+     "used": 0.0,
+     "remaining": 20.0,
+     "pi": "Stubbs"
+    }
+   },
+   "CfA-Villar": {
+    "LLAMAS": {
+     "initial": 30.0,
+     "used": 0.0,
+     "remaining": 30.0,
+     "pi": "Dong"
+    },
+    "LDSS3": {
+     "initial": 15.0,
+     "used": 0.0,
+     "remaining": 15.0,
+     "pi": "Dong"
+    }
+   },
+   "UA": {
+    "LLAMAS": {
+     "initial": 15.0,
+     "used": 0.0,
+     "remaining": 15.0,
+     "pi": "Ransome"
+    },
+    "LDSS3": {
+     "initial": 30.0,
+     "used": 0.0,
+     "remaining": 30.0,
+     "pi": "Ransome"
+    }
+   }
+  }
+ }
+}

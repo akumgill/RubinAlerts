@@ -18,8 +18,9 @@
     .doc pre{background:var(--panel);border:1px solid var(--hair);border-radius:6px;
       padding:.8rem .9rem;overflow-x:auto;font-family:var(--mono);font-size:.8rem;line-height:1.5;}
     .doc pre code{background:none;border:none;padding:0;}
-    .doc table{width:100%;border-collapse:collapse;margin:.5rem 0;font-size:.84rem;}
-    .doc th,.doc td{text-align:left;padding:.35rem .5rem;border-bottom:1px solid var(--hair);vertical-align:top;}
+    .doc table{width:100%;max-width:100%;table-layout:fixed;border-collapse:collapse;margin:.5rem 0;font-size:.84rem;}
+    .doc th,.doc td{text-align:left;padding:.35rem .5rem;border-bottom:1px solid var(--hair);vertical-align:top;overflow-wrap:anywhere;}
+    .doc td:first-child{width:26%;}   /* keep the label/endpoint column from starving the description */
     .doc th{color:var(--slate);font-weight:600;}
     .doc .m{font-family:var(--mono);font-size:.8rem;white-space:nowrap;}
     .doc .req{color:var(--err);font-size:.7rem;}

@@ -68,6 +68,25 @@ if os.environ.get("SEED_DEMO") == "1" and not svc.has_targets():
     except Exception as e:
         logger.exception("demo seed failed: %s", e)
 
+DEFAULT_NIGHT = (os.environ.get("DEFAULT_DATE", "2026-08-13"),
+                 os.environ.get("DEFAULT_INSTRUMENT", "LLAMAS"))
+
+# Warm the default-night dashboard cache in a background thread, so the first
+# request after a (re)start hits a warm cache instead of paying the full
+# scheduler + airmass compute. Daemon + non-fatal. Off in tests (WARM_CACHE=0).
+if os.environ.get("WARM_CACHE", "1") == "1":
+    import threading
+
+    def _warm_cache():
+        try:
+            from .scheduler_bridge import dashboard_data
+            dashboard_data(svc, DEFAULT_NIGHT[0], DEFAULT_NIGHT[1])
+            logger.info("dashboard cache warmed for %s %s", *DEFAULT_NIGHT)
+        except Exception as e:
+            logger.warning("dashboard cache warm failed: %s", e)
+
+    threading.Thread(target=_warm_cache, daemon=True, name="cache-warm").start()
+
 app = FastAPI(title="MAGNETS Target-Submission API", version="0.3")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
                    same_site="lax", https_only=False)

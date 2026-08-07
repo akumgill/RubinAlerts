@@ -345,12 +345,24 @@ def airmass_grid(service, plan: dict, date: str, instrument: str,
     sched = {e["target"] for e in plan.get("timeline", [])}
     over = {o["target"] for o in plan.get("overflow", [])}
 
+    if not active:
+        return labels, []
+
+    # Vectorized airmass: transform ALL targets over the whole grid in ONE
+    # AltAz call (coords shape (N,1) broadcast against the (M,) time grid ->
+    # (N,M)) instead of a per-target transform. astropy's frame setup dominates,
+    # so one call is far faster than N.
+    ras = np.array([t.canonical_ra for t in active], dtype=float)
+    decs = np.array([t.canonical_dec for t in active], dtype=float)
+    aa = SkyCoord(ras[:, None] * u.deg,
+                  decs[:, None] * u.deg).transform_to(frame)
+    alt = np.atleast_2d(aa.alt.deg)
+    secz = np.atleast_2d(aa.secz.value)
+
     targets = []
-    for t in active:
-        aa = SkyCoord(t.canonical_ra * u.deg,
-                      t.canonical_dec * u.deg).transform_to(frame)
+    for i, t in enumerate(active):
         am = [round(float(s), 2) if (a > 0 and 0 < s <= 3.0) else None
-              for a, s in zip(aa.alt.deg, aa.secz.value)]
+              for a, s in zip(alt[i], secz[i])]
         targets.append(_target_row(t, am, plan, sched, over,
                                    estimate_exposure_minutes,
                                    labels=labels, airmass_limit=airmass_limit))

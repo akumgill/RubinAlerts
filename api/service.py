@@ -46,11 +46,23 @@ def _sep_arcsec(ra1, dec1, ra2, dec2) -> float:
 
 
 def estimate_exposure_minutes(mag: float, redshift: float = float("nan")) -> float:
-    """Rough exposure estimate for the queue summary (mag 20 -> 45 min,
-    2.5x per mag). The real, redshift-aware sizing happens in the scheduler;
-    this is only for the "requested hours" tally before a plan is run."""
+    """Queue-preview exposure estimate for the "requested hours" tally.
+
+    Matches the scheduler's primary tier: the S/N ETC (Chris's LLAMAS SN Ia
+    curve, binned S/N target, floored), so the preview and the actual plan agree.
+    No moon factor here — the preview is night-agnostic; the scheduler applies
+    moon. Falls back to the legacy magnitude scaling (mag 20 -> 45 min, 2.5x/mag)
+    if the ETC can't produce a number."""
     if not (mag is not None and math.isfinite(mag)):
         return 45.0
+    try:
+        from core.snr_etc import (snr_exposure_minutes, MIN_EXPOSURE_MINUTES,
+                                  MAX_EXPOSURE_MIN)
+        t, _ = snr_exposure_minutes(mag)     # defaults: binned S/N=10, n_bin=10
+        if math.isfinite(t):
+            return float(min(MAX_EXPOSURE_MIN, max(MIN_EXPOSURE_MINUTES, t)))
+    except Exception:
+        pass
     return float(min(240.0, 45.0 * 2.5 ** (mag - 20.0)))
 
 

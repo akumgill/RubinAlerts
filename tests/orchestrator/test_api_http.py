@@ -22,6 +22,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setenv("SEED_DEMO", "0")
     monkeypatch.setenv("SESSION_SECRET", "test-secret")
     monkeypatch.setenv("MAGNETS_ALLOCATIONS", "ref/allocations_LLAMAS_2026B.yaml")
+    monkeypatch.setenv("WARM_CACHE", "0")   # no background warm thread in tests
     import api.app as app_mod
     importlib.reload(app_mod)          # rebuild svc/GROUPS from the test env
     from starlette.testclient import TestClient

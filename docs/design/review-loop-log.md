@@ -531,9 +531,17 @@ TIER 2 — quality/tuning, post-launch:
     LLAMAS-only; the LDSS3 users do narrow-line characterization the Ia-binning
     ETC doesn't model). LDSS3 keeps the old cascade. Host-background term also
     deferred (second-order; LLAMAS IFU subtracts host locally).
-11. Cold-load latency (~3.5 s first hit, then cached). Low-hanging fruit w/o a DB:
-    (a) vectorize the airmass AltAz transform (one array call vs per-target loop);
-    (b) background cache-warm the default night at startup.
+11. Cold-load latency. DONE: revision-keyed dashboard cache + (a) vectorized
+    airmass transform + (b) background cache-warm the default night at startup —
+    so reads are warm except the first hit of a never-viewed night or the first
+    read right after a write. PARKED (the "true" fix, add if post-submit lag
+    annoys people in the validation round): EAGER RECOMPUTE-ON-WRITE — the write
+    endpoints kick a background recompute of the HOT cache keys (viewed nights +
+    default) so readers stay warm even right after a submit. Read-heavy /
+    write-light tool, so moving the cost to write-time is the right trade. It
+    HIDES but doesn't REDUCE the cost; the underlying ~10 s is the greedy
+    scheduler (run_nightly, ~O(N^2) per-slot pick) — a real algorithm change,
+    only worth it if reads must be cheap with no background work.
 12. Observer polish: finder charts (annotated sky cutouts per target to confirm
     pointing) + LDSS3 native "click" catalog (LDSS3-GUI-specific target-list
     format; we ship a generic catalog export today). Partly blocked on the exact

@@ -74,6 +74,12 @@ h2 .hint{font-weight:400;font-size:.8rem;color:var(--faint);margin-left:.4rem;}
 .nominal{display:block;font-size:.68rem;color:var(--faint);font-family:var(--mono);}
 .wflag{font-size:.72rem;white-space:nowrap;}
 .am{color:var(--faint);font-size:.72rem;}
+/* queue split by instrument */
+.qgroup{margin-top:1rem;}
+.qgroup-h{display:flex;align-items:center;gap:.5rem;font-size:.9rem;font-weight:700;margin:0 0 .35rem;}
+.qgroup-h .ai{font-family:var(--mono);font-size:.66rem;color:#fff;padding:.05rem .35rem;border-radius:3px;}
+.qgroup-h .ai-llamas{background:#2f7d6b;} .qgroup-h .ai-ldss3{background:#6a4a86;} .qgroup-h .ai-either{background:#7a8590;}
+.qgroup-h .qcount{font-weight:400;font-size:.75rem;color:var(--faint);}
 .guidelink{color:var(--slate);text-decoration:none;border-bottom:1px dotted var(--slate);}
 .guidelink:hover{color:var(--ink);border-bottom-color:var(--ink);}
 .rn-wrap{border:1px solid var(--hair);border-radius:6px;background:var(--panel);padding:1rem 1.1rem;}

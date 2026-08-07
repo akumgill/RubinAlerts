@@ -95,11 +95,9 @@
     <h2>Time allocations <span class="hint">each group&rsquo;s 2026B budget across both instruments &mdash; used vs remaining (used updates after post-night reconciliation)</span></h2>
     <div class="allocs" id="allocs"></div>
 
-    <h2>The queue <span class="hint">the shared queue, by priority &mdash; pick a program to see just that group&rsquo;s targets. Your own rows are editable.</span></h2>
+    <h2>The queue <span class="hint">the shared queue, by priority, split by instrument (LLAMAS and LDSS3 are parallel systems) &mdash; pick a program to filter. Your own rows are editable.</span></h2>
     <div class="filters" id="filters"></div>
-    <div class="tablewrap"><table>
-      <thead><tr><th>Tier</th><th>Target</th><th>Program</th><th>r</th><th>Status</th><th>Manage</th></tr></thead>
-      <tbody id="qbody"></tbody></table></div>
+    <div id="qgroups"></div>
 
     <div class="foot" id="foot"></div>
   </div>

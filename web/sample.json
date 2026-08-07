@@ -1943,6 +1943,278 @@
    "window_flag": "early"
   }
  ],
+ "queue_targets": [
+  {
+   "id": 1,
+   "name": "2017hcc",
+   "program": "CfA-Villar",
+   "tier": "P1",
+   "instrument": "LDSS3",
+   "mag": 22.0,
+   "status": "queued"
+  },
+  {
+   "id": 2,
+   "name": "ZTF24abkllyo",
+   "program": "CfA-Villar",
+   "tier": "P1",
+   "instrument": "LDSS3",
+   "mag": 20.0,
+   "status": "queued"
+  },
+  {
+   "id": 3,
+   "name": "ZTF26abjqico",
+   "program": "CfA-Villar",
+   "tier": "P2",
+   "instrument": "LDSS3",
+   "mag": 19.0,
+   "status": "queued"
+  },
+  {
+   "id": 4,
+   "name": "2026cqe",
+   "program": "CfA-Villar",
+   "tier": "P3",
+   "instrument": "LDSS3",
+   "mag": 20.5,
+   "status": "queued"
+  },
+  {
+   "id": 5,
+   "name": "2023acmb",
+   "program": "CfA-Villar",
+   "tier": "P2",
+   "instrument": "LDSS3",
+   "mag": 21.0,
+   "status": "queued"
+  },
+  {
+   "id": 6,
+   "name": "2026lnt",
+   "program": "CfA-Villar",
+   "tier": "P1",
+   "instrument": "LDSS3",
+   "mag": 18.5,
+   "status": "queued"
+  },
+  {
+   "id": 7,
+   "name": "2024afyu",
+   "program": "CfA-Villar",
+   "tier": "P2",
+   "instrument": "LDSS3",
+   "mag": 21.0,
+   "status": "queued"
+  },
+  {
+   "id": 8,
+   "name": "2026kyv",
+   "program": "CfA-Villar",
+   "tier": "P2",
+   "instrument": "LDSS3",
+   "mag": 20.0,
+   "status": "queued"
+  },
+  {
+   "id": 9,
+   "name": "ZTF26abiavoi",
+   "program": "CfA-Villar",
+   "tier": "P3",
+   "instrument": "LDSS3",
+   "mag": 20.0,
+   "status": "queued"
+  },
+  {
+   "id": 10,
+   "name": "2020jfv",
+   "program": "CfA-Villar",
+   "tier": "P1",
+   "instrument": "LDSS3",
+   "mag": 21.0,
+   "status": "queued"
+  },
+  {
+   "id": 11,
+   "name": "ZTF26abetmwf",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 18.9,
+   "status": "scheduled"
+  },
+  {
+   "id": 12,
+   "name": "ZTF26abegyhx",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 19.0,
+   "status": "scheduled"
+  },
+  {
+   "id": 13,
+   "name": "ZTF26abfdgjm",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 19.2,
+   "status": "overflow"
+  },
+  {
+   "id": 14,
+   "name": "ZTF26abfezve",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 19.5,
+   "status": "scheduled"
+  },
+  {
+   "id": 15,
+   "name": "ZTF26abfwmqc",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 19.5,
+   "status": "scheduled"
+  },
+  {
+   "id": 16,
+   "name": "ZTF26abhmgla",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 18.8,
+   "status": "scheduled"
+  },
+  {
+   "id": 17,
+   "name": "ZTF26abfymgo",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 20.1,
+   "status": "scheduled"
+  },
+  {
+   "id": 18,
+   "name": "ZTF26abfqiok",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 18.9,
+   "status": "scheduled"
+  },
+  {
+   "id": 19,
+   "name": "ZTF26abgxhag",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 19.5,
+   "status": "scheduled"
+  },
+  {
+   "id": 20,
+   "name": "ZTF26abjyfjg",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 16.5,
+   "status": "scheduled"
+  },
+  {
+   "id": 21,
+   "name": "ZTF26abearye",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 19.0,
+   "status": "queued"
+  },
+  {
+   "id": 22,
+   "name": "ZTF26ablevyf",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 19.2,
+   "status": "scheduled"
+  },
+  {
+   "id": 23,
+   "name": "ZTF26abkcmvx",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 17.8,
+   "status": "overflow"
+  },
+  {
+   "id": 24,
+   "name": "ZTF26abecjxu",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 18.8,
+   "status": "scheduled"
+  },
+  {
+   "id": 25,
+   "name": "ZTF26ablenru",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 17.7,
+   "status": "scheduled"
+  },
+  {
+   "id": 26,
+   "name": "ZTF26abhlaue",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 18.9,
+   "status": "scheduled"
+  },
+  {
+   "id": 27,
+   "name": "ZTF26abjhsrj",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 19.0,
+   "status": "scheduled"
+  },
+  {
+   "id": 28,
+   "name": "ZTF26abjtexk",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 17.2,
+   "status": "scheduled"
+  },
+  {
+   "id": 29,
+   "name": "ZTF26abldxtk",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 18.7,
+   "status": "overflow"
+  },
+  {
+   "id": 30,
+   "name": "ZTF26abhxokr",
+   "program": "CfA-Stubbs",
+   "tier": "P5",
+   "instrument": "LLAMAS",
+   "mag": 19.0,
+   "status": "scheduled"
+  }
+ ],
  "grid": [
   "23:38",
   "23:48",
@@ -2023,7 +2295,6 @@
    "science": "UA"
   }
  },
- "caller_program": "CfA-Stubbs",
  "nights": [
   {
    "date": "2026-08-04",
@@ -2179,5 +2450,6 @@
     }
    }
   }
- }
+ },
+ "caller_program": "CfA-Stubbs"
 }

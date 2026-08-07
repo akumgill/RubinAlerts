@@ -606,31 +606,43 @@ function renderAllocations() {
 
 // ---- the queue (by priority; caller rows are editable) --------------
 let queueFilter = "All";
+function queueRow(t, caller, brk) {
+  const st = t.status === "scheduled"
+    ? `<span class="st st-sched"><span class="d" style="background:var(--ok)"></span>scheduled</span>`
+    : t.status === "overflow"
+      ? `<span class="st st-over"><span class="d" style="background:var(--faint)"></span>overflow</span>`
+      : `<span class="st st-over"><span class="d" style="background:var(--faint)"></span>${esc(t.status || "queued")}</span>`;
+  const mine = caller && t.program === caller;
+  const manage = mine ? editControls(t) : `<span class="readonly-note">read-only</span>`;
+  return `<tr class="q${brk ? " tierbreak" : ""}${mine ? " mine" : ""}" data-prog="${esc(t.program)}">
+    <td>${chip(t.tier)}</td><td>${esc(t.name)}</td>
+    <td><span class="dot" style="background:${RAW[t.program] || "var(--slate)"}"></span>${esc(t.program)}</td>
+    <td class="num">${t.mag == null ? "—" : esc(t.mag)}</td><td>${st}</td>
+    <td>${manage}</td></tr>`;
+}
+
 function renderQueue() {
   const caller = DATA.caller_program;
-  const rows = [...DATA.targets].sort(
-    (a, b) => order[a.tier] - order[b.tier] || a.program.localeCompare(b.program)
-  );
-  const qbody = $("qbody");
-  let last = null;
-  qbody.innerHTML = rows.map((t) => {
-    const st = t.status === "scheduled"
-      ? `<span class="st st-sched"><span class="d" style="background:var(--ok)"></span>scheduled</span>`
-      : t.status === "overflow"
-        ? `<span class="st st-over"><span class="d" style="background:var(--faint)"></span>overflow</span>`
-        : `<span class="st st-over"><span class="d" style="background:var(--faint)"></span>${esc(t.status || "queued")}</span>`;
-    const brk = t.tier !== last ? " tierbreak" : ""; last = t.tier;
-    const mine = caller && t.program === caller;
-    const manage = mine ? editControls(t)
-      : `<span class="readonly-note">read-only</span>`;
-    return `<tr class="q${brk}${mine ? " mine" : ""}" data-prog="${esc(t.program)}">
-      <td>${chip(t.tier)}</td><td>${esc(t.name)}</td>
-      <td><span class="dot" style="background:${RAW[t.program]}"></span>${esc(t.program)}</td>
-      <td class="num">${t.mag == null ? "—" : esc(t.mag)}</td><td>${st}</td>
-      <td>${manage}</td></tr>`;
-  }).join("");
+  const all = DATA.queue_targets || DATA.targets || [];
+  // Split by instrument — LLAMAS and LDSS3 are parallel systems.
+  const insts = ["LLAMAS", "LDSS3", "EITHER"].filter((i) => all.some((t) => t.instrument === i));
+  $("qgroups").innerHTML = insts.map((inst) => {
+    const rows = all.filter((t) => t.instrument === inst)
+      .sort((a, b) => order[a.tier] - order[b.tier] || a.program.localeCompare(b.program));
+    let last = null;
+    const body = rows.map((t) => {
+      const brk = t.tier !== last; last = t.tier;
+      return queueRow(t, caller, brk);
+    }).join("") || `<tr><td colspan="6" style="color:var(--faint)">no targets on this instrument</td></tr>`;
+    return `<div class="qgroup">
+      <h3 class="qgroup-h"><span class="ai ai-${esc(inst.toLowerCase())}">${esc(inst)}</span>
+        <span class="qcount">${rows.length} target${rows.length === 1 ? "" : "s"}</span></h3>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Tier</th><th>Target</th><th>Program</th><th>r</th><th>Status</th><th>Manage</th></tr></thead>
+        <tbody>${body}</tbody></table></div></div>`;
+  }).join("") || `<div style="color:var(--faint)">queue is empty</div>`;
 
-  // wire filters
+  // filters (by program)
   const fbar = $("filters");
   fbar.innerHTML = ["All", ...PROGS].map((p) =>
     `<button aria-pressed="${p === queueFilter}" data-f="${esc(p)}">${p === "All" ? "All (shared)" : esc(p)}</button>`
@@ -644,16 +656,15 @@ function renderQueue() {
   };
   applyFilter();
 
-  // wire per-row edit controls (event delegation)
-  qbody.onchange = (e) => {
+  // per-row edit controls (event delegation on the groups container)
+  const groups = $("qgroups");
+  groups.onchange = (e) => {
     const sel = e.target.closest("select.pri-select");
-    if (!sel) return;
-    changePriority(sel.dataset.id, sel.value);
+    if (sel) changePriority(sel.dataset.id, sel.value);
   };
-  qbody.onclick = (e) => {
+  groups.onclick = (e) => {
     const btn = e.target.closest("button.withdraw");
-    if (!btn) return;
-    withdraw(btn.dataset.id, btn.dataset.name);
+    if (btn) withdraw(btn.dataset.id, btn.dataset.name);
   };
 }
 
@@ -668,7 +679,7 @@ function editControls(t) {
 }
 
 function applyFilter() {
-  $("qbody").querySelectorAll("tr").forEach((tr) =>
+  $("qgroups").querySelectorAll("tr[data-prog]").forEach((tr) =>
     tr.classList.toggle("hide", queueFilter !== "All" && tr.dataset.prog !== queueFilter)
   );
 }

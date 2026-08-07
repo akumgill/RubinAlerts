@@ -438,10 +438,26 @@ def _compute_dashboard(service, date, instrument, airmass_limit) -> dict:
         programs[prog] = seed_meta.get(
             prog, {"kind": "manual", "science": prog})
 
+    # Full shared queue across BOTH instruments (the queue section splits on
+    # instrument since LLAMAS/LDSS3 are parallel systems). `targets` above is
+    # only the selected night's instrument (it carries airmass tracks); this is
+    # the lightweight all-instrument list. Status is tonight's plan outcome for
+    # the selected instrument; other-instrument rows are "queued".
+    sched = {e["target"] for e in plan.get("timeline", [])}
+    over = {o["target"] for o in plan.get("overflow", [])}
+    queue_targets = [{
+        "id": t.id, "name": t.name, "program": t.program,
+        "tier": t.priority, "instrument": t.instrument,
+        "mag": None if not math.isfinite(t.mag) else round(t.mag, 1),
+        "status": ("scheduled" if t.name in sched
+                   else "overflow" if t.name in over else "queued"),
+    } for t in service.active()]
+
     return {
         "plan": plan,
         "queue": queue,
         "targets": targets,
+        "queue_targets": queue_targets,
         "grid": grid,
         "airmass_limit": airmass_limit,
         "programs": programs,

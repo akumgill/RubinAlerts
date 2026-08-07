@@ -77,7 +77,8 @@ def load_nights() -> list:
 # API priority tier -> (orchestrator integer priority, mandatory?). P0 is the
 # "observe tonight" guarantee: top ordinary priority PLUS the mandatory
 # reservation the orchestrator already implements. P1>P2>P3 are ordinary.
-_TIER_MAP = {"P0": (1, True), "P1": (1, False), "P2": (2, False), "P3": (3, False)}
+_TIER_MAP = {"P0": (1, True), "P1": (1, False), "P2": (2, False),
+             "P3": (3, False), "P4": (4, False), "P5": (5, False)}
 
 
 def _moon_phase_for(date: str) -> str:

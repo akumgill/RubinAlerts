@@ -74,7 +74,7 @@
       <tr><th>field</th><th>type</th><th>notes</th></tr>
       <tr><td class="m">name</td><td>string</td><td>Target name / resolvable identifier. Optional if you send <code>ra</code>+<code>dec</code>.</td></tr>
       <tr><td class="m">ra, dec</td><td>float (deg)</td><td>J2000 degrees. Provide these <b>or</b> a resolvable <code>name</code>.</td></tr>
-      <tr><td class="m">priority <span class="req">req</span></td><td>enum</td><td><code>P0</code> | <code>P1</code> | <code>P2</code> | <code>P3</code> &mdash; see tiers below.</td></tr>
+      <tr><td class="m">priority <span class="req">req</span></td><td>enum</td><td><code>P0</code> | <code>P1</code> … <code>P5</code> &mdash; see tiers below.</td></tr>
       <tr><td class="m">instrument</td><td>enum</td><td><code>LLAMAS</code> | <code>LDSS3</code> | <code>EITHER</code>. Default <code>LLAMAS</code>.</td></tr>
       <tr><td class="m">mag</td><td>float</td><td>Anticipated r-band mag. <b>Required</b> for a coords-only new source (used to size the exposure).</td></tr>
       <tr><td class="m">redshift</td><td>float</td><td>Optional; improves the exposure estimate.</td></tr>
@@ -90,7 +90,7 @@
     <table>
       <tr><th>tier</th><th>meaning</th></tr>
       <tr><td class="m">P0</td><td><b>Observe-tonight guarantee.</b> A mandatory reservation &mdash; use sparingly (ToO / must-not-miss).</td></tr>
-      <tr><td class="m">P1&nbsp;&gt;&nbsp;P2&nbsp;&gt;&nbsp;P3</td><td>Ordinary priority <em>within your program</em>. This is your delegated authority: your P1 outranks your P2; we never re-sort your internal order. Cross-program fairness is handled by budget availability, not by re-ranking your list.</td></tr>
+      <tr><td class="m">P1&nbsp;…&nbsp;P5</td><td>Ordinary priority <em>within your program</em>, on the shared 1&ndash;5 scale (<b>P1 highest, P5 lowest</b>; P4&ndash;P5 are low/opportunistic &mdash; e.g. fillers for otherwise-idle sky). This is your delegated authority: your P1 outranks your P2, and we never re-sort your internal order. Cross-program fairness is handled by budget availability, not by re-ranking your list.</td></tr>
     </table>
 
     <h2>Instruments</h2>

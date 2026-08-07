@@ -18,7 +18,7 @@ from .config import LLAMASConfig, LLAMAS_CONFIG
 logger = logging.getLogger(__name__)
 
 # Priority → base science weight
-SCIENCE_WEIGHTS = {1: 1.0, 2: 0.7, 3: 0.4, 4: 0.2}
+SCIENCE_WEIGHTS = {1: 1.0, 2: 0.7, 3: 0.4, 4: 0.2, 5: 0.1}
 
 # ---------------------------------------------------------------------------
 # Composite-score scaling constants

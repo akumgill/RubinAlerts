@@ -20,9 +20,10 @@ const dashUrl = () =>
   "/v1/dashboard?date=" + encodeURIComponent(NIGHT.date) +
   "&instrument=" + encodeURIComponent(NIGHT.instrument);
 
-const TIERS = ["P0", "P1", "P2", "P3"];
-const order = { P0: 0, P1: 1, P2: 2, P3: 3 };
-const TIERCOL = { P0: "#b3542e", P1: "#3a4650", P2: "#7a8590", P3: "#c2c8ce" };
+const TIERS = ["P0", "P1", "P2", "P3", "P4", "P5"];
+const order = { P0: 0, P1: 1, P2: 2, P3: 3, P4: 4, P5: 5 };
+const TIERCOL = { P0: "#b3542e", P1: "#3a4650", P2: "#5c6570", P3: "#7a8590",
+                 P4: "#9aa1a9", P5: "#c2c8ce" };
 const RAWPAL = ["#6a4a86", "#2f7d6b", "#b3802e", "#3d6ea5", "#a5533d"];
 
 let DATA = null;      // current dashboard payload
@@ -32,7 +33,7 @@ let usingSample = false;
 
 const $ = (id) => document.getElementById(id);
 const chip = (t) =>
-  `<span class="chip" style="background:${TIERCOL[t] || "#7a8590"};color:${t === "P3" ? "#2a2f34" : "#fff"}">${t}</span>`;
+  `<span class="chip" style="background:${TIERCOL[t] || "#7a8590"};color:${["P3", "P4", "P5"].includes(t) ? "#2a2f34" : "#fff"}">${t}</span>`;
 const esc = (s) =>
   String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));

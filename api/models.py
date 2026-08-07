@@ -10,9 +10,12 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 # Per-program priority tiers. P0 = "observe tonight, for sure" (target-of-
-# opportunity): reserves a slot and bypasses the budget throttle. P1 > P2 > P3
-# are ordinary tiers. Lower index = higher priority.
-TIERS = ("P0", "P1", "P2", "P3")
+# opportunity / mandatory): reserves a slot and bypasses the budget throttle.
+# P1..P5 are ordinary tiers on the collaboration's shared 1-5 scale (matches the
+# Villar group's submissions): P1 highest, P5 lowest. Lower index = higher
+# priority. P4/P5 are the low/opportunistic rungs (e.g. nearby fillers during a
+# survey gap that should only run on otherwise-idle sky).
+TIERS = ("P0", "P1", "P2", "P3", "P4", "P5")
 
 # Statuses a submission moves through.
 STATUSES = ("queued", "scheduled", "observed", "withdrawn")

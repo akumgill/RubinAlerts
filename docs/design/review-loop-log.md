@@ -455,9 +455,14 @@ Wired values (grey): mag<21 → 5 min floor; r=23.4 → ~44 min; r=24 → ~82 mi
      allocations "used" bar, currently 0).
 
    @VILLAR (concrete data gap):
-   - Yize's LLAMAS target list. We have his LDSS3 list, but his near-term nights
-     (Aug 13/16) are LLAMAS and we don't have his LLAMAS picks — his LLAMAS night
-     currently shows only Stubbs opportunistic fillers. Need the list or a feed.
+   - SANITY-CHECK the instrument of the list we have. We tagged it LDSS3 from the
+     source-document TITLE (the "VTDA" list), NOT from Yize per-target. Evidence
+     leans LDSS3 (30/60-min block exposures = slit/characterization; narrow-line
+     II/IIn targets), but it's UNCONFIRMED and Yize has time on BOTH (15 h LDSS3
+     + 30 h LLAMAS). Confirm: is this list LDSS3?
+   - Yize's LLAMAS target list. His near-term nights (Aug 13/16) are LLAMAS and
+     we have no LLAMAS picks from him — his LLAMAS night currently shows only
+     Stubbs opportunistic fillers. Need the list or a feed. (Same conversation.)
 
    OPERATIONAL (Akum, not meeting topics):
    - Confirm the derived per-program allocations; swap demo logins for real

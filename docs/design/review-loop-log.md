@@ -711,9 +711,14 @@ DONE (348 tests pass). Exposure ownership (DECISION 1) shipped as required
 exposure on submit (require_exposure default True) + n_exposures/exposure_seconds
 fields; Villar's real sub-exposure cadence (3x1200s / 2x900s, from the VTDA
 source sheet) restored into the seed and carried to the observing sheets.
-STILL OPEN for Chris / next: the program-definition questions below, P2
-(mag-at-observation), A3 (requested-vs-scheduled reconciliation), A6 (persistent
-accounting = real budget), P7 (absolute merit floor).
+P2 (mag-at-observation exposure sizing) DONE (git da3901a): estimate_llamas_
+exposure fades peak_mag to the observation epoch via delta_t; LLAMASConfig
+mag_rise/decline_per_day + cap. Also decided (2026-08-07): NO type-vs-redshift
+intent field and NO n_bin-by-mode for now — the program is single-mode (one peak
+SN spectrum at typing S/N yields TYPE + REDSHIFT together), so it collapses.
+STILL OPEN for Chris / next: the program-definition questions below, A3
+(requested-vs-scheduled reconciliation), A6 (persistent accounting = real
+budget), P7 (absolute merit floor).
 
 
 ================================================================================

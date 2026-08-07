@@ -419,21 +419,51 @@ instead of churning overhead-dominated ~5-min visits. On Aug-13 this moved the
 plan from 36 sched / 4.1 h to 31 sched / 6.1 h in a 10.3 h dark window.
 Wired values (grey): mag<21 → 5 min floor; r=23.4 → ~44 min; r=24 → ~82 min.
 
->> OPEN QUESTION FOR CHRIS (raise next discussion): what BINNED S/N does he want
-   for typing? His message gives the curve's PER-PIXEL S/N (5) and the ~10x
-   binning gain, but NOT the target binned S/N. We defaulted to 10 (t = 0.4x the
-   curve). 5 is marginal; 15 ≈ curve-as-is; higher = cosmology/spectral-
-   standardization grade.
-   (2) MINIMUM time per target on LLAMAS? We set the floor to 10 min (~2x the
-   modelled ~5-min switch overhead). Yize uses a 30-min minimum on LDSS3, but
-   that's a different instrument (slit overhead + characterization S/N), so we
-   shouldn't just copy it — is 10 min right for LLAMAS, or does Chris want a
-   larger minimum?
-   (3) Confirm the true LLAMAS acquisition/switch overhead (it sets both the
-   floor and the schedule's per-target ops time).
-   Cross-check: Villar's LDSS3 30-min block at mag 20 matches our curve stripped
-   of binning + at S/N~20 (~37 min) — calibration is consistent; the ~15x gap is
-   binning (Ia broad-feature only, NOT their narrow-line II) + S/N target.
+>> OPEN QUESTIONS — MEETING PREP (as of 2026-08-07; Akum to raise w/ Chris this
+   weekend + the group). Grouped by owner.
+
+   @CHRIS (exposure calibration):
+   - TARGET BINNED S/N for typing? The knob that DRIVES exposure. His note gives
+     the curve's per-pixel S/N (5) + the ~10x binning gain but NOT the target
+     binned S/N; we defaulted to 10 (t = 0.4x the curve; 5 marginal, 15 ≈
+     curve-as-is, higher = cosmology/spectral-standardization grade). The Aug-13
+     plan is time-rich (~6 of 10.3 h used), so we can afford higher S/N.
+   - MINIMUM exposure per target on LLAMAS? Floored at 10 min (~2x the modelled
+     ~5-min switch overhead). Yize's 30-min minimum is LDSS3 (slit overhead +
+     characterization S/N) — don't just copy it. Is 10 min right for LLAMAS?
+   - Confirm the true LLAMAS acquisition/switch OVERHEAD (sets the floor + the
+     scheduler's per-target ops time).
+   - Sanity-check the exposure model differs by TYPE (Ia broad-feature, bins 10x;
+     II/IIn narrow-line, can't bin) and by INSTRUMENT (need an LDSS3 S/N curve;
+     the ETC today is LLAMAS-only). Cross-check that held: Villar's LDSS3 30-min
+     block at mag 20 ≈ our curve stripped of binning at S/N~20 (~37 min), so the
+     calibration is consistent; the ~15x gap is binning + S/N target.
+
+   @GROUP (policy forks that change how the tool behaves):
+   - CHARGING RULE (parity-queue core): when a target is observed on a SHARED
+     night (e.g. a Stubbs Ia on Yize's LLAMAS night), whose budget docks — the
+     target's program or the observing PI's? Needs collaboration buy-in.
+   - ONE SPECTRUM vs a TIME SERIES? If typing → one spectrum, then strike it. If
+     cosmology time-series → multiple epochs, DON'T strike, track cumulative
+     coverage. Changes both the ledger (below) and the merit/cadence logic.
+   - What else must the tool SHOW to be useful to the collab?
+   - Is the per-night output a useful DELIVERABLE for the observer?
+   - How do we account for STORM-LOST nights (Aug 4/7/10 already marked
+     cancelled; broader policy)?
+   - How do we track what was ACTUALLY OBSERVED, to strike it from the future
+     queue? Manual for now; a reconciliation ledger later (also feeds the
+     allocations "used" bar, currently 0).
+
+   @VILLAR (concrete data gap):
+   - Yize's LLAMAS target list. We have his LDSS3 list, but his near-term nights
+     (Aug 13/16) are LLAMAS and we don't have his LLAMAS picks — his LLAMAS night
+     currently shows only Stubbs opportunistic fillers. Need the list or a feed.
+
+   OPERATIONAL (Akum, not meeting topics):
+   - Confirm the derived per-program allocations; swap demo logins for real
+     per-group keys before the collab uses it live.
+   - Add a 1 GB persistent disk (DB_PATH=/var/data/queue.db) right before real
+     submissions — currently ephemeral (re-seeds from repo each deploy).
 
 REMAINING:
 - Wire the ETC into `estimate_exposure_minutes` (service/queue preview) and the

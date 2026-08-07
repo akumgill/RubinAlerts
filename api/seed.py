@@ -53,6 +53,12 @@ def load_seed_submissions() -> dict:
                     item["band"] = row["band"].strip()
                 if row.get("exposure_minutes") not in (None, ""):
                     item["exposure_minutes"] = float(row["exposure_minutes"])
+                # Submitter's sub-exposure cadence (e.g. 3x1200s) — preserved so
+                # the observing sheet shows their real split, not a derived one.
+                if row.get("n_exposures") not in (None, ""):
+                    item["n_exposures"] = int(row["n_exposures"])
+                if row.get("exposure_seconds") not in (None, ""):
+                    item["exposure_seconds"] = float(row["exposure_seconds"])
                 subs.setdefault(row["program"].strip(), []).append(item)
     return subs
 

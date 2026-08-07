@@ -1,11 +1,11 @@
-program,name,ra,dec,priority,mag,band,exposure_minutes,instrument,notes
-CfA-Villar,2017hcc,0.960792,-11.474611,P1,22,r,60.0,LDSS3,long-standing Type II detected in DP2
-CfA-Villar,ZTF24abkllyo,1.0888,-0.2208,P1,20,r,30.0,LDSS3,from anomaly detection; classification
-CfA-Villar,ZTF26abjqico,12.6749,9.2214,P2,19,r,30.0,LDSS3,from anomaly detection; classification
-CfA-Villar,2026cqe,189.075898,-7.313123,P3,20.5,g,60.0,LDSS3,bumpy IIn
-CfA-Villar,2023acmb,233.4879,4.3237,P2,21,g,60.0,LDSS3,Type IIn with a long-duration light curve
-CfA-Villar,2026lnt,238.773844,1.896863,P1,18.5,g,30.0,LDSS3,from anomaly detection; double peaked light curve
-CfA-Villar,2024afyu,258.429421,7.625263,P2,21,g,60.0,LDSS3,long-standing IIb; unusual light curve evolution
-CfA-Villar,2026kyv,263.26527,-3.758058,P2,20,g,30.0,LDSS3,rebrightening Type II
-CfA-Villar,ZTF26abiavoi,321.8157,3.798,P3,20,r,30.0,LDSS3,from anomaly detection; classification
-CfA-Villar,2020jfv,346.648958,0.612111,P1,21,r,60.0,LDSS3,long-standing Type II detected in DP2
+program,name,ra,dec,priority,mag,band,exposure_minutes,n_exposures,exposure_seconds,instrument,notes
+CfA-Villar,2017hcc,0.960792,-11.474611,P1,22,r,60.0,3,1200,LDSS3,long-standing Type II detected in DP2
+CfA-Villar,ZTF24abkllyo,1.0888,-0.2208,P1,20,r,30.0,2,900,LDSS3,from anomaly detection; classification
+CfA-Villar,ZTF26abjqico,12.6749,9.2214,P2,19,r,30.0,2,900,LDSS3,from anomaly detection; classification
+CfA-Villar,2026cqe,189.075898,-7.313123,P3,20.5,g,60.0,3,1200,LDSS3,bumpy IIn
+CfA-Villar,2023acmb,233.4879,4.3237,P2,21,g,60.0,3,1200,LDSS3,Type IIn with a long-duration light curve
+CfA-Villar,2026lnt,238.773844,1.896863,P1,18.5,g,30.0,2,900,LDSS3,from anomaly detection; double peaked light curve
+CfA-Villar,2024afyu,258.429421,7.625263,P2,21,g,60.0,3,1200,LDSS3,long-standing IIb; unusual light curve evolution
+CfA-Villar,2026kyv,263.26527,-3.758058,P2,20,g,30.0,2,900,LDSS3,rebrightening Type II
+CfA-Villar,ZTF26abiavoi,321.8157,3.798,P3,20,r,30.0,2,900,LDSS3,from anomaly detection; classification
+CfA-Villar,2020jfv,346.648958,0.612111,P1,21,r,60.0,3,1200,LDSS3,long-standing Type II detected in DP2

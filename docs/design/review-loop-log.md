@@ -705,3 +705,81 @@ DECISIONS from the 2026-08-07 review discussion (Akum):
 
 PROPOSED PRE-CHRIS SLATE (pending Akum's pick): A4, A2, A8, P3(flag-only), A7,
 A1(fail-closed) — all low-risk, no ranking retune. Then DO-SOON items.
+
+STATUS 2026-08-07 (implemented, git 4a0df84 + 901a9a2): the six-item slate is
+DONE (348 tests pass). Exposure ownership (DECISION 1) shipped as required
+exposure on submit (require_exposure default True) + n_exposures/exposure_seconds
+fields; Villar's real sub-exposure cadence (3x1200s / 2x900s, from the VTDA
+source sheet) restored into the seed and carried to the observing sheets.
+STILL OPEN for Chris / next: the program-definition questions below, P2
+(mag-at-observation), A3 (requested-vs-scheduled reconciliation), A6 (persistent
+accounting = real budget), P7 (absolute merit floor).
+
+
+================================================================================
+2026-08-07 — PROGRAM-DEFINITION NOTES FOR THE CHRIS CONVERSATION
+(what the spectra are FOR — this drives every cut, the z policy, and n_bin)
+================================================================================
+
+TWO OBSERVING MODES, OPPOSITE TIME-SENSITIVITY (don't conflate them):
+
+  Mode 1 — SN spectrum near PEAK (time-critical; THIS is what our nightly
+  scheduler does). Only available while the SN is bright; one exposure delivers
+  together: (i) TYPE (Ia? subtype? peculiar) — the purity product; (ii) spectral
+  FEATURES for standardization (Si II velocity, pseudo-EWs, twin matching);
+  (iii) a REDSHIFT from the SN (+ any host lines in the slit). We schedule at
+  peak because we want the SUPERNOVA spectrum — not merely a redshift.
+
+  Mode 2 — HOST-galaxy spectrum for a clean redshift (NOT time-critical). The
+  host is static; better done AFTER the SN fades (no SN contamination), batched
+  at leisure. A separate mop-up campaign, NOT part of the nightly transient
+  queue. This is the Rubin-era "photometric typing + deferred host-z" paradigm.
+
+  => A redshift ALONE has no time-sensitivity, so it is not a reason to observe
+     at peak. The redshift becomes time-critical ONLY for a hostless / very
+     faint-host event, where the SN at peak is the sole redshift source.
+
+CORRECTION to the earlier high-z discussion: the "get cheap host redshifts at
+high z" argument does NOT rescue this tool's exposure balloon — that shortcut is
+Mode 2 (deferred), not what a peak scheduler does. The defensible high-z case is
+narrower: go faint/high-z when the SN SPECTRUM (type/features) is the goal and
+Magellan (6.5 m) is the only facility that can reach it (incl. the hostless case).
+This pairs with the WIDE_MAX_Z / WIDE_MAX_MAG relaxation as one Rubin-era decision.
+
+THE PROGRAM QUESTION for Chris: what is the peak spectrum FOR — TYPING (purity
+for a photometric cosmology sample) or STANDARDIZATION physics (velocities,
+subtypes, twins)? Both are SN-centric and time-critical and drive the same cut
+shape (phase tight around max, a real S/N target). "Just a redshift" is neither.
+
+BINNING vs RESOLUTION for standardization (how Chris's "bin ~10x -> ~10x less
+exposure than Type II" interplays with the resolution standardization needs):
+
+  Same physics on both sides — Ia features are intrinsically BROAD (~10,000 km/s
+  photospheric velocities). Resolution and velocity are one knob: R = c/Dv. To
+  sample a ~10,000 km/s feature with M points needs R_binned ~ 30*M:
+     M~7  -> R~210 ;  M~10 -> R~300.
+  LLAMAS delivers R~2000, so the binning factor is just the surplus:
+     n_bin = 2000 / R_needed ~ 7-10.
+  Chris's n_bin~10 => R~200 => ~7 elements across a broad Ia line — enough to
+  centroid the Si II minimum (velocity), measure pseudo-EWs, subtype, and match
+  spectral twins (twinning lives in the broad shape). So the 10x exposure saving
+  and the R~200 you keep are TWO ENDS OF THE SAME KNOB, and R~200 still resolves
+  what broad-feature standardization uses. n_bin~10 = "the resolution you don't
+  need for Ia," matched to the feature width (why it's ~10, not ~100).
+
+  WHY Ia-only: Type II/IIn have genuinely NARROW lines (CSM Halpha, hundreds of
+  km/s). Binning 10x smears the diagnostic away — no gain — so those keep full R
+  and full exposure (= Villar). Same physics, opposite conclusion.
+
+  WHERE binning stops being free EVEN for Ia: narrow diagnostics (Na I D for
+  host/CSM dust & environment; narrow high-velocity features) and precise
+  host-line redshifts need R~500-1000 => bin only ~2-4x => saving drops from
+  ~10x to ~4x (S/N gain sqrt(4)=2 not sqrt(10)~3).
+
+  TOOL IMPLICATION: n_bin should NOT be a single global constant — it should
+  track the science mode (broad-feature typing/standardization = 10 (R~200);
+  a narrow-diagnostic or precise-z sub-goal = less binning, more exposure). The
+  question to close with Chris: is R~200 enough for the standardization he has in
+  mind, or does any planned measurement need narrow features? His answer sets
+  n_bin, which sets every exposure the ETC produces (see core/snr_etc.py:50-51,
+  DEFAULT_N_BIN; the "target binned SNR" is also still an OPEN QUESTION there).

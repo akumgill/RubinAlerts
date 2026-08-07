@@ -18,9 +18,45 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_NIGHTS_YAML = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "ref", "observing_nights_2026B.yaml")
+_REF_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ref")
+_NIGHTS_YAML = os.path.join(_REF_DIR, "observing_nights_2026B.yaml")
+# Per-instrument allocation files (parallel budget universes).
+_ALLOC_FILES = {
+    "LLAMAS": os.path.join(_REF_DIR, "allocations_LLAMAS_2026B.yaml"),
+    "LDSS3": os.path.join(_REF_DIR, "allocations_LDSS3_2026B.yaml"),
+}
+
+
+def load_allocations_overview() -> dict:
+    """Season time allocations per program per instrument: initial / used /
+    remaining hours. Reads BOTH instrument allocation files (LLAMAS + LDSS3 are
+    parallel budgets). ``used`` is the reconciled observed time; it is 0 until a
+    post-night reconciliation records observations, so ``remaining == initial``
+    in the fresh demo. Returns {instruments, programs: {prog: {inst: {...}}}}."""
+    import yaml
+    instruments = list(_ALLOC_FILES)
+    programs: dict = {}
+    for inst, path in _ALLOC_FILES.items():
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.warning("could not load %s allocations: %s", inst, e)
+            continue
+        for row in data.get("programs", []) or []:
+            prog = row.get("program")
+            if not prog:
+                continue
+            hours = row.get("allocated_hours", {}) or {}
+            initial = round(float(sum(hours.values())), 2)
+            used = 0.0  # TODO: populate from post-night reconciliation ledger
+            programs.setdefault(prog, {})[inst] = {
+                "initial": initial, "used": round(used, 2),
+                "remaining": round(initial - used, 2),
+                "pi": row.get("pi", ""),
+            }
+    return {"instruments": instruments, "programs": programs}
 
 
 def load_nights() -> list:
@@ -414,4 +450,5 @@ def dashboard_data(service, date: str, instrument: str = "LLAMAS",
         "caller_program": caller_program,
         "nights": load_nights(),
         "selected_night": {"date": date, "instrument": instrument},
+        "allocations": load_allocations_overview(),
     }

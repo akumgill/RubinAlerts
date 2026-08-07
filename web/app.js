@@ -297,6 +297,7 @@ function renderAll() {
   renderPlan();
   renderOverflow();
   renderPrograms();
+  renderAllocations();
   renderQueue();
   renderFoot();
 }
@@ -574,6 +575,31 @@ function renderPrograms() {
       <div class="sci">${esc((DATA.programs[p] || {}).science || "")}</div>
       <div class="nums"><span>scheduled ${(sch[p] || 0).toFixed(1)} h</span><span>requested ~${esc(req[p] || 0)} h</span></div>
       <div class="split">${tc}</div></div>`;
+  }).join("");
+}
+
+// ---- time allocations (season budget per group, both instruments) ----
+function renderAllocations() {
+  const a = DATA.allocations;
+  if (!a || !a.programs || !Object.keys(a.programs).length) {
+    $("allocs").innerHTML = ""; return;
+  }
+  const insts = a.instruments || ["LLAMAS", "LDSS3"];
+  $("allocs").innerHTML = Object.keys(a.programs).sort().map((p) => {
+    const col = RAW[p] || "var(--slate)";
+    const rows = insts.map((inst) => {
+      const d = a.programs[p][inst];
+      if (!d) {
+        return `<div class="alloc-row"><span class="ai ai-${esc(inst.toLowerCase())}">${esc(inst)}</span>
+          <span class="bar"></span><span class="al none">no allocation</span></div>`;
+      }
+      const pct = d.initial > 0 ? Math.round(100 * d.used / d.initial) : 0;
+      return `<div class="alloc-row"><span class="ai ai-${esc(inst.toLowerCase())}">${esc(inst)}</span>
+        <span class="bar"><span class="fill" style="width:${pct}%"></span></span>
+        <span class="al">${esc(d.remaining)} h left <span class="rem">/ ${esc(d.initial)} h${d.used ? " · " + esc(d.used) + " used" : ""}</span></span></div>`;
+    }).join("");
+    return `<div class="card${p === DATA.caller_program ? " mine" : ""}" style="border-top-color:${col}">
+      <h3><span class="dot" style="background:${col}"></span>${esc(p)}</h3>${rows}</div>`;
   }).join("");
 }
 

@@ -109,6 +109,17 @@ h2 .hint{font-weight:400;font-size:.8rem;color:var(--faint);margin-left:.4rem;}
 .card .nums{display:flex;justify-content:space-between;font-size:.75rem;color:var(--slate);font-variant-numeric:tabular-nums;}
 .card .split{font-size:.72rem;color:var(--faint);font-family:var(--mono);margin-top:.35rem;}
 .card.mine{box-shadow:0 0 0 2px var(--copper) inset;}
+/* time allocations */
+.allocs{display:flex;flex-wrap:wrap;gap:.8rem;}
+.allocs .card{min-width:15rem;flex:1 1 15rem;}
+.alloc-row{display:flex;align-items:center;gap:.5rem;margin-top:.4rem;font-size:.75rem;}
+.alloc-row .ai{font-family:var(--mono);font-size:.66rem;color:#fff;padding:.05rem .3rem;border-radius:3px;min-width:3.4rem;text-align:center;}
+.alloc-row .ai-llamas{background:#2f7d6b;} .alloc-row .ai-ldss3{background:#6a4a86;}
+.alloc-row .bar{flex:1;height:.55rem;background:var(--hair2);border-radius:3px;overflow:hidden;}
+.alloc-row .bar .fill{display:block;height:100%;background:var(--copper);}
+.alloc-row .al{color:var(--ink);font-variant-numeric:tabular-nums;white-space:nowrap;}
+.alloc-row .al .rem{color:var(--faint);}
+.alloc-row .al.none{color:var(--faint);}
 .filters{display:flex;gap:.4rem;flex-wrap:wrap;margin:.3rem 0 .7rem;}
 .filters button{font-family:var(--sans);font-size:.78rem;font-weight:600;color:var(--slate);background:var(--panel);
   border:1px solid var(--hair);border-radius:999px;padding:.25rem .8rem;cursor:pointer;}

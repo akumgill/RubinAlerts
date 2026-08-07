@@ -169,6 +169,19 @@ def test_queue_summary_counts(svc):
     assert q["prog-A"]["requested_hours"] > 0
 
 
+def test_queue_summary_instrument_filter(svc):
+    # A3: 'requested' must be filterable by instrument so it reconciles with the
+    # per-instrument 'scheduled'. LLAMAS view should not count LDSS3 targets.
+    svc.submit("kA", [
+        {"name": "L", "ra": 10, "dec": 20, "mag": 19, "priority": "P1",
+         "instrument": "LLAMAS", "exposure_minutes": 60},
+        {"name": "D", "ra": 30, "dec": 20, "mag": 19, "priority": "P1",
+         "instrument": "LDSS3", "exposure_minutes": 30},
+    ])
+    assert svc.queue_summary()["prog-A"]["requested_hours"] == 1.5        # both
+    assert svc.queue_summary("LLAMAS")["prog-A"]["requested_hours"] == 1.0  # L only
+
+
 # ---- instrument field ----
 def test_instrument_defaults_llamas(svc):
     r = svc.submit("kA", [{"ra": 10, "dec": 20, "mag": 19, "priority": "P1"}])

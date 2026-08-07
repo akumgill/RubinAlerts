@@ -198,8 +198,9 @@ def preview_plan(service, date: str, moon: str = None,
         # dashboard shows the night rather than "undefined".
         return _empty_night(date, moon, instrument, cfg)
 
-    # requested hours per program (before scheduling)
-    summary = service.queue_summary()
+    # requested hours per program (before scheduling), restricted to THIS
+    # instrument so 'requested' reconciles with the per-instrument 'scheduled'.
+    summary = service.queue_summary(instrument)
     requested = {p: v["requested_hours"] for p, v in summary.items()}
 
     # name/program -> tier, to tag timeline entries with the submitted tier

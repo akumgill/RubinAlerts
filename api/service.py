@@ -372,10 +372,14 @@ class TargetQueueService:
         self._persist(t)
         return {"status": "ok", "id": target_id, "new_status": "withdrawn"}
 
-    def queue_summary(self) -> dict:
-        """GET /v1/queue — counts per tier per program + requested hours."""
+    def queue_summary(self, instrument: Optional[str] = None) -> dict:
+        """GET /v1/queue — counts per tier per program + requested hours.
+
+        ``instrument`` (LLAMAS / LDSS3) restricts to that instrument's universe,
+        so the plan's per-program 'requested' reconciles with its per-instrument
+        'scheduled'. Default None = all instruments (the shared-queue view)."""
         by_prog: dict = {}
-        for t in self.active():
+        for t in self.active(instrument):
             p = by_prog.setdefault(
                 t.program, {"counts": {tier: 0 for tier in TIERS},
                             "requested_hours": 0.0})

@@ -549,3 +549,159 @@ TIER 2 — quality/tuning, post-launch:
 
 VALIDATION GATE: run the sandbox "fake night" round with a group before real
 reliance. Critical path to a first invite: #1 -> #2 -> #3 -> #4 -> sandbox.
+
+
+================================================================================
+2026-08-07 — THREE-AGENT DESIGN REVIEW (architect + astronomer + engineer)
+================================================================================
+Read-only review of the whole system before sharing with Chris / the
+collaboration. A software-architect agent and an observational-astronomer agent
+independently assessed strengths/weaknesses/proposals; an engineer agent then
+verified every claim against the code (correcting line refs and catching two
+misreads). Nothing was implemented from this pass — findings recorded here for
+future work / next-steps / blocker decisions.
+
+Both reviewers rated the engineering strong with NO architectural blockers.
+Verified highlights of what's GOOD (don't undo these): pipeline-RANKS /
+orchestrator-SCHEDULES is a real isolation boundary; the CSV materialization
+protects in-memory Target rows from scheduler mutation; revision-keyed dashboard
+cache invalidates exactly on queue change; multiplicative merit +
+compute_merit_breakdown is fully auditable; the free-z circularity trap is
+correctly avoided (w_absmag M_B only computed for EXTERNAL z, never free-SALT z);
+coverage-aware broker bonus fixes a real southern-field bias.
+
+CONFIRMED FINDINGS (engineer-verified; grouped by disposition):
+
+DO NOW (low-risk, pre-Chris; no ranking-logic retune):
+  * A4  Default night (2026-08-13 LLAMAS) shows an empty plan — the only seed is
+        Villar LDSS3. Point the default at the seeded instrument or seed one
+        LLAMAS target. (supersedes/uses Tier-1 #3.)
+  * A2  Budget used/remaining is INERT live: scheduler_bridge.py:53 hardcodes
+        used=0.0 AND preview_plan runs the scheduler into a TemporaryDirectory
+        that's discarded, so TimeAccountant state never persists -> get_budget_
+        factor always returns 1.0. The allocation bars DISPLAY fair-share but
+        don't ENFORCE it. Label them "not tracked yet" in UI+guide until A6.
+  * A8  Single-process invariant (in-memory _targets mirror + in-proc cache +
+        shared sqlite) is currently SAFE (uvicorn defaults to 1 worker) but
+        undocumented — comment it in render.yaml/Dockerfile, optionally pin
+        --workers 1.
+  * P3(flag-only)  Template-tournament verdict is written to candidates.csv and
+        read by NOTHING (grep-confirmed inert). First step: set needs_
+        classification=True when template_best != 'Ia' with sufficient
+        template_margin. Flag only, no merit reshuffle -> no regression risk.
+  * A7  active()/list_targets()/queue_summary() iterate self._targets without the
+        lock that submit() appends under. Snapshot: list(self._targets). 2 lines.
+  * A1(fail-closed)  Missing/invalid GROUPS_JSON silently falls back to public
+        demo keys (seed.py:66-77); render.yaml ships GROUPS_JSON sync:false so a
+        fresh prod deploy runs on demo creds. Fail closed when a prod/non-dev
+        SESSION_SECRET is set (env-gated so local demo still works). Cheap
+        add-ons: https_only=True (env-gated), secrets.compare_digest for password.
+
+DO SOON (before/around the sandbox round):
+  * A3  Instrument-aware exposure + requested-vs-scheduled reconciliation:
+        service.estimate_exposure_minutes runs the LLAMAS Ia ETC for ANY submit
+        (incl. LDSS3); requested_hours is cross-instrument while scheduled is
+        per-instrument -> cards don't reconcile. See DECISION 1 below (the
+        exposure half is reframed).
+  * A5  Add tests: plan_export (3 formats), _obs_window classification,
+        dashboard cache revision-keying, the A1 fallback.
+  * P2  Size exposures at PREDICTED MAG AT OBSERVATION, not peak_mag. Pipeline
+        path (load_from_rubinalerts) feeds peak_mag; with --max-phase 25d a
+        decliner is sized too bright. Manual/API path already uses submitted
+        (anticipated) mag. Fix: eval the SALT2 model mag at the plan night's
+        epoch (extrapolate from parabola where no SALT). ACCEPTED (see DEC 3).
+  * P6  w_absmag fallback (run_tonight.py:1908-9) compares observer-frame r to
+        rest-frame M_B=-19.3 with no K-correction -> ~0.3-0.5 mag bias at z>0.3.
+        Simplest fix: don't apply w_absmag when only observer-frame peak_mag is
+        available (the good SALT peak_mag_B path already handles the real case).
+  * P4  Host-morphology cosmology bias — mechanism ALREADY BUILT (profiles
+        override host_weights); only a neutral `cosmology` profile is missing.
+        See DECISION 4.
+  * P8  Ia w_time is a SYMMETRIC Gaussian (dt_pref=0): +10d declining scores same
+        as -10d rising. Skew dt_pref slightly negative to prefer rising/at-peak.
+        Small science-policy tweak; needs sign-off + a test (shifts rankings).
+  * P11 Two twilight defs (-12 pipeline pre-filter vs -18 orchestrator). NOT a
+        correctness bug (the -12 pre-filter is a wider superset; orchestrator is
+        authoritative) — align the constant for clarity only.
+
+DEFER (post-validation or blocked):
+  * A6  Persist accounting + target ledger across previews (stable state path,
+        not per-call tempdir) — the REAL fix under A2; makes budget priority +
+        cross-night "already observed" exclusion actually function. Needs a
+        charge-on-preview vs charge-on-reconcile decision. Biggest design->deploy
+        gap, correctly deferred until we've seen the observer's per-night output.
+  * P7  Absolute merit floor / "not worth a slot" flag — blocked on accumulated
+        cross-night statistics (a crude interim floor risks arbitrary cutoffs).
+        Most tempting NOW given the thin storm-era sky; revisit as stats build.
+  * P9  Observer deliverables: finder charts + offset/acquisition stars +
+        per-target expected S/N (S/N is cheap off the existing ETC; charts need
+        cutouts). = Tier-2 #12.
+  * P10 w_salt gates on raw chi2/dof and ignores n_points/n_bands -> a sparse
+        noisy LC can score chi2/dof~1 and get an undeserved bonus while a
+        well-sampled bright Ia with slightly-underestimated errors is penalized.
+        Gate on sampling or recalibrate errors first. Retunes a core weight.
+  * P12 Exotic top-of-funnel — selection is Ia-shaped end-to-end; ranking/
+        scheduling is already program-agnostic. Needs the exotic group's own
+        source streams + cuts. Large. (= CLAUDE.md roadmap.)
+
+DROP (engineer refuted):
+  * P5(code) w_z is NOT a no-op — it's a working monotonic tilt over z in [0,0.4]
+        (0.3 floor at z<=0.15 rising to ~0.61 at z=0.4), flat-floored ONLY in the
+        current ZTF-downtime regime (documented as intended). Don't "fix" it.
+        The genuine item is a POLICY contradiction, not a bug — see DECISION 2.
+
+ENGINEER CORRECTIONS to the reviewers (so we don't chase ghosts later):
+  - P5 is a misread (see DROP). Correct refs: w_z at orchestrator/config.py:101-4;
+    WIDE_MAX_Z at run_tonight.py:548 (NOT peak_fitting.py).
+  - P4 is largely already built (profile.host_weights overrides the global).
+  - A8 is currently safe (uvicorn 1 worker by default) — a "document it" task.
+  - P1 (type-aware ETC) depends on P3 for a type signal — but DECISION 1 dissolves
+    P1 without needing the classifier at all.
+
+--------------------------------------------------------------------------------
+DECISIONS from the 2026-08-07 review discussion (Akum):
+--------------------------------------------------------------------------------
+1. EXPOSURE-TIME OWNERSHIP. We propose exposure times ONLY for OUR OWN objects
+   of interest (suspected Ia). Everything our pipeline enqueues is Ia by
+   construction (the funnel is Ia-shaped), so the Ia-tuned ETC (10x binning gain)
+   is always type-appropriate for what WE size. External/manual submitters
+   (Villar, etc.) OWN their exposure_minutes; we honor them as authoritative and
+   never override. The orchestrator stays TYPE-AGNOSTIC — it schedules whatever
+   exposure is attached. => This REPLACES P1 "make the ETC type-aware": the only
+   fix needed is to stop service.estimate_exposure_minutes from auto-sizing
+   FOREIGN submissions with the Ia ETC (honor submitted exposure; if absent,
+   reject-with-message or a clearly-flagged neutral fallback — never the binned
+   Ia number as authoritative). Make this explicit in the API spec + guide:
+   "exposure_minutes is the submitter's responsibility; the tool auto-sizes only
+   its own pipeline Ia candidates." No classifier needed. Effort S.
+2. w_z / WIDE_MAX_Z=0.4 — NO CODE CHANGE. w_z already tilts toward the highest z
+   we can reach (<=0.4). The 0.4 cut is set by what ZTF can FEED (ZTF Ia ~r19 at
+   z~0.15; z=0.4 ~ r22.5 is ZTF's edge) AND what LLAMAS can REACH (ETC calibrated
+   only to r~21; exposures balloon past ~600s). The 0.6-0.8 plateau is
+   ASPIRATIONAL / Rubin-era — reaching it needs Rubin back online + relaxing
+   WIDE_MAX_Z/WIDE_MAX_MAG + re-validating the ETC in extrapolation + long
+   exposures. FLAG for Chris, don't code. (Optional cosmetic: re-peak the w_z
+   label to ~0.4 so config matches present behavior.)
+3. MAG-AT-OBSERVATION exposure sizing — ACCEPTED (= P2). Size at predicted mag on
+   the plan night, not peak. Pipeline-side; use the SALT2 model mag at epoch.
+4. HOST-MORPHOLOGY — leaning: add a neutral `cosmology` ranking profile (mechanism
+   exists) and RECORD the applied weights into a selection-function log so
+   whatever bias we impose is characterizable; KEEP the elliptical-boost profile
+   for typing/discovery. Rationale: follow-up is always selection-biased and
+   cosmology MODELS its selection function; the specific danger of host morphology
+   is that it's correlated with the MASS STEP (~0.05-0.07 mag), i.e. aligned with
+   our largest astrophysical systematic — the one avoidable bias worth not adding
+   to a Hubble-diagram sample. (Our morphology signal is weak anyway, so the cost
+   of neutralizing is low.) Chris decides which program MAGNETS is running.
+5. TEMPLATE VERDICT — useful as a MARGIN-GATED SOFT PURITY PRIOR, not a verdict
+   (photometric typing on sparse noisy LCs; nugent templates old/incomplete; not
+   a substitute for the spectrum we're scheduling). Cuts both ways by program:
+   cosmology-Ia DEPRIORITIZES confident-non-Ia; discovery/typing PRIORITIZES the
+   ambiguous (small-margin) ones; confident-exotic routes to the Villar funnel.
+   It's also the type signal DECISION 1's guard / needs_classification key off.
+   Staging: (a) NOW flag-only (needs_classification when template_best!='Ia' with
+   margin); (b) SOON a bounded w_type merit factor (like w_iaspec) + wire into the
+   exotic router. This is the biggest cheap Ia-purity gain and is ~90% built.
+
+PROPOSED PRE-CHRIS SLATE (pending Akum's pick): A4, A2, A8, P3(flag-only), A7,
+A1(fail-closed) — all low-risk, no ranking retune. Then DO-SOON items.

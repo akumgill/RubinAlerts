@@ -15,7 +15,7 @@
 
 // Currently-selected observing night. Defaults to the first post-storm night
 // (Aug-13 LLAMAS); clicking a night in the schedule bar re-points and re-fetches.
-let NIGHT = { date: "2026-08-13", instrument: "LLAMAS" };
+let NIGHT = { date: "2026-08-13", instrument: "LDSS3" };
 const dashUrl = () =>
   "/v1/dashboard?date=" + encodeURIComponent(NIGHT.date) +
   "&instrument=" + encodeURIComponent(NIGHT.instrument);
@@ -191,6 +191,12 @@ async function addTarget(ev) {
 
   if (!name && !(raS && decS)) {
     toast("Provide a name or an RA + Dec pair.", "err");
+    return;
+  }
+  // Exposure is the submitter's call — we don't auto-size someone else's
+  // target (the ETC is tuned for our own Ia candidates).
+  if (expS === "") {
+    toast("Exposure (min) is required — set the integration you want.", "err");
     return;
   }
   const item = {
@@ -586,6 +592,10 @@ function renderAllocations() {
     $("allocs").innerHTML = ""; return;
   }
   const insts = a.instruments || ["LLAMAS", "LDSS3"];
+  // `tracked` is false until a post-night reconciliation ledger populates
+  // `used`; until then we show the allocation but label usage as not-yet-live
+  // rather than presenting a hardcoded 0 as a real figure.
+  const tracked = a.tracked;
   $("allocs").innerHTML = Object.keys(a.programs).sort().map((p) => {
     const col = RAW[p] || "var(--slate)";
     const rows = insts.map((inst) => {
@@ -593,6 +603,11 @@ function renderAllocations() {
       if (!d) {
         return `<div class="alloc-row"><span class="ai ai-${esc(inst.toLowerCase())}">${esc(inst)}</span>
           <span class="bar"></span><span class="al none">no allocation</span></div>`;
+      }
+      if (!tracked) {
+        return `<div class="alloc-row"><span class="ai ai-${esc(inst.toLowerCase())}">${esc(inst)}</span>
+          <span class="bar"><span class="fill untracked" style="width:0%"></span></span>
+          <span class="al">${esc(d.initial)} h allocated <span class="rem">· usage not tracked yet</span></span></div>`;
       }
       const pct = d.initial > 0 ? Math.round(100 * d.used / d.initial) : 0;
       return `<div class="alloc-row"><span class="ai ai-${esc(inst.toLowerCase())}">${esc(inst)}</span>

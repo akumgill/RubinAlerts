@@ -66,11 +66,11 @@
           <select id="t-pri"><option>P0</option><option selected>P1</option><option>P2</option><option>P3</option><option>P4</option><option>P5</option></select></div>
         <div class="fld"><label for="t-inst">Instrument</label>
           <select id="t-inst"><option>LLAMAS</option><option selected>LDSS3</option><option>EITHER</option></select></div>
-        <div class="fld"><label for="t-exp">Exp (min)</label><input class="w-num" id="t-exp" inputmode="numeric" placeholder="auto"></div>
+        <div class="fld"><label for="t-exp">Exp (min) *</label><input class="w-num" id="t-exp" inputmode="numeric" placeholder="e.g. 30" required></div>
         <div class="fld"><label for="t-mag">r mag</label><input class="w-num" id="t-mag" inputmode="decimal" placeholder="—"></div>
         <div class="fld"><label>&nbsp;</label><button class="btn primary" type="submit" id="addbtn">Add target</button></div>
       </div>
-      <div class="hint2">Provide a <b>name</b> or an <b>RA + Dec</b> pair. Submitted to <code>POST /v1/targets</code> for your program.</div>
+      <div class="hint2">Provide a <b>name</b> or an <b>RA + Dec</b> pair, and the <b>exposure</b> you want (we size exposures only for our own pipeline Ia candidates — you set yours). Submitted to <code>POST /v1/targets</code> for your program.</div>
     </form>
 
     <h2>Observing plan <span class="hint">priority order with each target&rsquo;s observable window &mdash; reorder freely; the UTC is only a suggested pace. Do the &ldquo;sets&rdquo; targets first. What&rsquo;s actually observed is decided live (see &ldquo;Right now&rdquo;)</span></h2>

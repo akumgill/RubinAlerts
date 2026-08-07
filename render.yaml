@@ -1,11 +1,18 @@
 # Render blueprint for the MAGNETS queue API.
 # One Docker web service with a persistent disk for the SQLite database.
+#
+# SINGLE-PROCESS BY DESIGN: the service keeps an in-memory mirror of the queue,
+# an in-process dashboard cache, and one shared SQLite connection. These would
+# silently diverge across workers, so the service must run as ONE process (the
+# Dockerfile pins uvicorn --workers 1) and ONE instance. Do not scale workers
+# or instances up without moving that state to a shared store first.
 services:
   - type: web
     name: magnets-queue-api
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: starter
+    numInstances: 1              # single-process invariant (see header)
     healthCheckPath: /healthz    # unauthenticated liveness probe
     disk:
       name: queue-data
@@ -17,7 +24,12 @@ services:
       - key: SEED_DEMO
         value: "1"              # seed the Aug-7 demo on a fresh (empty) disk
       - key: SESSION_SECRET
-        generateValue: true     # signed-cookie secret
+        generateValue: true     # signed-cookie secret (also the prod signal:
+                                # with it set, an unset GROUPS_JSON fails closed)
+      - key: SECURE_COOKIES
+        value: "1"              # HTTPS-only session cookie (Render terminates TLS)
+      - key: DEFAULT_INSTRUMENT
+        value: "LDSS3"          # landing view = the seeded (Villar) instrument
       # Group config: program -> {key, password}. Provide real credentials here
       # in production. If GROUPS_JSON is unset the API falls back to the built-in
       # demo groups (UA + CfA/Villar) so the seeded demo is immediately usable.

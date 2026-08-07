@@ -25,4 +25,7 @@ COPY web/ ./web/
 RUN mkdir -p /app/data
 
 EXPOSE 8000
-CMD ["sh", "-c", "uvicorn api.app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# --workers 1: the service holds in-process state (queue mirror + dashboard
+# cache + shared SQLite connection); it must run as a single process. See the
+# single-process note in render.yaml.
+CMD ["sh", "-c", "uvicorn api.app:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

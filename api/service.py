@@ -23,7 +23,7 @@ MATCH_ARCSEC = 2.0  # canonical-object dedup radius
 # Target dataclass fields that are floats and use NaN-as-missing; stored as
 # SQL NULL and restored to float('nan') on load.
 _FLOAT_FIELDS = frozenset({
-    "ra", "dec", "mag", "redshift", "exposure_minutes",
+    "ra", "dec", "mag", "redshift", "exposure_minutes", "exposure_seconds",
     "canonical_ra", "canonical_dec",
 })
 _COLUMNS = [f.name for f in _dc_fields(Target)]
@@ -69,7 +69,8 @@ def estimate_exposure_minutes(mag: float, redshift: float = float("nan")) -> flo
 class TargetQueueService:
     def __init__(self, programs: dict, allocations_path: str,
                  resolver: Optional[Callable[[str], Optional[dict]]] = None,
-                 db_path: Optional[str] = None):
+                 db_path: Optional[str] = None,
+                 require_exposure: bool = True):
         """
         programs : {api_key: program_name}
         allocations_path : YAML consumed by the orchestrator for budgets
@@ -78,9 +79,16 @@ class TargetQueueService:
                   if that is also unset, an in-memory database is used (the
                   historical behavior — nothing is persisted). The deployment
                   layer (api.app) passes ``DB_PATH`` (default ./data/queue.db).
+        require_exposure : if True (the deployment default), every submission
+                  must carry an exposure (``exposure_minutes`` or ``n_exposures``
+                  + ``exposure_seconds``). We size exposures only for our own
+                  pipeline Ia candidates; a manual submitter owns their exposure
+                  and must state it — we never silently apply the Ia-tuned ETC to
+                  someone else's (possibly non-Ia) target.
         """
         self.allocations_path = allocations_path
         self._resolver = resolver
+        self._require_exposure = require_exposure
         self._targets: list[Target] = []
         self._next_id = 1
         self._revision = 0   # bumped on every write; keys the dashboard cache
@@ -119,6 +127,13 @@ class TargetQueueService:
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS config "
                 "(key TEXT PRIMARY KEY, value TEXT)")
+            # Additive migration: bring an older DB up to the current columns
+            # (e.g. n_exposures / exposure_seconds) without a manual migration.
+            existing = {r[1] for r in
+                        self._conn.execute("PRAGMA table_info(targets)")}
+            for c in _COLUMNS:
+                if c not in existing:
+                    self._conn.execute(f"ALTER TABLE targets ADD COLUMN {c}")
 
     def _persist_config(self) -> None:
         with self._lock, self._conn:
@@ -173,7 +188,8 @@ class TargetQueueService:
         """Active (queued/scheduled) targets. If ``instrument`` is given,
         restrict to that instrument's universe — its own targets plus any
         flagged EITHER — since LLAMAS and LDSS3 schedule as parallel systems."""
-        act = [t for t in self._targets if t.status in ("queued", "scheduled")]
+        with self._lock:                       # snapshot: submit() appends here
+            act = [t for t in self._targets if t.status in ("queued", "scheduled")]
         if instrument:
             inst = instrument.upper()
             act = [t for t in act if t.instrument in (inst, "EITHER")]
@@ -264,6 +280,26 @@ class TargetQueueService:
             return {"status": "error",
                     "error": "coords-only source needs an anticipated mag"}
 
+        # Exposure. The submitter states it — either a total (exposure_minutes)
+        # or a sub-exposure spec (n_exposures x exposure_seconds), which also
+        # sets the total. We do NOT auto-size a submitted target: the Ia ETC is
+        # for our own pipeline Ia candidates, not someone else's target.
+        n_exp = raw.get("n_exposures")
+        n_exp = int(n_exp) if n_exp not in (None, "") else None
+        exp_sec = raw.get("exposure_seconds")
+        exp_sec = float(exp_sec) if exp_sec not in (None, "") else float("nan")
+        exp_min = raw.get("exposure_minutes")
+        if exp_min not in (None, ""):
+            exp_min = float(exp_min)
+        elif n_exp and math.isfinite(exp_sec):
+            exp_min = n_exp * exp_sec / 60.0
+        else:
+            exp_min = float("nan")
+        if self._require_exposure and not math.isfinite(exp_min):
+            return {"status": "error",
+                    "error": "exposure required: give exposure_minutes, or "
+                             "n_exposures + exposure_seconds"}
+
         existing = self._find_same_object(program, ra, dec)
         if existing:  # upsert
             existing.priority = pri
@@ -272,8 +308,10 @@ class TargetQueueService:
                 existing.mag = mag
             if math.isfinite(redshift):
                 existing.redshift = redshift
-            if raw.get("exposure_minutes") not in (None, ""):
-                existing.exposure_minutes = float(raw["exposure_minutes"])
+            if math.isfinite(exp_min):
+                existing.exposure_minutes = exp_min
+                existing.n_exposures = n_exp
+                existing.exposure_seconds = exp_sec
             if name:
                 existing.name = name
             if raw.get("valid_until"):
@@ -284,8 +322,8 @@ class TargetQueueService:
             t = Target(
                 priority=pri, instrument=inst, name=name, ra=ra, dec=dec, mag=mag,
                 band=str(raw.get("band", "r")), redshift=redshift,
-                exposure_minutes=float(raw["exposure_minutes"])
-                if raw.get("exposure_minutes") not in (None, "") else float("nan"),
+                exposure_minutes=exp_min, n_exposures=n_exp,
+                exposure_seconds=exp_sec,
                 valid_until=raw.get("valid_until"),
                 notes=str(raw.get("notes", "")),
                 id=self._next_id, program=program, status="queued",
@@ -303,7 +341,8 @@ class TargetQueueService:
 
     def list_targets(self, api_key: str) -> list[dict]:
         program = self.program_for(api_key)
-        return [t.to_dict() for t in self._targets if t.program == program]
+        with self._lock:                       # snapshot: submit() appends here
+            return [t.to_dict() for t in self._targets if t.program == program]
 
     def _owned(self, api_key: str, target_id: int) -> Target:
         program = self.program_for(api_key)

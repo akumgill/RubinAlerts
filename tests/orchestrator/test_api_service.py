@@ -34,7 +34,37 @@ def alloc(tmp_path):
 
 @pytest.fixture
 def svc(alloc):
+    # require_exposure=False keeps these low-level submit/dedup/auth checks
+    # focused on their own concern; the exposure requirement is covered by its
+    # own tests below and end-to-end in test_api_http.
+    return TargetQueueService(KEYS, alloc, resolver=resolver,
+                              require_exposure=False)
+
+
+@pytest.fixture
+def svc_req(alloc):
+    """Service with the production default (exposure required)."""
     return TargetQueueService(KEYS, alloc, resolver=resolver)
+
+
+def test_exposure_required_by_default(svc_req):
+    # missing exposure is rejected
+    r = svc_req.submit("kA", [{"ra": 10, "dec": 20, "mag": 19, "priority": "P1"}])
+    assert r[0]["status"] == "error" and "exposure" in r[0]["error"]
+    # explicit total is accepted
+    r = svc_req.submit("kA", [{"ra": 10, "dec": 20, "mag": 19, "priority": "P1",
+                               "exposure_minutes": 30}])
+    assert r[0]["status"] == "ok"
+
+
+def test_exposure_from_subexposure_spec(svc_req):
+    # n_exposures x exposure_seconds sets the total (3 x 600 s = 30 min)
+    r = svc_req.submit("kA", [{"ra": 40, "dec": 20, "mag": 19, "priority": "P1",
+                               "n_exposures": 3, "exposure_seconds": 600}])
+    assert r[0]["status"] == "ok"
+    t = svc_req.list_targets("kA")[0]
+    assert t["exposure_minutes"] == 30.0
+    assert t["n_exposures"] == 3 and t["exposure_seconds"] == 600.0
 
 
 # ---- auth ----

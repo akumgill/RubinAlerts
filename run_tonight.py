@@ -2208,6 +2208,22 @@ def enrich_finalist_redshifts(summary, fit_results, use_salt=False):
     return summary
 
 
+# Template-tournament decisiveness (runner-up chi2/dof minus winner's) above
+# which a non-Ia winner is treated as real enough to flag for classification.
+# Heuristic — the tournament types on sparse noisy LCs, so we act only when the
+# winner is clearly ahead. Tune once tournament-vs-spectrum stats accumulate.
+TEMPLATE_NONIA_MARGIN = 0.5
+
+
+def _template_flags_nonia(best, margin) -> bool:
+    """True when the tournament decisively prefers a non-Ia template — used as a
+    soft purity prior to flag needs_classification (NOT to change merit)."""
+    try:
+        return bool(best) and best != 'Ia' and float(margin) >= TEMPLATE_NONIA_MARGIN
+    except (TypeError, ValueError):
+        return False
+
+
 def enrich_finalist_typing(summary, fit_results):
     """Multi-type template tournament over the finalists (typing evidence).
 
@@ -2224,9 +2240,11 @@ def enrich_finalist_typing(summary, fit_results):
       template_margin     runner-up chi2/dof - winner's (decisiveness)
       template_peak_mjd   winner's synthesized peak epoch (non-Ia winners)
 
-    Evidence only: merit, phase and ranking are deliberately untouched —
-    non-Ia phase correction and an exotic rescue tier are the fit-loop
-    follow-on. Cost: ~3 extra ~1 s fits x ~30 finalists.
+    Merit, phase and ranking are deliberately untouched — but a decisive non-Ia
+    winner (margin >= TEMPLATE_NONIA_MARGIN) sets needs_classification=True as a
+    soft purity flag, so a likely non-Ia doesn't sit in the Ia queue unmarked.
+    Non-Ia phase correction and an exotic rescue tier are the fit-loop follow-on.
+    Cost: ~3 extra ~1 s fits x ~30 finalists.
     """
     if len(summary) == 0 or not HAS_SNCOSMO:
         return summary
@@ -2237,6 +2255,7 @@ def enrich_finalist_typing(summary, fit_results):
         summary[col] = np.nan
 
     n_run = 0
+    n_flagged = 0
     wins = {}
     for idx, row in summary.iterrows():
         did = row['diaObjectId']
@@ -2267,12 +2286,18 @@ def enrich_finalist_typing(summary, fit_results):
         summary.at[idx, 'template_margin'] = t['template_margin']
         if best != 'Ia':
             summary.at[idx, 'template_peak_mjd'] = t['template_peak_mjd']
+        # Soft purity flag: a decisive non-Ia winner is marked for spectral
+        # classification (the flag only — merit/ranking are untouched).
+        if _template_flags_nonia(best, t['template_margin']):
+            if 'needs_classification' in summary.columns:
+                summary.at[idx, 'needs_classification'] = True
+            n_flagged += 1
 
     non_ia = {k: v for k, v in wins.items() if k != 'Ia'}
     logger.info("Template tournament: %d/%d finalists fit; winners: %s%s",
                 n_run, len(summary),
                 ', '.join(f"{k}={v}" for k, v in sorted(wins.items())),
-                (' — non-Ia preferred: check typing before long exposures'
+                (' — non-Ia preferred: %d flagged needs_classification' % n_flagged
                  if non_ia else ''))
     return summary
 

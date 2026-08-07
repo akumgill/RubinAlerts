@@ -44,7 +44,9 @@ class Target:
     mag: float = float("nan")           # anticipated, at observation
     band: str = "r"                     # band `mag` is in
     redshift: float = float("nan")
-    exposure_minutes: float = float("nan")   # optional override
+    exposure_minutes: float = float("nan")   # total requested integration (min)
+    n_exposures: Optional[int] = None        # sub-exposure count, e.g. 3 x 600s
+    exposure_seconds: float = float("nan")   # seconds per sub-exposure (with n_exposures)
     valid_until: Optional[str] = None   # ISO date; drop after
     notes: str = ""
 

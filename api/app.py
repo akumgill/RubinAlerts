@@ -35,8 +35,20 @@ def _load_group_config() -> dict:
         try:
             return json.loads(raw)
         except Exception as e:
-            logger.error("GROUPS_JSON is not valid JSON (%s); using demo groups", e)
+            logger.error("GROUPS_JSON is not valid JSON: %s", e)
+            # fall through to the fail-closed / demo decision below
+    # No valid GROUPS_JSON. Fall back to the built-in demo groups ONLY in dev
+    # (no real session secret). In production — signalled by a real
+    # SESSION_SECRET — refuse to serve the shared queue on publicly-known demo
+    # credentials; fail closed so a forgotten env var can't silently expose it.
+    secret = os.environ.get("SESSION_SECRET")
+    if secret and secret != "dev-insecure-session-secret":
+        raise RuntimeError(
+            "GROUPS_JSON is unset or invalid but a production SESSION_SECRET is "
+            "set — refusing to fall back to public demo credentials. Set "
+            "GROUPS_JSON to the real program config.")
     from .seed import demo_group_config
+    logger.warning("GROUPS_JSON unset; using built-in demo groups (dev only)")
     return demo_group_config()
 
 
@@ -68,8 +80,11 @@ if os.environ.get("SEED_DEMO") == "1" and not svc.has_targets():
     except Exception as e:
         logger.exception("demo seed failed: %s", e)
 
+# Default the landing view to the instrument the demo is seeded on (LDSS3 —
+# the Villar list), so a first visitor sees a populated queue rather than an
+# empty LLAMAS plan. Overridable via env.
 DEFAULT_NIGHT = (os.environ.get("DEFAULT_DATE", "2026-08-13"),
-                 os.environ.get("DEFAULT_INSTRUMENT", "LLAMAS"))
+                 os.environ.get("DEFAULT_INSTRUMENT", "LDSS3"))
 
 # Warm the default-night dashboard cache in a background thread, so the first
 # request after a (re)start hits a warm cache instead of paying the full
@@ -88,8 +103,12 @@ if os.environ.get("WARM_CACHE", "1") == "1":
     threading.Thread(target=_warm_cache, daemon=True, name="cache-warm").start()
 
 app = FastAPI(title="MAGNETS Target-Submission API", version="0.3")
+# Secure (HTTPS-only) session cookies in production (Render terminates TLS);
+# off by default so plain-HTTP local dev / TestClient still round-trips the
+# cookie. render.yaml sets SECURE_COOKIES=1.
+_SECURE_COOKIES = os.environ.get("SECURE_COOKIES", "0") == "1"
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
-                   same_site="lax", https_only=False)
+                   same_site="lax", https_only=_SECURE_COOKIES)
 
 
 @app.get("/healthz")
@@ -142,8 +161,9 @@ def _guard(fn):
 # ---------------------------------------------------------------------------
 @app.post("/login")
 def login(request: Request, program: str = Form(...), password: str = Form(...)):
+    import secrets
     expected = PASSWORDS.get(program)
-    if expected is None or password != expected:
+    if expected is None or not secrets.compare_digest(str(password), str(expected)):
         raise HTTPException(401, "invalid program or password")
     request.session["program"] = program
     return {"ok": True, "program": program}
@@ -207,11 +227,11 @@ def plan_preview(request: Request, date: str, instrument: str = "LLAMAS",
 
 
 @app.get("/v1/dashboard")
-def dashboard(request: Request, instrument: str = "LLAMAS",
+def dashboard(request: Request, instrument: str = "LDSS3",
               date: str = "2026-08-13", authorization: str = Header(None)):
     """The full aggregate the web dashboard renders: plan + queue + per-target
-    airmass tracks + grid + program metadata. Defaults to the first post-storm
-    night (Aug-13 LLAMAS), which carries the live-ZTF Ia candidates."""
+    airmass tracks + grid + program metadata. Defaults to the seeded instrument
+    (LDSS3) so the landing view is populated rather than empty."""
     _, program = _identity(request, authorization)
     from .scheduler_bridge import dashboard_data
     return _guard(lambda: dashboard_data(svc, date, instrument,
@@ -219,7 +239,7 @@ def dashboard(request: Request, instrument: str = "LLAMAS",
 
 
 @app.get("/v1/plan/export")
-def export_plan(request: Request, instrument: str = "LLAMAS",
+def export_plan(request: Request, instrument: str = "LDSS3",
                 date: str = "2026-08-13", fmt: str = "catalog",
                 authorization: str = Header(None)):
     """Export the plan the way an observer uses it: fmt=catalog (the instrument

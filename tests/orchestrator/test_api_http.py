@@ -38,11 +38,17 @@ def test_add_in_queue_reprioritize_remove(client):
     assert client.get("/v1/queue").status_code == 401
     assert client.post("/v1/targets", json=[]).status_code == 401
 
+    # exposure is required (we don't auto-size a submitted target)
+    noexp = client.post("/v1/targets", headers=STUBBS, json=[
+        {"name": "noexp", "ra": 9.0, "dec": -5.0, "priority": "P1", "mag": 19.0}])
+    assert noexp.status_code == 200 and noexp.json()[0]["status"] == "error"
+    assert "exposure" in noexp.json()[0]["error"]
+
     # ADD three targets at different rungs of the 1-5 scale
     r = client.post("/v1/targets", headers=STUBBS, json=[
-        {"name": "hi", "ra": 10.0, "dec": -5.0, "priority": "P1", "instrument": "LLAMAS", "mag": 19.0},
-        {"name": "mid", "ra": 11.0, "dec": -5.0, "priority": "P3", "instrument": "LLAMAS", "mag": 19.0},
-        {"name": "low", "ra": 12.0, "dec": -5.0, "priority": "P5", "instrument": "LLAMAS", "mag": 19.0},
+        {"name": "hi", "ra": 10.0, "dec": -5.0, "priority": "P1", "instrument": "LLAMAS", "mag": 19.0, "exposure_minutes": 30},
+        {"name": "mid", "ra": 11.0, "dec": -5.0, "priority": "P3", "instrument": "LLAMAS", "mag": 19.0, "exposure_minutes": 30},
+        {"name": "low", "ra": 12.0, "dec": -5.0, "priority": "P5", "instrument": "LLAMAS", "mag": 19.0, "exposure_minutes": 30},
     ])
     assert r.status_code == 200
     results = r.json()
@@ -82,12 +88,12 @@ def test_multiprogram_shared_queue_deterministic(client):
     # both programs (no usage), so the outcome is fully determined by priority +
     # observability.
     assert client.post("/v1/targets", headers=STUBBS, json=[
-        {"name": "S-hi", "ra": 285.0, "dec": -30.0, "priority": "P1", "instrument": "LLAMAS", "mag": 19.0},
-        {"name": "S-lo", "ra": 290.0, "dec": -30.0, "priority": "P4", "instrument": "LLAMAS", "mag": 19.0},
+        {"name": "S-hi", "ra": 285.0, "dec": -30.0, "priority": "P1", "instrument": "LLAMAS", "mag": 19.0, "exposure_minutes": 30},
+        {"name": "S-lo", "ra": 290.0, "dec": -30.0, "priority": "P4", "instrument": "LLAMAS", "mag": 19.0, "exposure_minutes": 30},
     ]).status_code == 200
     assert client.post("/v1/targets", headers=UA, json=[
-        {"name": "U-hi", "ra": 295.0, "dec": -30.0, "priority": "P1", "instrument": "LLAMAS", "mag": 19.0},
-        {"name": "U-lo", "ra": 300.0, "dec": -30.0, "priority": "P3", "instrument": "LLAMAS", "mag": 19.0},
+        {"name": "U-hi", "ra": 295.0, "dec": -30.0, "priority": "P1", "instrument": "LLAMAS", "mag": 19.0, "exposure_minutes": 30},
+        {"name": "U-lo", "ra": 300.0, "dec": -30.0, "priority": "P3", "instrument": "LLAMAS", "mag": 19.0, "exposure_minutes": 30},
     ]).status_code == 200
 
     p = client.get("/v1/dashboard?date=2026-08-15&instrument=LLAMAS", headers=STUBBS).json()["plan"]

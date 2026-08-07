@@ -87,8 +87,9 @@
       <tr><td class="m">priority <span class="req">req</span></td><td>enum</td><td><code>P0</code> | <code>P1</code> … <code>P5</code> &mdash; see tiers below.</td></tr>
       <tr><td class="m">instrument</td><td>enum</td><td><code>LLAMAS</code> | <code>LDSS3</code> | <code>EITHER</code>. Default <code>LLAMAS</code>.</td></tr>
       <tr><td class="m">mag</td><td>float</td><td>Anticipated r-band mag. <b>Required</b> for a coords-only new source (used to size the exposure).</td></tr>
-      <tr><td class="m">redshift</td><td>float</td><td>Optional; improves the exposure estimate.</td></tr>
-      <tr><td class="m">exposure_minutes</td><td>float</td><td>Optional; overrides the estimate.</td></tr>
+      <tr><td class="m">redshift</td><td>float</td><td>Optional; carried for reference.</td></tr>
+      <tr><td class="m">exposure_minutes <span class="req">req</span></td><td>float</td><td>Total integration you want. <b>Required</b> (or give <code>n_exposures</code>+<code>exposure_seconds</code>). We size exposures only for our own pipeline Ia candidates &mdash; you set yours.</td></tr>
+      <tr><td class="m">n_exposures, exposure_seconds</td><td>int, float</td><td>Optional sub-exposure spec (e.g. 3&times;600&nbsp;s); sets the total and is carried into the observing sheet.</td></tr>
       <tr><td class="m">band</td><td>string</td><td>Optional; band of the quoted mag.</td></tr>
       <tr><td class="m">notes</td><td>string</td><td>Optional free text (classifier, provenance, caveats).</td></tr>
     </table>

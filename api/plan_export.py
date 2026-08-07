@@ -50,6 +50,24 @@ def _windows_by_name(dash: dict) -> dict:
     return {t["name"]: t for t in dash.get("targets", [])}
 
 
+def _exp_spec(t: dict, total_min) -> str:
+    """Sub-exposure breakdown 'N×Ys'. Uses the submitter's spec (n_exposures ×
+    exposure_seconds) when given — so a group's requested cadence isn't lost —
+    else a cosmic-ray split derived from the total exposure."""
+    n, sec = t.get("n_exposures"), t.get("exposure_seconds")
+    if n and sec:
+        return f"{int(n)}x{int(sec)}s"
+    try:
+        if total_min:
+            from core.snr_etc import split_exposure
+            ns, ss = split_exposure(float(total_min))
+            if ns:
+                return f"{ns}x{ss}s"
+    except Exception:
+        pass
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # 1. instrument catalog — what the observing GUI loads
 # ---------------------------------------------------------------------------
@@ -94,7 +112,7 @@ def observing_csv(dash: dict) -> str:
     # real freedom the observer works within (reorder as conditions dictate).
     w.writerow(["seq", "nominal_utc", "target", "program", "tier",
                 "observable_start", "observable_end", "best_utc", "min_airmass",
-                "when", "ra_deg", "dec_deg", "mag", "exp_min", "note"])
+                "when", "ra_deg", "dec_deg", "mag", "exp_min", "exp_spec", "note"])
     for i, e in enumerate(plan.get("timeline", []), 1):
         t = win.get(e.get("target", ""), {})
         w.writerow([i, e.get("utc", ""), e.get("target", ""), e.get("program", ""),
@@ -102,6 +120,7 @@ def observing_csv(dash: dict) -> str:
                     t.get("obs_best", ""), t.get("min_airmass", ""),
                     t.get("window_note", ""), e.get("ra", ""), e.get("dec", ""),
                     e.get("mag", ""), e.get("exp_min", ""),
+                    _exp_spec(t, e.get("exp_min")),
                     notes.get(e.get("target", ""), "")])
     return buf.getvalue()
 
@@ -137,6 +156,9 @@ def observing_text(dash: dict) -> str:
                 if t.get("obs_best") else "—")
         exp = "" if e.get("exp_min") is None else f"{int(e['exp_min'])}m"
         note = t.get("window_note", "")
+        spec = _exp_spec(t, e.get("exp_min"))     # N×Ys sub-exposure breakdown
+        if spec:
+            note = f"{spec} · {note}" if note else spec
         extra = notes.get(e.get("target", ""), "")
         if extra:
             note = f"{note} · {extra}" if note else extra

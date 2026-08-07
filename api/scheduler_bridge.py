@@ -56,7 +56,10 @@ def load_allocations_overview() -> dict:
                 "remaining": round(initial - used, 2),
                 "pi": row.get("pi", ""),
             }
-    return {"instruments": instruments, "programs": programs}
+    # ``tracked`` is False until a post-night reconciliation ledger populates
+    # ``used``. The dashboard uses it to label the bars honestly ("not tracked
+    # yet") instead of presenting a hardcoded 0 as a live figure.
+    return {"instruments": instruments, "programs": programs, "tracked": False}
 
 
 def load_nights() -> list:
@@ -422,6 +425,11 @@ def _target_row(t, airmass, plan, sched, over, estimate_exposure_minutes,
         "redshift": None if not math.isfinite(t.redshift) else round(t.redshift, 4),
         "resolved_from": t.resolved_from,
         "exp_est": round(estimate_exposure_minutes(t.mag, t.redshift)),
+        "exposure_minutes": None if not math.isfinite(t.exposure_minutes)
+                            else round(t.exposure_minutes, 1),
+        "n_exposures": t.n_exposures,
+        "exposure_seconds": None if not math.isfinite(t.exposure_seconds)
+                            else round(t.exposure_seconds),
         "sched_utc": sched_utc,
         "status": status,
         "instrument": t.instrument,
@@ -461,6 +469,11 @@ def _compute_dashboard(service, date, instrument, airmass_limit) -> dict:
         "id": t.id, "name": t.name, "program": t.program,
         "tier": t.priority, "instrument": t.instrument,
         "mag": None if not math.isfinite(t.mag) else round(t.mag, 1),
+        "exposure_minutes": None if not math.isfinite(t.exposure_minutes)
+                            else round(t.exposure_minutes, 1),
+        "n_exposures": t.n_exposures,
+        "exposure_seconds": None if not math.isfinite(t.exposure_seconds)
+                            else round(t.exposure_seconds),
         "status": ("scheduled" if t.name in sched
                    else "overflow" if t.name in over else "queued"),
     } for t in service.active()]

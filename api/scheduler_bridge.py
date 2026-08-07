@@ -418,14 +418,11 @@ def _target_row(t, airmass, plan, sched, over, estimate_exposure_minutes,
     }
 
 
-def dashboard_data(service, date: str, instrument: str = "LLAMAS",
-                   caller_program: Optional[str] = None,
-                   airmass_limit: float = 1.6) -> dict:
-    """The full aggregate the web dashboard renders in one request.
-
-    Runs the live plan preview, computes per-target airmass tracks, and bundles
-    them with the queue summary, program metadata and the caller's program.
-    """
+def _compute_dashboard(service, date, instrument, airmass_limit) -> dict:
+    """The expensive, caller-independent dashboard payload: the live plan
+    preview + per-target airmass tracks + queue/programs/nights/allocations.
+    Separated out so dashboard_data can cache it (this is the part that's slow —
+    the full scheduler run plus an AltAz transform per target over the grid)."""
     plan = service.plan_preview(date, None, instrument)
     queue = service.queue_summary()
     grid, targets = airmass_grid(service, plan, date, instrument, airmass_limit)
@@ -448,8 +445,41 @@ def dashboard_data(service, date: str, instrument: str = "LLAMAS",
         "grid": grid,
         "airmass_limit": airmass_limit,
         "programs": programs,
-        "caller_program": caller_program,
         "nights": load_nights(),
         "selected_night": {"date": date, "instrument": instrument},
         "allocations": load_allocations_overview(),
     }
+
+
+def dashboard_data(service, date: str, instrument: str = "LLAMAS",
+                   caller_program: Optional[str] = None,
+                   airmass_limit: float = 1.6) -> dict:
+    """The full aggregate the web dashboard renders in one request.
+
+    CACHED per ``(date, instrument, airmass_limit)`` on the service instance and
+    invalidated by the queue's revision counter, so the expensive plan+airmass
+    computation runs only when the queue actually changes — not on every page
+    load, refresh, or night switch. ``caller_program`` (which rows are "mine")
+    is applied cheaply on top of the cached, caller-independent payload.
+    """
+    cache = getattr(service, "_dash_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            service._dash_cache = cache
+        except Exception:
+            cache = None                      # can't stash a cache; recompute
+    rev = service.revision() if hasattr(service, "revision") else None
+    key = (date, instrument, round(airmass_limit, 3))
+
+    payload = None
+    if cache is not None and rev is not None:
+        hit = cache.get(key)
+        if hit is not None and hit[0] == rev:
+            payload = hit[1]
+    if payload is None:
+        payload = _compute_dashboard(service, date, instrument, airmass_limit)
+        if cache is not None and rev is not None:
+            cache[key] = (rev, payload)
+
+    return {**payload, "caller_program": caller_program}

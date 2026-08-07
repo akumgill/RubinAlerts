@@ -71,6 +71,7 @@ class TargetQueueService:
         self._resolver = resolver
         self._targets: list[Target] = []
         self._next_id = 1
+        self._revision = 0   # bumped on every write; keys the dashboard cache
         self._lock = threading.RLock()
 
         # ---- open / init the backing store ----
@@ -140,6 +141,7 @@ class TargetQueueService:
             self._conn.execute(
                 f"INSERT OR REPLACE INTO targets ({', '.join(_COLUMNS)}) "
                 f"VALUES ({placeholders})", vals)
+            self._revision += 1   # invalidates the dashboard cache
 
     def _load_targets(self) -> None:
         rows = self._conn.execute(
@@ -195,6 +197,11 @@ class TargetQueueService:
                     results.append({"status": "error", "error": str(e),
                                     "submitted": raw})
         return results
+
+    def revision(self) -> int:
+        """Monotonic write counter — bumped on every submit/patch/withdraw. Keys
+        the dashboard cache so it invalidates exactly when the queue changes."""
+        return self._revision
 
     def has_targets(self) -> bool:
         """True if any targets are stored (used to gate demo seeding)."""

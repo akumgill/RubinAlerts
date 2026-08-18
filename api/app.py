@@ -71,7 +71,10 @@ SESSION_SECRET = os.environ.get("SESSION_SECRET", "dev-insecure-session-secret")
 if SESSION_SECRET == "dev-insecure-session-secret":
     logger.warning("SESSION_SECRET is unset; using an insecure dev secret")
 
-svc = TargetQueueService(PROGRAMS, ALLOCATIONS, db_path=DB_PATH)
+from .resolver import resolve_name
+
+svc = TargetQueueService(PROGRAMS, ALLOCATIONS, db_path=DB_PATH,
+                         resolver=resolve_name)
 
 # Nightly SN Ia selection results (separate table in the same DB file; not
 # part of the dashboard cache).

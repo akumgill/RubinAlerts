@@ -29,6 +29,40 @@
   model as separate fake objects per range; add per-target airmass-range
   option (default: minimize). Chris sending the standards list + paper.
 
+### Transcript corrections & additions (vs the Flow summary)
+
+- **Setting/rising CAUTION:** Chris's guidance is prefer RISING/EASTERN targets
+  ("weight it in the direction of objects that are rising", "Look to the
+  east"). Akum's end-of-meeting recap said it BACKWARDS ("prioritize things
+  that are setting") and Chris's "precisely so" didn't catch it — trust the
+  earlier verbatim, not the recap.
+- **%-remaining tie-break is ALREADY IMPLEMENTED** (get_budget_factor is
+  fraction-of-phase-allocation tiers, not absolute hours). Optional refinement:
+  continuous factor instead of 3 tiers.
+- NEW from transcript: exposure should AUTO-POPULATE from anticipated mag
+  (tonight, not peak) on add-target; selection page needs one-click ENQUEUE
+  (the copy-paste flow is where the demo stumbled); duplicate target across
+  groups → split time evenly (manual for now); talk to the service observer
+  ("30 min = 3×10?") — he is "the number one user of this tool"; follow-up
+  demo with Chris after this iteration.
+
+### STAMPED TO-DO LIST (2026-08-18, priority order)
+
+1. Selection-page enqueue button (name/coords/mag-tonight/ETC-triplet/tier
+   prefill) — ~2-3h  [IMPLEMENTING]
+2. ETC pre-fill on manual add-target (resolved mag → editable suggestion)
+   — ~1h  [IMPLEMENTING]
+3. G downweight: typed-but-no-z 0.7 → 0.15 — minutes  [IMPLEMENTING]
+4. East-rising factor (hour angle at evening twilight) — ~1-2h  [IMPLEMENTING]
+5. Per-target airmass range + standards as fake objects per airmass bin
+   — ~half day  [IMPLEMENTING]
+6. FITS-header accounting dashboard — ~1-2 days — BLOCKED: where do FITS land?
+7. "Generate observing plan" button (batches 4-6, 3×N triplets, instrument
+   file) — ~1 day — BLOCKED: LLAMAS/LDSS3 file format (Rob Simcoe / LCO docs)
+8. Standards list ingestion — small — BLOCKED: paper/electronic table incoming
+9. Optional: continuous %-remaining budget factor — trivial
+10. Human: Rob Simcoe, service-observer chat, Villar-night trip, time card
+
 ### Enqueue bug FIXED (dry-run blocker)
 
 Root cause: `api/app.py` built TargetQueueService with **resolver=None** —

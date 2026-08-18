@@ -63,8 +63,12 @@
    section + observed-badges informing later ranking (cross-night memory).
    Only the FITS-header adapter waits on the real delivery location/dialect.
    ~1 day  [IMPLEMENTING as item F, after 1-5]
-7. "Generate observing plan" button (batches 4-6, 3×N triplets, instrument
-   file) — ~1 day — BLOCKED: LLAMAS/LDSS3 file format (Rob Simcoe / LCO docs)
+7. "Generate observing plan" button (batches 4-6, 3×N triplets) — UNBLOCKED:
+   2 of 3 output layers have REAL in-repo formats (ref/march_obs_run/
+   catalog.cat = genuine Magellan TCS catalog; ref/LDSS_ObsPlan_Generator/
+   example_targets.txt = plan-sheet convention with "3x900s" triplets); only
+   the LLAMAS instrument-macro dialect waits on Rob Simcoe, isolated behind a
+   provisional serializer. ~1 day  [IMPLEMENTING as item G, after F]
 8. Standards list ingestion — small — BLOCKED: paper/electronic table incoming
 9. Optional: continuous %-remaining budget factor — trivial
 10. Human: Rob Simcoe, service-observer chat, Villar-night trip, time card

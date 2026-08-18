@@ -12,7 +12,8 @@
 let DATA = null;        // {nights, persistence}
 let NIGHT_IX = 0;       // index into DATA.nights (0 = newest)
 let SHOW_ALL = false;
-let OPEN_IX = null;     // index (into the night's candidates) of the expanded row
+let OPEN_IXS = new Set();  // indices (into the night's candidates) of expanded rows
+                           // (multiple allowed, so two sources can be compared)
 const TOP_N = 20;
 
 // Photometry band -> CSS color variable (defined in selection.html for both
@@ -203,7 +204,7 @@ function selectNight(ix) {
   if (ix === NIGHT_IX) return;
   NIGHT_IX = ix;
   SHOW_ALL = false;
-  OPEN_IX = null;
+  OPEN_IXS.clear();
   renderNightPills();
   renderSummary();
   renderCandidates();
@@ -359,10 +360,11 @@ function lcSvg(c, n) {
 }
 
 // ---- "why it's ranked here": the score chain as mini bars -------------
-function scChainRow(label, val, caption, sub) {
+function scChainRow(sym, name, val, caption, sub) {
   const pct = val == null ? 0 : Math.max(1, Math.min(100, Math.round(val * 100)));
   return `<div class="sc-row">
-    <span class="lbl">${label}</span>
+    <span class="sym">${sym}</span>
+    <span class="lbl">${name}</span>
     <span class="val">${fmt(val, 2)}</span>
     <span class="track"><span class="fill" style="width:${pct}%"></span></span>
     <span class="cap">${caption}</span></div>` +
@@ -388,10 +390,10 @@ function scoreChain(c) {
   const hasScore = c.p_usable != null || c.v_z != null || c.score != null;
   if (!hasScore) {
     const rows = [
-      scChainRow("w_time", c.w_time, "Gaussian phase weight (days from peak)"),
-      scChainRow("w_mag", c.w_mag, "followable-magnitude window"),
-      scChainRow("w_prob", c.w_prob, "broker SN/Ia probability"),
-      scChainRow("w_salt", c.w_salt, "SALT2 Ia-template fit quality"),
+      scChainRow("w_time", "phase", c.w_time, "Gaussian phase weight (days from peak)"),
+      scChainRow("w_mag", "brightness", c.w_mag, "followable-magnitude window"),
+      scChainRow("w_prob", "P(Ia)", c.w_prob, "broker SN/Ia probability"),
+      scChainRow("w_salt", "fit quality", c.w_salt, "SALT2 Ia-template fit quality"),
     ].join("");
     return `<div><h4>Why it's ranked here</h4>
       <div class="lc-note" style="margin-bottom:.35rem">legacy merit ranking — this night predates the score</div>
@@ -406,11 +408,11 @@ function scoreChain(c) {
   const exp = c.exposure_minutes;
   const expBar = exp == null ? null : Math.min(1, 45 / Math.max(exp, 5));
   const rows = [
-    scChainRow("P usable Ia", c.p_usable, pCap, pSub),
-    scChainRow("V(z) sample", c.v_z, vCap),
-    scChainRow("G info gain", c.g_info, gCaption(c.g_info)),
-    scChainRow("U urgency", c.u_urgency, uCaption(c.u_urgency)),
-    exp != null ? scChainRow("÷ exposure", expBar,
+    scChainRow("P", "usable Ia", c.p_usable, pCap, pSub),
+    scChainRow("V(z)", "sample value", c.v_z, vCap),
+    scChainRow("G", "info gain", c.g_info, gCaption(c.g_info)),
+    scChainRow("U", "urgency", c.u_urgency, uCaption(c.u_urgency)),
+    exp != null ? scChainRow("÷", "exposure", expBar,
       `estimated ${Math.round(exp)} min on target — divides score into score/hr`) : "",
   ].join("");
   return `<div><h4>Why it's ranked here</h4><div class="scorechain">${rows}
@@ -496,7 +498,7 @@ function renderCandidates() {
       ? `<div class="meritbar"${factors}><span class="mv">${fmt(val, 2)}</span>
          <span class="track"><span class="fill" style="width:${pct}%"></span></span></div>`
       : "—";
-    const open = i === OPEN_IX;
+    const open = OPEN_IXS.has(i);
     return `<tr class="cand-row${open ? " open" : ""}" data-ix="${i}"
         title="click for the light curve and ranking breakdown">
       <td class="num">${i + 1}</td>
@@ -512,14 +514,14 @@ function renderCandidates() {
   }).join("") ||
     `<tr><td colspan="9" style="color:var(--faint)">no candidates for this night</td></tr>`;
 
-  // row click toggles the inline detail panel (one open at a time);
-  // clicks on links (TNS etc.) pass through untouched
+  // row click toggles the inline detail panel (several may stay open so
+  // sources can be compared); clicks on links (TNS etc.) pass through untouched
   $("candbody").onclick = (e) => {
     if (e.target.closest("a")) return;
     const tr = e.target.closest("tr.cand-row");
     if (!tr) return;
     const ix = +tr.dataset.ix;
-    OPEN_IX = OPEN_IX === ix ? null : ix;
+    if (OPEN_IXS.has(ix)) OPEN_IXS.delete(ix); else OPEN_IXS.add(ix);
     renderCandidates();
   };
 
@@ -531,7 +533,7 @@ function renderCandidates() {
       : `Show all ${cands.length} candidates`;
     btn.onclick = () => {
       SHOW_ALL = !SHOW_ALL;
-      if (!SHOW_ALL && OPEN_IX != null && OPEN_IX >= TOP_N) OPEN_IX = null;
+      if (!SHOW_ALL) OPEN_IXS.forEach((v) => { if (v >= TOP_N) OPEN_IXS.delete(v); });
       renderCandidates();
     };
   } else {

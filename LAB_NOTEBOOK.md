@@ -6,6 +6,84 @@ Automated SN Ia candidate identification pipeline for Rubin LSST Deep Drilling F
 
 ---
 
+## 2026-08-18 — Nightly run, Rubin-stream status, sampling-in-merit audit, Stubbs selection tab
+
+### Nightly run (MJD 61270 → `nights/wide/ut20260818/`)
+
+56 ranked candidates, all SALT2-fit (49 with chi2/dof < 2); 55/56 already on TNS,
+29 spec-classified (26 Ia); median z = 0.07; 4 nuclear flags. LLAMAS plan +
+accounting written (Stubbs 23.0h / Villar 16.0h remaining).
+
+### Rubin alert stream is DARK — all sources are ZTF
+
+All 56 finalists came via Fink-ZTF. Fink-LSST returned 3584 alerts but **0 pass
+the 30d freshness cut**: newest alert across all three tags is **MJD 61235 ≈
+2026-07-14** — the stream went quiet ~2 weeks *before* the "early–end Aug"
+downtime window in `ref/observing_nights_2026B.yaml`. Can't disambiguate Fink
+ingestion vs Rubin itself (no Fink-independent access per 2026-07-13 audit).
+ASK CHRIS: expected return date; December (prime DDF season, his Dec 15 night)
+is the run that really needs it.
+
+### Light-curve sampling is NOT in the merit — and w_salt anti-selects for it
+
+No merit factor measures sampling; only gate is >=5 pts SNR>5, >=2 bands.
+Tonight's #1/#2/#3 have 6/5/8 points and all take max w_salt=1.2 (SALT2 through
+~5 pts is near-interpolation, chi2/dof 0.14–0.33). Spearman(merit, n_points) =
+**−0.25**. Matches the Aug 7 review P-item. Nuance: sparse-now ≠ sparse-forever
+(young SNe accrete points), so don't naively reward n_points — it fights w_time.
+Proposed: persist `x1_err`/`c_err` (computed in `fit_salt` peak_fitting.py:588-93
+but dropped; only `salt_t0_err` saved), gate on t0_err ≲ 2d ("rise constrained"),
+make the chi2 bonus conditional on points/dof.
+
+### Meeting prep pointers
+
+Exposure-time state: `docs/design/program-questions-for-chris.md` (open knobs:
+target binned S/N, n_bin/R~200 sufficiency, max per-target exposure). DDF
+rationale: distances come from the photometric SALT2 fit — spectrum is only
+type+z, so spectra spent on poorly-sampled LCs are wasted for cosmology; ZTF
+covers this adequately only at z ≲ 0.15–0.2 and can't see southern DDFs.
+Dates (`ref/observing_nights_2026B.yaml`): next Sep 6/7 (LLAMAS halves, Yize);
+Chris: Dec 15 + Jan 12.
+
+### NEW RANKING (PI-approved): score = P × V(z) × G × U, ordered by score_rate
+
+Replaces merit_rate as the primary ordering (merit columns retained). P =
+w_prob × w_iaspec × w_lcq (new LC-quality from salt_c_err — x1/c errors now
+persisted); V(z) = inverse sample density per Δz=0.05 bin (ledger + community-
+saturation prior; supersedes orchestrator z_preference, now default-OFF); G =
+info gain (0.05 when spec-typed AND spec-z'd → "free sample"); U = deadline-
+shaped urgency in REST-frame days (fixes (1+z) bias; feeds orchestrator
+phase_weight). ÷T_exp via the July α=0.5 density decision. All constants in
+`ScoreConfig` (config.py), provisional pending Chris. Decision log:
+`docs/design/review-loop-log.md` 2026-08-18. Suite: 375 passed.
+
+**Effect (Aug 17 night):** 31/60 candidates are free-sample — half the ZTF-era
+queue was re-confirming community knowledge; top-8 now all unclassified ATs.
+Score~n_points Spearman −0.14 (merit was −0.19); sparse young objects pay the
+w_lcq 0.4 floor instead of collecting the w_salt bonus. v_z uniformly 0.08–0.15
+(low-z saturated per prior) — quantifies "the value starts when Rubin returns."
+
+### Backfill: 6 consistent nights (Aug 13–18) in the selection tab
+
+Reran MJD 61265–61270 under the new code (61265–69 flagged `backfilled` — fits
+use photometry/classifications as of TODAY, not the night; labeled in UI).
+65 persistent objects; stable top cohort all week (AT 2026xle rank 1 all six
+nights; AT 2026xcr 4–5; AT 2026wyf exactly 7 nightly). Caveat: shared
+present-day photometry makes backfilled persistence read more stable than live.
+
+### NEW: Stubbs-only "SN Ia target selection" web tab (uncommitted)
+
+Per-night ranked-candidate view + cross-night persistence (rank trails), gated
+to `SELECTION_PROGRAMS` (default CfA-Stubbs) at the API; nightly results
+uploaded via `scripts/upload_selection_night.py` (Render never sees `nights/`).
+Files: `api/selection.py`, endpoints in `api/app.py`, `web/selection.{html,js}`,
+tests in `tests/orchestrator/test_selection_api.py`. Suite: 361 passed, 4
+skipped. Seeded ut20260713/0813/0818 locally. Deploy: no migration; optionally
+set `SELECTION_PROGRAMS`; upload nightly with a real bearer key from GROUPS_JSON.
+Gotcha found: CSV `merit_rank` orders by merit_rate (merit/exposure), not merit.
+
+---
+
 ## 2026-04-18 — Phases 2-4: Time Accounting, Prioritizer, Integration
 
 ### Phase 2: Time Accounting & Prioritizer

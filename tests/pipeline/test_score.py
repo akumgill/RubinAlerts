@@ -13,12 +13,14 @@ import pytest
 
 from config import ScoreConfig
 from core.magellan_planning import (
+    compute_e_east,
     compute_g_info,
     compute_score_breakdown,
     compute_u_urgency,
     compute_v_z,
     compute_vz_bins,
     compute_w_lcq,
+    evening_twilight_lst_hours,
     ledger_redshift_counts,
 )
 
@@ -152,6 +154,70 @@ def test_ledger_counts_from_file_and_missing_file(tmp_path):
     # missing file -> zeros (prior only), no crash
     assert ledger_redshift_counts(str(tmp_path / "nope.json"),
                                   config=CFG).sum() == 0.0
+
+
+# ---------------------------------------------------------------------------
+# E — east-rising observability longevity (stamped #4)
+# ---------------------------------------------------------------------------
+
+def test_e_east_of_meridian_full_weight():
+    # LST 6 h; RA east of the meridian (larger RA = smaller HA) -> rising, 1.0
+    lst = 6.0
+    e = compute_e_east(np.array([6.0 * 15 + 30.0, 6.0 * 15 + 90.0]), lst, CFG)
+    assert np.allclose(e, 1.0)
+
+
+def test_e_meridian_and_western_taper_to_floor():
+    lst = 6.0
+    # ON the meridian (RA = LST): the ~0.9 shoulder
+    e_mer = compute_e_east(np.array([6.0 * 15]), lst, CFG)
+    assert e_mer[0] == pytest.approx(CFG.e_meridian)
+    # far west (HA >= taper span): floored, never zero
+    ha8 = np.array([(lst - 8.0) * 15])          # HA = +8 h
+    assert compute_e_east(ha8, lst, CFG)[0] == pytest.approx(CFG.e_floor)
+    # monotone non-increasing across the western taper
+    has = np.array([0.0, 1.5, 3.0, 4.5, 6.0])
+    e_seq = compute_e_east((lst - has) * 15, lst, CFG)
+    assert np.all(np.diff(e_seq) < 0) or np.all(np.diff(e_seq) <= 0)
+    assert e_seq[-1] == pytest.approx(CFG.e_floor)
+
+
+def test_e_wraps_hour_angle():
+    # LST 2 h, RA 20 h -> naive HA = -18 h, wrapped = +6 h -> deep west
+    e = compute_e_east(np.array([20.0 * 15]), 2.0, CFG)
+    assert e[0] == pytest.approx(CFG.e_floor, abs=1e-9)
+    # LST 22 h, RA 2 h -> naive HA = +20 h, wrapped = -4 h -> east, full weight
+    e2 = compute_e_east(np.array([2.0 * 15]), 22.0, CFG)
+    assert e2[0] == 1.0
+
+
+def test_e_unknown_coords_or_no_lst_neutral():
+    assert compute_e_east(np.array([np.nan]), 6.0, CFG)[0] == 1.0
+    assert np.allclose(compute_e_east(np.array([10.0, 200.0]), None, CFG), 1.0)
+
+
+def test_e_lst_ha_sanity_via_twilight():
+    # LST at evening twilight from LCO is finite and in [0, 24); a target AT
+    # that RA (= LST * 15 deg) sits on the meridian -> the e_meridian shoulder
+    lst = evening_twilight_lst_hours("2026-08-18")
+    assert lst is not None and 0.0 <= lst < 24.0
+    e = compute_e_east(np.array([lst * 15.0]), lst, CFG)
+    assert e[0] == pytest.approx(CFG.e_meridian)
+
+
+def test_score_breakdown_includes_e():
+    kw = dict(w_prob=np.array([0.9]), w_iaspec=np.array([1.0]),
+              salt_c_err=np.array([np.nan]), tns_type=[None],
+              z_source=["none"], delta_t=np.array([2.0]),
+              z=np.array([0.05]), config=CFG)
+    west = compute_score_breakdown(ra=np.array([(6.0 - 8.0) * 15]),
+                                   lst_hours=6.0, **kw)
+    east = compute_score_breakdown(ra=np.array([(6.0 + 4.0) * 15]),
+                                   lst_hours=6.0, **kw)
+    none = compute_score_breakdown(**kw)                 # no coords -> neutral
+    assert west['e_east'][0] == pytest.approx(CFG.e_floor)
+    assert east['e_east'][0] == 1.0 == none['e_east'][0]
+    assert west['score'][0] == pytest.approx(east['score'][0] * CFG.e_floor)
 
 
 # ---------------------------------------------------------------------------

@@ -116,8 +116,8 @@ def parse_candidate(row: dict) -> dict:
         "salt_z": _f(row, "salt_z"),
         "salt_z_railed": _b(row, "salt_z_railed"),
         "merit": _f(row, "merit"),
-        # PI-approved score (2026-08-18): score = P x V(z) x G x U, ranked by
-        # score_rate = score x (45min/exp)^alpha. Old CSVs lack these -> null.
+        # PI-approved score (2026-08-18): score = P x V(z) x G x U x E, ranked
+        # by score_rate = score x (45min/exp)^alpha. Old CSVs lack these -> null.
         "score": _f(row, "score"),
         "score_rate": _f(row, "score_rate"),
         "score_rank": _i(row, "score_rank"),
@@ -125,6 +125,7 @@ def parse_candidate(row: dict) -> dict:
         "v_z": _f(row, "v_z"),
         "g_info": _f(row, "g_info"),
         "u_urgency": _f(row, "u_urgency"),
+        "e_east": _f(row, "e_east"),
         "w_lcq": _f(row, "w_lcq"),
         "salt_c_err": _f(row, "salt_c_err"),
         "w_time": _f(row, "w_time"),

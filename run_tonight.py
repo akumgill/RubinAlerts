@@ -3703,7 +3703,7 @@ def main():
             summary['merit_exotic_rank'] = summary['merit_exotic_rate'].rank(
                 ascending=False, method='min', na_option='bottom').astype(int)
 
-        # --- PI-approved score (2026-08-18): score = P x V(z) x G x U ---
+        # --- PI-approved score (2026-08-18): score = P x V(z) x G x U x E ---
         # Computed ALONGSIDE merit (which stays in the CSV unchanged for
         # continuity); every factor persisted as its own column. score_rate
         # applies the SAME value-density factor as merit_rate, and the
@@ -3714,6 +3714,10 @@ def main():
                 summary['z_best'] if 'z_best' in summary.columns
                 else summary.get('redshift'), errors='coerce')
             ledger_counts = ledger_redshift_counts(SCORE_CONFIG.ledger_path)
+            # E factor (stamped #4): ONE LST computation for the night, then
+            # a vectorized hour-angle map per target. None -> E stays neutral.
+            from core.magellan_planning import evening_twilight_lst_hours
+            lst_hours = evening_twilight_lst_hours(obs_date)
             sb = compute_score_breakdown(
                 w_prob=pd.to_numeric(summary.get('w_prob'), errors='coerce'),
                 w_iaspec=pd.to_numeric(summary.get('w_iaspec'), errors='coerce'),
@@ -3721,9 +3725,11 @@ def main():
                 tns_type=summary.get('tns_type'),
                 z_source=summary.get('z_source'),
                 delta_t=pd.to_numeric(summary.get('delta_t'), errors='coerce'),
-                z=z_score, ledger_counts=ledger_counts)
+                z=z_score, ledger_counts=ledger_counts,
+                ra=pd.to_numeric(summary.get('ra'), errors='coerce'),
+                lst_hours=lst_hours)
             for col in ('score', 'p_usable', 'v_z', 'g_info', 'u_urgency',
-                        'w_lcq'):
+                        'w_lcq', 'e_east'):
                 summary[col] = sb[col]
             summary['score_rate'] = summary['score'] * density
             s = summary['score_rate']

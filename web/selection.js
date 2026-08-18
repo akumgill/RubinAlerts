@@ -388,6 +388,13 @@ function uCaption(u) {
   return "well past peak — urgency nearly gone";
 }
 
+function eCaption(e) {
+  if (e == null) return "";
+  if (e >= 0.95) return "rising in the east — two months of light curve ahead";
+  if (e >= 0.6) return "near the meridian at twilight — decent light-curve runway";
+  return "setting in the west — light curve about to be cut off by the sun";
+}
+
 function scoreChain(c) {
   const hasScore = c.p_usable != null || c.v_z != null || c.score != null;
   if (!hasScore) {
@@ -414,6 +421,7 @@ function scoreChain(c) {
     scChainRow("V(z)", "sample value", c.v_z, vCap),
     scChainRow("G", "info gain", c.g_info, gCaption(c.g_info)),
     scChainRow("U", "urgency", c.u_urgency, uCaption(c.u_urgency)),
+    c.e_east != null ? scChainRow("E", "eastern sky", c.e_east, eCaption(c.e_east)) : "",
     exp != null ? scChainRow("÷", "exposure", expBar,
       `estimated ${Math.round(exp)} min on target — divides score into score/hr`) : "",
   ].join("");
@@ -498,7 +506,7 @@ function renderCandidates() {
     const pct = val != null ? Math.max(1, Math.round(100 * val / maxVal)) : 0;
     // factor breakdown tooltip on the score cell (P/V/G/U + w_lcq)
     const factors = useScore && (c.p_usable != null || c.v_z != null)
-      ? ` title="score = P×V×G×U · P=${fmt(c.p_usable, 2)} V=${fmt(c.v_z, 2)} G=${fmt(c.g_info, 2)} U=${fmt(c.u_urgency, 2)}${c.w_lcq != null ? ` (w_lcq=${fmt(c.w_lcq, 2)})` : ""}${c.score != null ? ` → score=${fmt(c.score, 2)}` : ""}"`
+      ? ` title="score = P×V×G×U×E · P=${fmt(c.p_usable, 2)} V=${fmt(c.v_z, 2)} G=${fmt(c.g_info, 2)} U=${fmt(c.u_urgency, 2)}${c.e_east != null ? ` E=${fmt(c.e_east, 2)}` : ""}${c.w_lcq != null ? ` (w_lcq=${fmt(c.w_lcq, 2)})` : ""}${c.score != null ? ` → score=${fmt(c.score, 2)}` : ""}"`
       : "";
     const meritCell = val != null
       ? `<div class="meritbar"${factors}><span class="mv">${fmt(val, 2)}</span>

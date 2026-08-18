@@ -113,6 +113,20 @@ class ScoreConfig:
     g_z_only: float = 0.9           # spec-z but untyped: type is the gain
     g_neither: float = 1.0
 
+    # --- E: east-rising observability-longevity factor (stamped #4) ---
+    # A spectrum is only worth a slot if the POST-spectrum photometric light
+    # curve stays gettable: an eastern (rising) target can be followed for
+    # ~2 more months; a western (setting) one is about to be truncated by the
+    # sun, wasting the slot. Weight from the hour angle at evening twilight:
+    #   HA <= 0 (east of meridian, rising)          -> 1.0
+    #   HA = 0 .. e_west_taper_hours (setting side) -> half-cosine taper
+    #        e_meridian -> e_floor: E = floor + (mer - floor) * cos(pi/2 * HA/taper)
+    #   HA >= e_west_taper_hours                    -> e_floor
+    # Unknown coords / no twilight LST -> neutral 1.0. All provisional.
+    e_meridian: float = 0.9         # weight when transiting at twilight
+    e_floor: float = 0.3            # deep-west floor (never a hard veto)
+    e_west_taper_hours: float = 6.0 # HA span of the meridian->floor taper
+
     # --- U: urgency, deadline-shaped in rest-frame days past peak ---
     # p = delta_t / (1 + z) (rest-frame; observer-frame when z unknown).
     # U = 1.0 for p <= u_flat_rest_days (including all pre-peak);

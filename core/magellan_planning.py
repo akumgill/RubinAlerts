@@ -700,19 +700,72 @@ def compute_v_z(z, ledger_counts=None, config=None):
     return np.where(known, v, neutral)
 
 
+def evening_twilight_lst_hours(obs_date, site=LAS_CAMPANAS):
+    """Apparent local sidereal time (hours) at evening nautical twilight.
+
+    ONE cheap computation per night — feeds compute_e_east for every target.
+    Returns None when twilight can't be computed (polar day / bad date), in
+    which case the E factor stays neutral.
+    """
+    try:
+        evening, _ = _get_twilight_times(obs_date, site=site)
+        if evening is None:
+            return None
+        lst = evening.sidereal_time('apparent',
+                                    longitude=site.lon)
+        return float(lst.hourangle)
+    except Exception as e:
+        logger.warning("E factor: evening-twilight LST failed for %s (%s); "
+                       "east-rising factor stays neutral", obs_date, e)
+        return None
+
+
+def compute_e_east(ra_deg, lst_hours, config=None):
+    """East-rising observability-longevity factor E (stamped #4, 2026-08-18).
+
+    Prefer targets in the EASTERN half of the sky at the start of the night:
+    their post-spectrum photometric light curve stays gettable for ~2 more
+    months, while a western (setting) target's LC is about to be truncated by
+    the sun — making the spectrum a wasted slot.
+
+    HA = LST(evening twilight) - RA, wrapped to [-12 h, +12 h):
+      HA <= 0 (east, rising)      -> 1.0
+      0 < HA < e_west_taper_hours -> half-cosine taper from e_meridian (~0.9
+                                     at transit) down to e_floor
+      HA >= e_west_taper_hours    -> e_floor
+    (The small 1.0 -> e_meridian step AT the meridian is deliberate: crossing
+    the meridian is exactly when the remaining-visibility clock starts.)
+    Unknown coords or lst_hours=None -> neutral 1.0.
+    """
+    cfg = config or _score_config()
+    ra_deg = np.asarray(ra_deg, dtype=float)
+    if lst_hours is None:
+        return np.ones_like(ra_deg)
+    ha = (float(lst_hours) - ra_deg / 15.0 + 12.0) % 24.0 - 12.0  # [-12, 12)
+    frac = np.clip(ha / cfg.e_west_taper_hours, 0.0, 1.0)
+    west = cfg.e_floor + (cfg.e_meridian - cfg.e_floor) * np.cos(
+        np.pi / 2.0 * frac)
+    e = np.where(ha < 0.0, 1.0, west)   # HA = 0 exactly -> the e_meridian shoulder
+    return np.where(np.isfinite(ra_deg), e, 1.0)
+
+
 def compute_score_breakdown(w_prob, w_iaspec, salt_c_err, tns_type, z_source,
-                            delta_t, z, ledger_counts=None, config=None):
+                            delta_t, z, ledger_counts=None, config=None,
+                            ra=None, lst_hours=None):
     """The PI-approved score (2026-08-18) with every factor exposed.
 
-    score = P x V(z) x G x U
+    score = P x V(z) x G x U x E
       P = w_prob x w_iaspec x w_lcq   (usable cosmology Ia)
       V = sample-density value of the candidate's Delta-z bin
       G = information gain (spec-type / spec-z already known?)
       U = rest-frame deadline urgency
+      E = east-rising observability longevity (stamped #4): pass ``ra`` and
+          the night's ``lst_hours`` (evening_twilight_lst_hours) to enable;
+          omitted -> neutral 1.0
 
     Returns dict with 'score', 'p_usable', 'v_z', 'g_info', 'u_urgency',
-    'w_lcq' (all arrays). NaN w_prob/w_iaspec/delta_t propagate to NaN score,
-    matching the merit convention for unrankable candidates.
+    'w_lcq', 'e_east' (all arrays). NaN w_prob/w_iaspec/delta_t propagate to
+    NaN score, matching the merit convention for unrankable candidates.
     """
     cfg = config or _score_config()
     w_prob = np.asarray(w_prob, dtype=float)
@@ -722,7 +775,11 @@ def compute_score_breakdown(w_prob, w_iaspec, salt_c_err, tns_type, z_source,
     v_z = compute_v_z(z, ledger_counts, cfg)
     g_info = compute_g_info(tns_type, z_source, cfg)
     u_urgency = compute_u_urgency(delta_t, z, cfg)
-    score = p_usable * v_z * g_info * u_urgency
+    if ra is not None:
+        e_east = compute_e_east(np.asarray(ra, dtype=float), lst_hours, cfg)
+    else:
+        e_east = np.ones_like(w_prob)
+    score = p_usable * v_z * g_info * u_urgency * e_east
     return {
         'score': score,
         'p_usable': p_usable,
@@ -730,6 +787,7 @@ def compute_score_breakdown(w_prob, w_iaspec, salt_c_err, tns_type, z_source,
         'g_info': g_info,
         'u_urgency': u_urgency,
         'w_lcq': w_lcq,
+        'e_east': e_east,
     }
 
 

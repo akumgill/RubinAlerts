@@ -21,6 +21,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .service import TargetQueueService, AuthError, NotFound
 from .selection import SelectionStore, compute_persistence, MAX_PAYLOAD_BYTES
+from .observations import ObservationStore, normalize_night
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,10 @@ svc = TargetQueueService(PROGRAMS, ALLOCATIONS, db_path=DB_PATH,
 # Nightly SN Ia selection results (separate table in the same DB file; not
 # part of the dashboard cache).
 selection_store = SelectionStore(db_path=DB_PATH)
+
+# Ingested observations (what was actually shot on sky) + their per-program
+# time charges. Same DB file; separate tables (see api/observations.py).
+observation_store = ObservationStore(db_path=DB_PATH)
 
 # Programs allowed to READ the selection view (uploads only need a valid
 # identity — the pipeline posts with its bearer key).
@@ -283,8 +288,13 @@ def dashboard(request: Request, instrument: str = "LDSS3",
     (LDSS3) so the landing view is populated rather than empty."""
     _, program = _identity(request, authorization)
     from .scheduler_bridge import dashboard_data
-    return _guard(lambda: dashboard_data(svc, date, instrument,
+    dash = _guard(lambda: dashboard_data(svc, date, instrument,
                                          caller_program=program))
+    # burndown: fold ingested observed time into `used` OUTSIDE the cache
+    # (shallow copy so the cached payload itself is never mutated)
+    dash = dict(dash)
+    dash["allocations"] = _fold_observed_time(dash.get("allocations"))
+    return dash
 
 
 @app.get("/v1/plan/export")
@@ -341,6 +351,75 @@ def selection(request: Request, limit_nights: int = 10,
                  f"your program ({program}) does not have access")
     nights = _guard(lambda: selection_store.fetch_nights(limit_nights))
     return {"nights": nights, "persistence": compute_persistence(nights)}
+
+
+# ---------------------------------------------------------------------------
+# Observation ingestion + observed repository (item F). The FITS source is
+# mocked for now: scripts/ingest_fits_night.py adapts headers into canonical
+# records and POSTs them here; the server owns association + accounting.
+# ---------------------------------------------------------------------------
+@app.post("/v1/observations")
+def ingest_observations(request: Request, payload: dict = Body(...),
+                        authorization: str = Header(None)):
+    """Ingest a night's canonical observation records. The server associates
+    each record to the queue (pointing within 1 arcmin, airmass-bin
+    disambiguation for standards, name fallback) and records per-program time
+    charges (even split for shared coordinates; idempotent by filename)."""
+    _identity(request, authorization)
+    records = payload.get("observations") or []
+    if not isinstance(records, list) or not records:
+        raise HTTPException(422, "body must be {observations: [record, ...]}")
+    if len(records) > 1000:
+        raise HTTPException(422, "too many records in one batch (max 1000)")
+    results = observation_store.ingest(svc._targets, records)
+    n_assoc = sum(1 for r in results
+                  if r.get("assoc_method") in ("pointing", "name"))
+    return {"results": results, "n_records": len(results),
+            "n_associated": n_assoc,
+            "n_unassociated": sum(1 for r in results
+                                  if r.get("assoc_method") == "unassociated")}
+
+
+@app.get("/v1/observations")
+def observations(request: Request, night: str = None,
+                 authorization: str = Header(None)):
+    """With ?night=YYYY-MM-DD (or utYYYYMMDD): that night's observation rows.
+    Without: the compact observed-pointings list + per-target latest-night
+    map, for 'observed' badges on the dashboard/selection pages."""
+    _identity(request, authorization)
+    if night:
+        return {"night_stamp": normalize_night(night),
+                "observations": observation_store.night_rows(night)}
+    return {"observed_coords": observation_store.observed_coords(),
+            "observed_targets": observation_store.observed_target_ids()}
+
+
+def _fold_observed_time(alloc: dict) -> dict:
+    """Fold ingested observation charges into the allocations overview's
+    'used' (the static YAML overview carries used=0 + tracked=False until
+    real observations flow in). Runs per request — charges are cheap to read
+    and must not be frozen into the dashboard cache."""
+    used = observation_store.used_hours_by_program()
+    if not alloc or not used:
+        return alloc
+    import copy
+    alloc = copy.deepcopy(alloc)
+    tracked = False
+    for prog, by_inst in used.items():
+        rows = (alloc.get("programs") or {}).get(prog)
+        if not rows:
+            logger.debug("observed time for %r matches no allocation row", prog)
+            continue
+        for inst, hours in by_inst.items():
+            d = rows.get(inst)
+            if not d:
+                continue
+            d["used"] = round(d.get("used", 0.0) + hours, 2)
+            d["remaining"] = round(d["initial"] - d["used"], 2)
+            tracked = True
+    if tracked:
+        alloc["tracked"] = True
+    return alloc
 
 
 # ---------------------------------------------------------------------------

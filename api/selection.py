@@ -21,8 +21,12 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 NIGHT_STAMP_RE = re.compile(r"^ut\d{8}$")
-MAX_CANDIDATES = 200          # per-night row cap enforced at ingest
-MAX_PAYLOAD_BYTES = 1_000_000  # ~1 MB serialized-payload cap
+MAX_CANDIDATES = 200           # per-night row cap enforced at ingest
+# Serialized-payload cap. Raised 1 MB -> 2.5 MB (2026-08-18) when compact
+# per-candidate light curves (`lc` rows, <=150 points) joined the payload:
+# a full night with lc measures ~200-400 KB, so 2.5 MB keeps generous headroom
+# while still bounding a runaway upload.
+MAX_PAYLOAD_BYTES = 2_500_000
 
 
 class SelectionStore:

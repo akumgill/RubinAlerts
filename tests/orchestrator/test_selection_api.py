@@ -71,7 +71,10 @@ def test_read_allowlist(client):
 
 
 def test_roundtrip_ingest_read(client):
-    cands = [_cand(0, tns_name="SN 2026xbx", tns_type="SN Ia"), _cand(1)]
+    # candidate 0 carries a compact light curve ([mjd, mag, magerr, band] rows)
+    lc = [[61265.1234, 19.512, 0.051, "g"], [61266.4321, 19.301, None, "r"],
+          [61268.9876, 19.105, 0.032, "r"]]
+    cands = [_cand(0, tns_name="SN 2026xbx", tns_type="SN Ia", lc=lc), _cand(1)]
     up = client.post("/v1/selection/nights", headers=STUBBS,
                      json=_night("ut20260818", 61270.0, cands))
     assert up.status_code == 200
@@ -84,6 +87,8 @@ def test_roundtrip_ingest_read(client):
     assert night["mjd"] == 61270.0
     assert night["summary"]["n_candidates"] == 2
     assert night["candidates"][0]["tns_name"] == "SN 2026xbx"
+    assert night["candidates"][0]["lc"] == lc      # photometry rides through
+    assert "lc" not in night["candidates"][1]      # omitted stays omitted
     assert night["candidates"][1]["ztf_oid"] == "ZTF26aaaaa01"
 
     # re-upload the same stamp upserts (no duplicate night)
@@ -105,10 +110,15 @@ def test_ingest_validation(client):
                     json=_night("ut20260818", 61270.0,
                                 [{"diaObjectId": str(i)} for i in range(201)]))
     assert r.status_code == 422
-    # oversized payload -> 413
-    fat = [{"diaObjectId": str(i), "notes": "x" * 9000} for i in range(150)]
+    # payload cap is 2.5 MB (raised from 1 MB when lc photometry joined the
+    # payload): just under passes, just over is 413
+    under = [{"diaObjectId": str(i), "notes": "x" * 15000} for i in range(150)]
     r = client.post("/v1/selection/nights", headers=STUBBS,
-                    json=_night("ut20260818", 61270.0, fat))
+                    json=_night("ut20260818", 61270.0, under))  # ~2.3 MB
+    assert r.status_code == 200
+    fat = [{"diaObjectId": str(i), "notes": "x" * 18000} for i in range(150)]
+    r = client.post("/v1/selection/nights", headers=STUBBS,
+                    json=_night("ut20260818", 61270.0, fat))    # ~2.7 MB
     assert r.status_code == 413
 
 

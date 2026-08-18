@@ -12,7 +12,15 @@
 let DATA = null;        // {nights, persistence}
 let NIGHT_IX = 0;       // index into DATA.nights (0 = newest)
 let SHOW_ALL = false;
+let OPEN_IX = null;     // index (into the night's candidates) of the expanded row
 const TOP_N = 20;
+
+// Photometry band -> CSS color variable (defined in selection.html for both
+// themes): ZTF g/r, Rubin/LSST ugrizy, ATLAS c/o; anything else neutral.
+const BAND_COLORS = { u: "var(--band-u)", g: "var(--band-g)", r: "var(--band-r)",
+                      i: "var(--band-i)", z: "var(--band-z)", y: "var(--band-y)",
+                      c: "var(--band-c)", o: "var(--band-o)" };
+const bandColor = (b) => BAND_COLORS[String(b || "").toLowerCase()] || "var(--slate)";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) =>
@@ -195,6 +203,7 @@ function selectNight(ix) {
   if (ix === NIGHT_IX) return;
   NIGHT_IX = ix;
   SHOW_ALL = false;
+  OPEN_IX = null;
   renderNightPills();
   renderSummary();
   renderCandidates();
@@ -235,15 +244,230 @@ function renderSummary() {
     : cands.filter((c) => c.tns_type).length;
   const specIa = s.n_spec_ia != null ? s.n_spec_ia
     : cands.filter((c) => c.tns_type === "SN Ia").length;
-  $("nightsummary").innerHTML = [
+  // time cost of the ranking's head: sum exposure over the top-10 ranked rows
+  const expTop = cands.slice(0, 10)
+    .map((c) => c.exposure_minutes).filter((e) => e != null && isFinite(e));
+  const stats = [
     [s.n_candidates != null ? s.n_candidates : cands.length, "candidates"],
     [ztf, "seen by ZTF"],
     [rubin, "seen by Rubin"],
     [`${specIa} / ${spec}`, "spec-Ia / spec-classified"],
     [s.median_z != null ? fmt(s.median_z, 3) : "—", "median z"],
     [s.median_n_points != null ? s.median_n_points : "—", "median LC points"],
-  ].map(([v, l]) => `<div class="stat"><span class="v">${esc(v)}</span><span class="l">${esc(l)}</span></div>`).join("")
+  ];
+  if (expTop.length) {
+    stats.push([`≈ ${(expTop.reduce((a, b) => a + b, 0) / 60).toFixed(1)} h`,
+                "top-10 exposure"]);
+  }
+  $("nightsummary").innerHTML = stats
+    .map(([v, l]) => `<div class="stat"><span class="v">${esc(v)}</span><span class="l">${esc(l)}</span></div>`).join("")
     + (s.backfilled ? '<div class="stat" title="Retrospective re-run: fits use photometry and classifications as of upload time, not the night itself"><span class="v">↺</span><span class="l">backfilled</span></div>' : "");
+}
+
+// ===================================================================
+// Candidate detail panel (row click): light curve + why-ranked + facts
+// ===================================================================
+
+// ---- light curve SVG (dependency-free, both-theme-safe) ---------------
+function lcSvg(c, n) {
+  const lc = c.lc || [];
+  if (!lc.length) {
+    return '<div class="lc-note">no photometry uploaded for this night</div>';
+  }
+  const nightMjd = (n && n.mjd != null) ? n.mjd
+    : Math.max(...lc.map((p) => p[0]));         // fallback: last point
+  const xs = lc.map((p) => p[0] - nightMjd);
+  const mags = lc.map((p) => p[1]);
+  const peakX = c.peak_mjd != null ? c.peak_mjd - nightMjd : null;
+
+  let xmin = Math.min(...xs, peakX != null ? peakX : 0, 0);
+  let xmax = Math.max(...xs, 0);
+  const xpad = Math.max(1.5, (xmax - xmin) * 0.04);
+  xmin -= xpad; xmax += xpad;
+  let magMin = Math.min(...mags);               // brightest
+  let magMax = Math.max(...mags);               // faintest
+  if (c.peak_mag != null) magMin = Math.min(magMin, c.peak_mag);
+  lc.forEach((p) => { if (p[2] != null) {
+    magMin = Math.min(magMin, p[1] - p[2]); magMax = Math.max(magMax, p[1] + p[2]); } });
+  magMin -= 0.25; magMax += 0.25;
+
+  const W = 640, H = 260, ML = 42, MR = 14, MT = 12, MB = 34;
+  const PW = W - ML - MR, PH = H - MT - MB;
+  const ax = (x) => ML + (x - xmin) / (xmax - xmin) * PW;
+  // magnitude axis INVERTED: brighter (smaller mag) at the top
+  const ay = (m) => MT + (m - magMin) / (magMax - magMin) * PH;
+
+  const axisFont = 'font:.6rem var(--mono);fill:var(--faint)';
+  let s = `<svg class="lc-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet"
+    role="img" aria-label="light curve, magnitude vs days before the night">`;
+
+  // y gridlines at ~4 round magnitudes
+  const mstep = (magMax - magMin) > 3 ? 1.0 : 0.5;
+  for (let m = Math.ceil(magMin / mstep) * mstep; m <= magMax; m += mstep) {
+    s += `<line x1="${ML}" y1="${ay(m).toFixed(1)}" x2="${W - MR}" y2="${ay(m).toFixed(1)}"
+      stroke="var(--hair2)"/>` +
+      `<text x="${ML - 4}" y="${(ay(m) + 2.5).toFixed(1)}" text-anchor="end" style="${axisFont}">${m.toFixed(1)}</text>`;
+  }
+  // x ticks: round day steps, labeled as |days| under "days before night"
+  const span = xmax - xmin;
+  const dstep = span > 120 ? 30 : span > 60 ? 20 : span > 25 ? 10 : 5;
+  for (let d = Math.ceil(xmin / dstep) * dstep; d <= xmax; d += dstep) {
+    s += `<line x1="${ax(d).toFixed(1)}" y1="${MT + PH}" x2="${ax(d).toFixed(1)}" y2="${MT + PH + 4}"
+      stroke="var(--faint)"/>` +
+      `<text x="${ax(d).toFixed(1)}" y="${H - 18}" text-anchor="middle" style="${axisFont}">${Math.abs(d)}</text>`;
+  }
+  s += `<text x="${ML + PW / 2}" y="${H - 5}" text-anchor="middle" style="${axisFont}">days before night</text>`;
+  s += `<text x="12" y="${MT + PH / 2}" text-anchor="middle" style="${axisFont}"
+    transform="rotate(-90 12 ${MT + PH / 2})">mag</text>`;
+
+  // overlays: night (x=0), peak epoch, peak magnitude
+  s += `<line x1="${ax(0).toFixed(1)}" y1="${MT}" x2="${ax(0).toFixed(1)}" y2="${MT + PH}"
+    stroke="var(--ink)" stroke-width="1.1" opacity=".55"/>` +
+    `<text x="${(ax(0) + 3).toFixed(1)}" y="${MT + 10}" style="${axisFont}">night</text>`;
+  if (peakX != null && peakX >= xmin && peakX <= xmax) {
+    s += `<line x1="${ax(peakX).toFixed(1)}" y1="${MT}" x2="${ax(peakX).toFixed(1)}" y2="${MT + PH}"
+      stroke="var(--copper)" stroke-dasharray="4 3" stroke-width="1.1"/>` +
+      `<text x="${(ax(peakX) + 3).toFixed(1)}" y="${MT + 22}" style="font:.6rem var(--mono);fill:var(--copper)">peak</text>`;
+  }
+  if (c.peak_mag != null) {
+    s += `<line x1="${ML}" y1="${ay(c.peak_mag).toFixed(1)}" x2="${W - MR}" y2="${ay(c.peak_mag).toFixed(1)}"
+      stroke="var(--copper)" stroke-dasharray="2 4" opacity=".6"/>`;
+  }
+
+  // points + error bars, colored by band
+  lc.forEach((p) => {
+    const [mjd, mag, err, band] = p;
+    const x = ax(mjd - nightMjd).toFixed(1), col = bandColor(band);
+    if (err != null) {
+      s += `<line x1="${x}" y1="${ay(mag - err).toFixed(1)}" x2="${x}" y2="${ay(mag + err).toFixed(1)}"
+        stroke="${col}" stroke-width="1" opacity=".6"/>`;
+    }
+    s += `<circle cx="${x}" cy="${ay(mag).toFixed(1)}" r="3" fill="${col}" opacity=".85">
+      <title>${esc(band)} ${mag.toFixed(2)}${err != null ? " ± " + err.toFixed(2) : ""} · MJD ${mjd.toFixed(2)}</title></circle>`;
+  });
+  s += "</svg>";
+
+  // compact legend: only the bands present in THIS candidate's data
+  const present = [...new Set(lc.map((p) => String(p[3])))];
+  const order = ["u", "g", "r", "i", "z", "y", "c", "o"];
+  present.sort((a, b) => (order.indexOf(a) + 99 * (order.indexOf(a) < 0)) -
+                         (order.indexOf(b) + 99 * (order.indexOf(b) < 0)));
+  const legend = `<div class="lc-legend">` + present.map((b) =>
+    `<span><span class="sw" style="background:${bandColor(b)}"></span>${esc(b)}</span>`).join("") +
+    `<span>${lc.length} points</span></div>`;
+  return `<div class="lcwrap">${s}${legend}</div>`;
+}
+
+// ---- "why it's ranked here": the score chain as mini bars -------------
+function scChainRow(label, val, caption, sub) {
+  const pct = val == null ? 0 : Math.max(1, Math.min(100, Math.round(val * 100)));
+  return `<div class="sc-row">
+    <span class="lbl">${label}</span>
+    <span class="val">${fmt(val, 2)}</span>
+    <span class="track"><span class="fill" style="width:${pct}%"></span></span>
+    <span class="cap">${caption}</span></div>` +
+    (sub ? `<div class="sc-sub">${sub}</div>` : "");
+}
+
+function gCaption(g) {
+  if (g == null) return "";
+  if (g <= 0.1) return "already spec-typed + spec-z'd — a spectrum adds little";
+  if (g <= 0.75) return "spec-typed but no spec-z — the redshift is the gain";
+  if (g <= 0.95) return "spec-z known but untyped — the type is the gain";
+  return "no spectroscopic type or redshift yet — full information gain";
+}
+
+function uCaption(u) {
+  if (u == null) return "";
+  if (u >= 0.9) return "at/near peak — window open";
+  if (u >= 0.3) return "past peak — window closing";
+  return "well past peak — urgency nearly gone";
+}
+
+function scoreChain(c) {
+  const hasScore = c.p_usable != null || c.v_z != null || c.score != null;
+  if (!hasScore) {
+    const rows = [
+      scChainRow("w_time", c.w_time, "Gaussian phase weight (days from peak)"),
+      scChainRow("w_mag", c.w_mag, "followable-magnitude window"),
+      scChainRow("w_prob", c.w_prob, "broker SN/Ia probability"),
+      scChainRow("w_salt", c.w_salt, "SALT2 Ia-template fit quality"),
+    ].join("");
+    return `<div><h4>Why it's ranked here</h4>
+      <div class="lc-note" style="margin-bottom:.35rem">legacy merit ranking — this night predates the score</div>
+      <div class="scorechain">${rows}</div></div>`;
+  }
+  let pCap = "chance this is a cosmology-usable Ia";
+  if (c.w_lcq != null && c.w_lcq < 0.7) pCap += " · light-curve shape still poorly constrained";
+  const pSub = `= w_prob ${fmt(c.w_prob, 2)} × w_iaspec ${fmt(c.w_iaspec, 2)} × w_lcq ${fmt(c.w_lcq, 2)}`;
+  const vCap = c.v_z == null ? "" : (c.v_z >= 0.5
+    ? "under-sampled redshift bin — high Hubble-diagram value"
+    : "well-populated redshift bin — lower marginal sample value");
+  const exp = c.exposure_minutes;
+  const expBar = exp == null ? null : Math.min(1, 45 / Math.max(exp, 5));
+  const rows = [
+    scChainRow("P usable Ia", c.p_usable, pCap, pSub),
+    scChainRow("V(z) sample", c.v_z, vCap),
+    scChainRow("G info gain", c.g_info, gCaption(c.g_info)),
+    scChainRow("U urgency", c.u_urgency, uCaption(c.u_urgency)),
+    exp != null ? scChainRow("÷ exposure", expBar,
+      `estimated ${Math.round(exp)} min on target — divides score into score/hr`) : "",
+  ].join("");
+  return `<div><h4>Why it's ranked here</h4><div class="scorechain">${rows}
+    <div class="sc-sub" style="margin-left:0">score ${fmt(c.score, 3)} × (45 min / ${exp != null ? Math.round(exp) + " min" : "exp"})^0.5 → score/hr ${fmt(c.score_rate, 3)}</div>
+  </div></div>`;
+}
+
+// ---- fact grid ---------------------------------------------------------
+function factGrid(c) {
+  const f = [];
+  const add = (k, v) => { if (v != null && v !== "") f.push([k, v]); };
+  add("z", c.z != null ? `${fmt(c.z, 3)}${c.z_source ? " (" + esc(c.z_source) + ")" : ""}` : null);
+  if (c.delta_t != null) {
+    const rest = c.z != null ? ` · ${fmt(c.delta_t / (1 + c.z), 1)} rest` : "";
+    add("phase (d from peak)", `${fmt(c.delta_t, 1)}${rest}`);
+  }
+  add("peak mag", c.peak_mag != null ? fmt(c.peak_mag, 2) : null);
+  add("latest mag", c.latest_mag != null ? fmt(c.latest_mag, 2) : null);
+  const lcBands = c.lc ? [...new Set(c.lc.map((p) => p[3]))].join("") : null;
+  add("points", c.n_points != null ? `${c.n_points}${lcBands ? " (" + esc(lcBands) + ")" : ""}` : null);
+  add("rise time (d)", c.rise_time != null ? fmt(c.rise_time, 1) : null);
+  add("template", c.template_best
+    ? `${esc(c.template_best)}${c.template_margin != null ? " (margin " + fmt(c.template_margin, 2) + ")" : ""}` : null);
+  add("nuclear offset", c.nuclear_offset_arcsec != null
+    ? `${fmt(c.nuclear_offset_arcsec, 2)}″${c.offset_class ? " · " + esc(c.offset_class) : ""}`
+    : (c.offset_class ? esc(c.offset_class) : null));
+  add("host morphology", c.host_morphology ? esc(c.host_morphology) : null);
+  add("SALT x1", c.salt_x1 != null ? fmt(c.salt_x1, 2) : null);
+  add("SALT c", c.salt_c != null
+    ? `${fmt(c.salt_c, 3)}${c.salt_c_err != null ? " ± " + fmt(c.salt_c_err, 3) : ""}` : null);
+  add("est. exposure", c.exposure_minutes != null ? `${Math.round(c.exposure_minutes)} min` : null);
+  if (!f.length) return "";
+  return `<div><h4>Details</h4><dl class="factgrid">` +
+    f.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${v}</dd></div>`).join("") + "</dl></div>";
+}
+
+// ---- external links ------------------------------------------------------
+function linkRow(c) {
+  const links = [];
+  if (c.tns_name) {
+    const bare = String(c.tns_name).replace(/^(SN|AT)\s+/i, "");
+    links.push(`<a href="https://www.wis-tns.org/object/${encodeURIComponent(bare)}" target="_blank" rel="noopener">TNS</a>`);
+  }
+  if (c.ztf_oid) {
+    links.push(`<a href="https://fink-portal.org/${encodeURIComponent(c.ztf_oid)}" target="_blank" rel="noopener">Fink portal</a>`);
+    links.push(`<a href="https://alerce.online/object/${encodeURIComponent(c.ztf_oid)}" target="_blank" rel="noopener">ALeRCE</a>`);
+  }
+  return links.length ? `<div class="linkrow">${links.join("")}</div>` : "";
+}
+
+function detailRow(c, n, colspan) {
+  return `<tr class="detail-tr"><td colspan="${colspan}"><div class="detail">
+    ${lcSvg(c, n)}
+    ${scoreChain(c)}
+    ${factGrid(c)}
+    ${linkRow(c)}
+  </div></td></tr>`;
 }
 
 function renderCandidates() {
@@ -272,7 +496,10 @@ function renderCandidates() {
       ? `<div class="meritbar"${factors}><span class="mv">${fmt(val, 2)}</span>
          <span class="track"><span class="fill" style="width:${pct}%"></span></span></div>`
       : "—";
-    return `<tr><td class="num">${i + 1}</td>
+    const open = i === OPEN_IX;
+    return `<tr class="cand-row${open ? " open" : ""}" data-ix="${i}"
+        title="click for the light curve and ranking breakdown">
+      <td class="num">${i + 1}</td>
       <td>${objectCell(c)}</td>
       <td class="num">${coords}</td>
       <td class="num">${mag}</td>
@@ -280,9 +507,21 @@ function renderCandidates() {
       <td class="num"${zsrc}>${fmt(c.z, 3)}</td>
       <td class="num">${c.n_points == null ? "—" : esc(c.n_points)}</td>
       <td class="meritcell">${meritCell}</td>
-      <td>${badges(c)}</td></tr>`;
+      <td>${badges(c)}</td></tr>` +
+      (open ? detailRow(c, n, 9) : "");
   }).join("") ||
     `<tr><td colspan="9" style="color:var(--faint)">no candidates for this night</td></tr>`;
+
+  // row click toggles the inline detail panel (one open at a time);
+  // clicks on links (TNS etc.) pass through untouched
+  $("candbody").onclick = (e) => {
+    if (e.target.closest("a")) return;
+    const tr = e.target.closest("tr.cand-row");
+    if (!tr) return;
+    const ix = +tr.dataset.ix;
+    OPEN_IX = OPEN_IX === ix ? null : ix;
+    renderCandidates();
+  };
 
   const btn = $("showall");
   if (cands.length > TOP_N) {
@@ -290,7 +529,11 @@ function renderCandidates() {
     btn.textContent = SHOW_ALL
       ? `Show top ${TOP_N} only`
       : `Show all ${cands.length} candidates`;
-    btn.onclick = () => { SHOW_ALL = !SHOW_ALL; renderCandidates(); };
+    btn.onclick = () => {
+      SHOW_ALL = !SHOW_ALL;
+      if (!SHOW_ALL && OPEN_IX != null && OPEN_IX >= TOP_N) OPEN_IX = null;
+      renderCandidates();
+    };
   } else {
     btn.hidden = true;
   }

@@ -38,6 +38,60 @@
       border:1px solid var(--hair);border-left:3px solid var(--err);border-radius:6px;
       font-size:.9rem;color:var(--slate);}
     .denied b{color:var(--ink);}
+    /* expandable candidate detail panel */
+    tr.cand-row{cursor:pointer;}
+    tr.cand-row.open td{background:color-mix(in srgb, var(--copper) 6%, transparent);}
+    tr.detail-tr>td{background:var(--panel);padding:.9rem 1rem 1.1rem;white-space:normal;
+      border-bottom:2px solid var(--hair);}
+    .detail{display:flex;flex-direction:column;gap:.9rem;max-width:46rem;}
+    .lcwrap{max-width:40rem;}
+    .lc-svg{display:block;width:100%;max-width:40rem;height:auto;}
+    .lc-note{color:var(--faint);font-size:.8rem;}
+    .detail h4{margin:0 0 .3rem;font-size:.78rem;text-transform:uppercase;
+      letter-spacing:.08em;color:var(--slate);}
+    /* why-ranked-here mini bars */
+    .scorechain{display:flex;flex-direction:column;gap:.35rem;max-width:34rem;}
+    .sc-row{display:grid;grid-template-columns:7.5rem 3rem minmax(4rem,10rem) 1fr;
+      gap:.6rem;align-items:center;font-size:.76rem;}
+    .sc-row .lbl{font-family:var(--mono);color:var(--ink);white-space:nowrap;}
+    .sc-row .val{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right;}
+    .sc-row .track{height:.45rem;background:var(--hair2);border-radius:2px;overflow:hidden;}
+    .sc-row .fill{display:block;height:100%;background:var(--copper);}
+    .sc-row .cap{color:var(--faint);}
+    .sc-sub{grid-column:1/-1;font-size:.7rem;color:var(--faint);font-family:var(--mono);
+      margin:-.2rem 0 .1rem 7.5rem;}
+    /* fact grid */
+    .factgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));
+      gap:.35rem .9rem;margin:0;font-size:.78rem;max-width:44rem;}
+    .factgrid div{display:flex;gap:.45rem;justify-content:space-between;
+      border-bottom:1px dotted var(--hair2);padding-bottom:.15rem;}
+    .factgrid dt{color:var(--slate);margin:0;}
+    .factgrid dd{margin:0;font-family:var(--mono);font-variant-numeric:tabular-nums;
+      text-align:right;color:var(--ink);}
+    .linkrow{display:flex;gap:.5rem;flex-wrap:wrap;font-size:.76rem;}
+    .linkrow a{color:var(--slate);text-decoration:none;border:1px solid var(--hair);
+      border-radius:4px;padding:.15rem .55rem;}
+    .linkrow a:hover{color:var(--ink);border-color:var(--slate);}
+    /* photometry band colors (light theme): ZTF g/r, Rubin ugrizy, ATLAS c/o.
+       Distinguishable on the paper background; dark overrides below. */
+    :root{
+      --band-u:#6a4a86; --band-g:#1f6b57; --band-r:#b3542e; --band-i:#9c2f6e;
+      --band-z:#8a6d1f; --band-y:#5c6570; --band-c:#1f6b8a; --band-o:#b3802e;
+    }
+    @media (prefers-color-scheme: dark){
+      :root:not([data-theme="light"]){
+        --band-u:#b394d6; --band-g:#57b493; --band-r:#d47a4e; --band-i:#e07ab0;
+        --band-z:#c9a04e; --band-y:#a3aab3; --band-c:#5ab4d6; --band-o:#d9a44a;
+      }
+    }
+    :root[data-theme="dark"]{
+      --band-u:#b394d6; --band-g:#57b493; --band-r:#d47a4e; --band-i:#e07ab0;
+      --band-z:#c9a04e; --band-y:#a3aab3; --band-c:#5ab4d6; --band-o:#d9a44a;
+    }
+    .lc-legend{display:flex;gap:.8rem;flex-wrap:wrap;font-size:.72rem;color:var(--slate);
+      font-family:var(--mono);margin-top:.25rem;}
+    .lc-legend .sw{display:inline-block;width:.65rem;height:.65rem;border-radius:50%;
+      margin-right:.3rem;vertical-align:-.05rem;}
   </style>
 </head>
 <body>

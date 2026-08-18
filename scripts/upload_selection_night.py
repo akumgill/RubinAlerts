@@ -131,6 +131,18 @@ def parse_candidate(row: dict) -> dict:
         "n_points": _i(row, "n_points"),
         "salt_chi2_dof": _f(row, "salt_chi2_dof"),
         "salt_t0_err": _f(row, "salt_t0_err"),
+        # detail-panel fields (2026-08-18): context for WHY a candidate ranks
+        # where it does — phase anchors, template verdict, SALT shape/color,
+        # host geometry, and the exposure divisor behind score_rate
+        "peak_mjd": _f(row, "peak_mjd"),
+        "exposure_minutes": _f(row, "exposure_minutes"),
+        "template_best": _s(row, "template_best"),
+        "template_margin": _f(row, "template_margin"),
+        "rise_time": _f(row, "rise_time"),
+        "nuclear_offset_arcsec": _f(row, "nuclear_offset_arcsec"),
+        "salt_x1": _f(row, "salt_x1"),
+        "salt_c": _f(row, "salt_c"),
+        "host_morphology": _s(row, "host_morphology"),
         "surveys": _s(row, "surveys"),
         "brokers_detected": _s(row, "brokers_detected"),
         "offset_class": _s(row, "offset_class"),
@@ -154,6 +166,73 @@ def build_summary(candidates: list[dict]) -> dict:
         "median_z": round(median(zs), 4) if zs else None,
         "median_n_points": median(nps) if nps else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Light curves: ride in the payload (the deployed server has no nights/ dir).
+# Fetched per candidate from Fink's ZTF portal, compacted to
+# [[mjd, mag, magerr, band], ...] rows.
+# ---------------------------------------------------------------------------
+LC_MAX_POINTS = 150
+
+
+def compact_lc(df, max_points: int = LC_MAX_POINTS) -> list | None:
+    """DataFrame (mjd/magnitude/mag_err/band, FinkZTFClient.get_light_curve
+    schema) -> compact [[mjd, mag, magerr, band], ...] rows, mjd-sorted,
+    keeping the MOST RECENT ``max_points``. mjd rounded to 4dp, mags to 3dp;
+    non-finite magerr -> null. None/empty input -> None (lc omitted)."""
+    if df is None or len(df) == 0:
+        return None
+    points = []
+    for _, r in df.iterrows():
+        mjd, mag = r.get("mjd"), r.get("magnitude")
+        if mjd is None or mag is None:
+            continue
+        mjd, mag = float(mjd), float(mag)
+        if not (math.isfinite(mjd) and math.isfinite(mag)):
+            continue
+        err = r.get("mag_err")
+        try:
+            err = round(float(err), 3) if err is not None and math.isfinite(float(err)) else None
+        except (TypeError, ValueError):
+            err = None
+        points.append([round(mjd, 4), round(mag, 3), err,
+                       str(r.get("band", "?"))])
+    if not points:
+        return None
+    points.sort(key=lambda p: p[0])
+    return points[-max_points:]
+
+
+def attach_light_curves(candidates: list[dict], fetcher=None) -> None:
+    """Attach a compact ``lc`` field to each candidate with a ztf_oid.
+
+    ``fetcher(ztf_oid) -> DataFrame`` defaults to Fink's ZTF portal
+    (broker_clients.fink_ztf_client.FinkZTFClient.get_light_curve). A fetch
+    failure for one object never kills the upload — lc is omitted with a
+    warning. Candidates without a ztf_oid are skipped."""
+    if fetcher is None:
+        sys.path.insert(0, _REPO)
+        from broker_clients.fink_ztf_client import FinkZTFClient
+        client = FinkZTFClient()
+        fetcher = client.get_light_curve
+    with_oid = [c for c in candidates if c.get("ztf_oid")]
+    logger.info("Fetching light curves for %d/%d candidates...",
+                len(with_oid), len(candidates))
+    n_ok = 0
+    for i, cand in enumerate(with_oid, 1):
+        try:
+            lc = compact_lc(fetcher(cand["ztf_oid"]))
+        except Exception as e:
+            logger.warning("lc fetch failed for %s (%s); omitting",
+                           cand["ztf_oid"], e)
+            lc = None
+        if lc:
+            cand["lc"] = lc
+            n_ok += 1
+        if i % 20 == 0 or i == len(with_oid):
+            logger.info("  light curves: %d/%d fetched (%d with data)",
+                        i, len(with_oid), n_ok)
 
 
 def load_night(night_dir: str) -> NightPayload:
@@ -207,6 +286,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--backfilled", action="store_true",
                     help="mark this night as a retrospective re-run (fits use "
                          "photometry/classifications as of upload time, not the night)")
+    ap.add_argument("--no-lc", action="store_true",
+                    help="skip light-curve fetching (fast re-upload path; "
+                         "candidates carry no lc field)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -214,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("give either --db PATH, or --api URL with --key KEY")
 
     payload = load_night(args.night_dir)
+    if not args.no_lc:
+        attach_light_curves(payload.candidates)
     if args.backfilled:
         payload.summary["backfilled"] = True
     if args.db:

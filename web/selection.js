@@ -374,7 +374,9 @@ function scChainRow(sym, name, val, caption, sub) {
 function gCaption(g) {
   if (g == null) return "";
   if (g <= 0.1) return "already spec-typed + spec-z'd — a spectrum adds little";
-  if (g <= 0.75) return "spec-typed but no spec-z — the redshift is the gain";
+  // g_type_only = 0.15 (Chris 2026-08-18): typed objects without a spec-z are
+  // barely worth a live slot — the host z arrives later in batch via MOS
+  if (g <= 0.5) return "already typed — host z comes later via MOS; little gain";
   if (g <= 0.95) return "spec-z known but untyped — the type is the gain";
   return "no spectroscopic type or redshift yet — full information gain";
 }

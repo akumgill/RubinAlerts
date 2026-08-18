@@ -81,6 +81,12 @@ def test_g_all_four_cases():
     assert g[1] == CFG.g_type_only   # typed, no spec-z
     assert g[2] == CFG.g_z_only      # spec-z, untyped
     assert g[3] == CFG.g_neither     # neither
+    # Pin the Chris 2026-08-18 decision: an already-typed object without a
+    # spec-z gains LITTLE from a live spectrum (host z comes later via MOS) —
+    # 0.15, down from the proposal's 0.7.
+    assert CFG.g_type_only == 0.15
+    # an untyped spec-z object still gains most of a slot (the type)
+    assert CFG.g_z_only > CFG.g_type_only
 
 
 def test_g_missing_string_spellings_are_untyped():

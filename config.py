@@ -105,7 +105,11 @@ class ScoreConfig:
 
     # --- G: information gain of taking a spectrum ---
     g_both: float = 0.05            # spec-typed AND spec-z: nearly nothing to gain
-    g_type_only: float = 0.7        # typed but no spec-z: z is the gain
+    # Chris decision 2026-08-18: an already-typed object without a spec-z is
+    # worth LITTLE, not most-of-a-slot — host redshifts come later in batch
+    # via MOS, so the missing z barely argues for a live spectrum now
+    # (was 0.7 in the original proposal).
+    g_type_only: float = 0.15
     g_z_only: float = 0.9           # spec-z but untyped: type is the gain
     g_neither: float = 1.0
 

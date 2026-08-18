@@ -1,5 +1,48 @@
 # RubinAlerts Lab Notebook
 
+## 2026-08-18 (later) — Chris 1:1 outcomes (dry run tomorrow) + enqueue-bug fix
+
+### Meeting decisions (Flow notes; "YAMAS" = LLAMAS)
+
+- **Program clarity:** spectrum = TYPE (perishable, the purity product); host
+  redshifts DEFERRED to a later MOS campaign → downweight the z-component of
+  the G info-gain ladder (typed-but-no-z drops ~0.7 → ~0.2; G ≈ "is the type
+  unknown?"). Kills the salt_z-into-V(z) idea (precise z isn't the product).
+- **East-rising preference:** prefer targets rising in the east at night start
+  so post-peak PHOTOMETRY stays gettable ~2 months (a setting target's LC gets
+  truncated by the sun → spectrum unusable for cosmology). This is the
+  "forecast final LC sampling" factor from the 08-18 audit, now PI-endorsed.
+  NOTE: the naive opposite reading ("observe setting ones before they're
+  gone") is wrong for this program — a spectrum without a finishable LC is
+  a wasted slot.
+- **Accounting:** post-hoc NIGHTLY (not real-time) from FITS headers (object,
+  exposure), associated to targets by pointing within ~1 arcmin, not name.
+  Ledger is already coord-keyed. BLOCKED on: where FITS files land.
+- **Observing files:** instrument-specific; triplets (e.g. 3x30) canonical for
+  CR rejection; operator works in batches of 4–6 targets, not full nights.
+  BLOCKED on format — Akum to ask Rob Simcoe / read LCO docs.
+- **P-tier ties broken by % TIME REMAINING, not raw hours** — replaces the
+  absolute-hours budget-factor tiers (1.0/0.5/0.1). Not yet implemented.
+- **Pool LLAMAS/LDSS3 time in practice; skip long-slit LDSS3 for our own
+  targets** (Villar keeps LDSS3). Affects accounting design.
+- Standards: spectrophotometric standards need repeats across airmass ranges —
+  model as separate fake objects per range; add per-target airmass-range
+  option (default: minimize). Chris sending the standards list + paper.
+
+### Enqueue bug FIXED (dry-run blocker)
+
+Root cause: `api/app.py` built TargetQueueService with **resolver=None** —
+EVERY name-only submission failed (not just long ZTF names); only tests had a
+(fake) resolver. Second layer: Fink's TNS resolver matches only the exact full
+name ("AT 2026ydy"; bare "2026ydy" returns []). New `api/resolver.py`
+(public Fink API, no credentials): ZTF ids via /api/v1/objects (latest-alert
+ra/dec+mag), TNS names via /api/v1/resolver with AT/SN-variant expansion.
+Verified end-to-end: ZTF26abmiytv and 2026ydy both enqueue; coord-dedup
+recognized them as the same target (the ~1-arcmin association working).
+Suite 389 passed. Commit cb7a888.
+
+---
+
 ## Project Overview
 
 Automated SN Ia candidate identification pipeline for Rubin LSST Deep Drilling Fields. Aggregates alerts from multiple brokers (Fink, ANTARES, ALeRCE), fits light curves, computes spectroscopic follow-up merit scores, and generates Magellan observing plans.

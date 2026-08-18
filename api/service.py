@@ -24,7 +24,7 @@ MATCH_ARCSEC = 2.0  # canonical-object dedup radius
 # SQL NULL and restored to float('nan') on load.
 _FLOAT_FIELDS = frozenset({
     "ra", "dec", "mag", "redshift", "exposure_minutes", "exposure_seconds",
-    "canonical_ra", "canonical_dec",
+    "canonical_ra", "canonical_dec", "airmass_min", "airmass_max",
 })
 _COLUMNS = [f.name for f in _dc_fields(Target)]
 
@@ -35,6 +35,18 @@ class AuthError(Exception):
 
 class NotFound(Exception):
     """Target id not found for this program."""
+
+
+def _validate_airmass_range(am_lo: float, am_hi: float) -> Optional[str]:
+    """Validate an optional per-target airmass range (stamped #5). Either
+    bound may be absent (NaN). Returns an error string or None."""
+    if math.isfinite(am_lo) and am_lo < 1.0:
+        return "airmass_min must be >= 1.0 (airmass 1 is the zenith)"
+    if math.isfinite(am_hi) and am_hi < 1.0:
+        return "airmass_max must be >= 1.0 (airmass 1 is the zenith)"
+    if math.isfinite(am_lo) and math.isfinite(am_hi) and not am_lo < am_hi:
+        return "airmass_min must be strictly less than airmass_max"
+    return None
 
 
 def _sep_arcsec(ra1, dec1, ra2, dec2) -> float:
@@ -195,11 +207,22 @@ class TargetQueueService:
             act = [t for t in act if t.instrument in (inst, "EITHER")]
         return act
 
-    def _find_same_object(self, program: str, ra: float, dec: float
+    def _find_same_object(self, program: str, ra: float, dec: float,
+                          airmass_min: float = float("nan"),
+                          airmass_max: float = float("nan")
                           ) -> Optional[Target]:
+        """Coordinate-dedup within one program — but ONLY within the same
+        airmass-range spec: a spectrophotometric standard deliberately
+        enqueued once per airmass bin (stamped #5) is N distinct queue
+        entries at identical coordinates, not one upserted target."""
+        def _same_bound(a, b):
+            fa, fb = math.isfinite(a), math.isfinite(b)
+            return (fa == fb) and (not fa or abs(a - b) < 1e-9)
         for t in self.active():
             if t.program == program and math.isfinite(t.canonical_ra):
-                if _sep_arcsec(ra, dec, t.canonical_ra, t.canonical_dec) <= MATCH_ARCSEC:
+                if (_sep_arcsec(ra, dec, t.canonical_ra, t.canonical_dec) <= MATCH_ARCSEC
+                        and _same_bound(t.airmass_min, airmass_min)
+                        and _same_bound(t.airmass_max, airmass_max)):
                     return t
         return None
 
@@ -300,7 +323,16 @@ class TargetQueueService:
                     "error": "exposure required: give exposure_minutes, or "
                              "n_exposures + exposure_seconds"}
 
-        existing = self._find_same_object(program, ra, dec)
+        # Optional airmass range (stamped #5): a HARD scheduling constraint.
+        am_lo = raw.get("airmass_min")
+        am_hi = raw.get("airmass_max")
+        am_lo = float(am_lo) if am_lo not in (None, "") else float("nan")
+        am_hi = float(am_hi) if am_hi not in (None, "") else float("nan")
+        err = _validate_airmass_range(am_lo, am_hi)
+        if err:
+            return {"status": "error", "error": err}
+
+        existing = self._find_same_object(program, ra, dec, am_lo, am_hi)
         if existing:  # upsert
             existing.priority = pri
             existing.instrument = inst
@@ -312,6 +344,10 @@ class TargetQueueService:
                 existing.exposure_minutes = exp_min
                 existing.n_exposures = n_exp
                 existing.exposure_seconds = exp_sec
+            if math.isfinite(am_lo):
+                existing.airmass_min = am_lo
+            if math.isfinite(am_hi):
+                existing.airmass_max = am_hi
             if name:
                 existing.name = name
             if raw.get("valid_until"):
@@ -324,6 +360,7 @@ class TargetQueueService:
                 band=str(raw.get("band", "r")), redshift=redshift,
                 exposure_minutes=exp_min, n_exposures=n_exp,
                 exposure_seconds=exp_sec,
+                airmass_min=am_lo, airmass_max=am_hi,
                 valid_until=raw.get("valid_until"),
                 notes=str(raw.get("notes", "")),
                 id=self._next_id, program=program, status="queued",
@@ -358,9 +395,14 @@ class TargetQueueService:
             if pri not in TIERS:
                 raise ValueError(f"priority must be one of {TIERS}")
             t.priority = pri
-        for k in ("mag", "redshift", "exposure_minutes"):
+        for k in ("mag", "redshift", "exposure_minutes",
+                  "airmass_min", "airmass_max"):
             if k in changes and changes[k] is not None:
                 setattr(t, k, float(changes[k]))
+        if "airmass_min" in changes or "airmass_max" in changes:
+            err = _validate_airmass_range(t.airmass_min, t.airmass_max)
+            if err:
+                raise ValueError(err)
         if "valid_until" in changes:
             t.valid_until = changes["valid_until"]
         self._persist(t)

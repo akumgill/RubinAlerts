@@ -28,6 +28,15 @@ class Target:
     redshift: float = float('nan')
     exposure_minutes: float = float('nan')
     moon_constraint: str = 'any'
+    # Optional airmass RANGE (stamped #5): the target is schedulable ONLY in
+    # time windows where its airmass lies inside [airmass_min, airmass_max]
+    # (hard constraint; normal scoring applies within the window). NaN =
+    # unconstrained. Either bound alone works: max-only tightens the global
+    # limit; min-only serves high-airmass calibration pseudo-targets (an
+    # explicit range OVERRIDES config.max_airmass — standards bins may sit
+    # entirely above it).
+    airmass_min: float = float('nan')
+    airmass_max: float = float('nan')
     notes: str = ''  # free-text, human-readable; NOT scored
     # Structured, validated scheduling tags (controlled vocabulary — see
     # prioritizer.KEYWORD_WEIGHTS). Populated/validated at ingestion

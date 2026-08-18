@@ -387,6 +387,15 @@ def load_targets_csv(path: str, night_mjd: float = float('nan'),
                 and math.isfinite(night_mjd)):
             delta_t = night_mjd - float(row['peak_mjd'])
 
+        # Optional per-target airmass range (stamped #5) — hard scheduling
+        # constraint; absent -> NaN = minimize airmass (default behavior).
+        am_lo = (float(row['airmass_min'])
+                 if 'airmass_min' in df.columns and pd.notna(row.get('airmass_min'))
+                 else float('nan'))
+        am_hi = (float(row['airmass_max'])
+                 if 'airmass_max' in df.columns and pd.notna(row.get('airmass_max'))
+                 else float('nan'))
+
         # Optional structured keyword tags (controlled vocabulary). Comma- or
         # semicolon-separated; unknown tokens dropped with a warning; an
         # override token sets mandatory. Free-text ``notes`` is unaffected.
@@ -411,6 +420,8 @@ def load_targets_csv(path: str, night_mjd: float = float('nan'),
             program=program,
             phase_weight=phase_w,
             delta_t=delta_t,
+            airmass_min=am_lo,
+            airmass_max=am_hi,
         )
         targets.append(t)
 

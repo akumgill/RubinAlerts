@@ -1,0 +1,200 @@
+"""Tests for per-target airmass ranges (stamped #5): API validation/storage,
+planner hard-constraint windows (max-only AND min-only), the standards-as-
+pseudo-targets helper, and the range-aware coordinate dedupe."""
+import importlib
+import importlib.util
+import json
+import math
+import os
+import sys
+
+import numpy as np
+import pytest
+from astropy.coordinates import SkyCoord
+from astropy.time import Time
+import astropy.units as u
+
+from orchestrator.config import LLAMASConfig
+from orchestrator.models import Target as OTarget
+from orchestrator.planner import (_airmass_bounds, _am_ok, _find_window,
+                                  compute_observability)
+
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+# ---------------------------------------------------------------------------
+# API: submission, validation, dashboard passthrough
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def client(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROUPS_JSON", json.dumps({
+        "CfA-Stubbs": {"key": "k-stubbs", "password": "ps"}}))
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "queue.db"))
+    monkeypatch.setenv("SEED_DEMO", "0")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret")
+    monkeypatch.setenv("MAGNETS_ALLOCATIONS", "ref/allocations_LLAMAS_2026B.yaml")
+    monkeypatch.setenv("WARM_CACHE", "0")
+    import api.app as app_mod
+    importlib.reload(app_mod)
+    from starlette.testclient import TestClient
+    return TestClient(app_mod.app)
+
+
+STUBBS = {"Authorization": "Bearer k-stubbs"}
+
+
+def _item(name, **over):
+    d = {"name": name, "ra": 150.0, "dec": -29.0, "priority": "P2",
+         "instrument": "LLAMAS", "mag": 13.0, "exposure_minutes": 6}
+    d.update(over)
+    return d
+
+
+def test_submit_with_range_stored_and_returned(client):
+    r = client.post("/v1/targets", headers=STUBBS, json=[
+        _item("std-a", airmass_min=1.3, airmass_max=1.7)])
+    assert r.status_code == 200 and r.json()[0]["status"] == "ok"
+    rows = client.get("/v1/targets", headers=STUBBS).json()
+    assert rows[0]["airmass_min"] == 1.3 and rows[0]["airmass_max"] == 1.7
+    # rangeless target: both null (default = minimize airmass)
+    client.post("/v1/targets", headers=STUBBS, json=[_item("sn", ra=10.0)])
+    rows = client.get("/v1/targets", headers=STUBBS).json()
+    plain = next(t for t in rows if t["name"] == "sn")
+    assert plain["airmass_min"] is None and plain["airmass_max"] is None
+
+
+def test_range_validation(client):
+    # min >= max is nonsense
+    bad = client.post("/v1/targets", headers=STUBBS, json=[
+        _item("bad", airmass_min=1.7, airmass_max=1.3)])
+    assert bad.json()[0]["status"] == "error"
+    assert "airmass_min" in bad.json()[0]["error"]
+    # airmass < 1 is unphysical
+    bad2 = client.post("/v1/targets", headers=STUBBS, json=[
+        _item("bad2", airmass_min=0.5)])
+    assert bad2.json()[0]["status"] == "error"
+    # PATCH into an invalid pair is rejected (422 via ValueError)
+    ok = client.post("/v1/targets", headers=STUBBS, json=[
+        _item("p", airmass_min=1.2, airmass_max=1.6)])
+    tid = ok.json()[0]["id"]
+    assert client.patch(f"/v1/targets/{tid}", headers=STUBBS,
+                        json={"airmass_min": 2.0}).status_code == 422
+
+
+def test_same_coords_distinct_bins_do_not_upsert(client):
+    # one standard, two airmass bins -> TWO queue entries (dedup is per
+    # airmass-range spec), and re-sending a bin upserts it
+    r = client.post("/v1/targets", headers=STUBBS, json=[
+        _item("GD71@am1.0-1.3", airmass_min=1.0, airmass_max=1.3),
+        _item("GD71@am1.3-1.7", airmass_min=1.3, airmass_max=1.7)])
+    res = r.json()
+    assert [x["status"] for x in res] == ["ok", "ok"]
+    assert res[0]["id"] != res[1]["id"]
+    assert not res[0]["updated"] and not res[1]["updated"]
+    again = client.post("/v1/targets", headers=STUBBS, json=[
+        _item("GD71@am1.0-1.3", airmass_min=1.0, airmass_max=1.3)])
+    assert again.json()[0]["updated"] is True
+    assert again.json()[0]["id"] == res[0]["id"]
+
+
+# ---------------------------------------------------------------------------
+# Planner: hard-constraint windows
+# ---------------------------------------------------------------------------
+
+CFG = LLAMASConfig()
+EVENING = Time("2026-08-16T01:00:00")
+MORNING = Time("2026-08-16T09:00:00")
+
+
+def _zenith_ra_deg():
+    """RA (deg) transiting mid-window at LCO -> passes within ~deg of zenith
+    for dec = site latitude."""
+    mid = EVENING + (MORNING - EVENING) / 2
+    return float(mid.sidereal_time("apparent",
+                                   longitude=CFG.location.lon).deg)
+
+
+def test_find_window_max_only_and_band():
+    ra = _zenith_ra_deg()
+    coord = SkyCoord(ra=ra * u.deg, dec=CFG.latitude * u.deg)  # transits at zenith
+    # max-only: the classic window, best point near airmass 1
+    tr, min_am, ws, we = _find_window(coord, EVENING, MORNING,
+                                      CFG.location, max_airmass=1.5)
+    assert tr is not None and min_am == pytest.approx(1.0, abs=0.02)
+    # high-airmass band [1.4, 2.0]: the best ALLOWED point is inside the
+    # band, not at the (excluded) zenith transit
+    tr2, min_am2, ws2, we2 = _find_window(coord, EVENING, MORNING,
+                                          CFG.location, max_airmass=2.0,
+                                          min_airmass=1.4)
+    assert tr2 is not None
+    assert 1.4 <= min_am2 <= 2.0
+    # the envelope brackets the excluded transit (non-contiguous band)
+    assert ws2 < tr < we2
+
+
+def test_range_overrides_global_airmass_limit():
+    # a target culminating at airmass ~1.8 from LCO: alt = asin(1/1.8) ->
+    # zenith distance ~56.3 deg -> dec = lat + 56.3 (northern sky)
+    dec = CFG.latitude + math.degrees(math.asin(1 / 1.8) - math.pi / 2) * -1
+    t_plain = OTarget(name="plain", ra_deg=_zenith_ra_deg(), dec_deg=dec,
+                      exposure_minutes=10.0)
+    t_range = OTarget(name="binned", ra_deg=_zenith_ra_deg(), dec_deg=dec,
+                      exposure_minutes=10.0,
+                      airmass_min=1.7, airmass_max=2.3)
+    # global limit 1.6: the plain target never gets low enough -> dropped;
+    # the explicit range OVERRIDES the global limit -> kept
+    obs = compute_observability([t_plain, t_range], EVENING, MORNING, CFG)
+    names = [t.name for t in obs]
+    assert "plain" not in names and "binned" in names
+    got = obs[0]
+    assert 1.7 <= got.min_airmass <= 2.3
+
+
+def test_airmass_bounds_and_slot_check():
+    t_none = OTarget(name="a", ra_deg=0, dec_deg=0)
+    assert _airmass_bounds(t_none, CFG) == (1.0, CFG.max_airmass)
+    t_max = OTarget(name="b", ra_deg=0, dec_deg=0, airmass_max=1.5)
+    assert _airmass_bounds(t_max, CFG) == (1.0, 1.5)
+    t_min = OTarget(name="c", ra_deg=0, dec_deg=0, airmass_min=1.8)
+    lo, hi = _airmass_bounds(t_min, CFG)
+    assert lo == 1.8 and hi == float("inf")     # min-only: top unbounded
+    # per-slot enforcement (catches the mid-window violation of a min band)
+    assert not _am_ok(t_min, 1.2, CFG)
+    assert _am_ok(t_min, 2.5, CFG)
+    assert _am_ok(t_max, 1.4, CFG) and not _am_ok(t_max, 1.55, CFG)
+
+
+# ---------------------------------------------------------------------------
+# Standards-as-pseudo-targets helper
+# ---------------------------------------------------------------------------
+
+def _load_script():
+    path = os.path.join(_REPO, "scripts", "enqueue_standards.py")
+    spec = importlib.util.spec_from_file_location("enqueue_standards", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_pseudo_target_naming_and_build():
+    mod = _load_script()
+    bins = mod.parse_bins("1.0-1.3,1.3-1.7,1.7-2.3")
+    stds = mod.load_standards(os.path.join(_REPO, "ref", "standards_example.csv"))
+    items = mod.build_pseudo_targets(stds, bins, priority="P2",
+                                     exposure_minutes=6.0)
+    assert len(items) == 2 * 3
+    names = [i["name"] for i in items]
+    assert "FAKE-GD71@am1.0-1.3" in names and "FAKE-LTT3864@am1.7-2.3" in names
+    first = items[0]
+    assert (first["airmass_min"], first["airmass_max"]) == (1.0, 1.3)
+    assert first["priority"] == "P2" and first["instrument"] == "LLAMAS"
+    # per-row exposure column wins over the CLI default
+    gd71 = next(i for i in items if i["name"].startswith("FAKE-GD71"))
+    assert gd71["exposure_minutes"] == 6.0
+    # bad bins rejected
+    with pytest.raises(ValueError):
+        mod.parse_bins("0.8-1.3")
+    with pytest.raises(ValueError):
+        mod.parse_bins("1.7-1.3")

@@ -127,26 +127,60 @@ def _get_airmass_grid(coord: SkyCoord, times, location) -> np.ndarray:
     return am
 
 
+def _airmass_bounds(t, config) -> tuple:
+    """Effective (lo, hi) airmass bounds for scheduling ``t`` (stamped #5).
+
+    No per-target range -> (1.0, config.max_airmass), the historical behavior.
+    An explicit range is a HARD constraint that OVERRIDES the global limit
+    (standards bins may sit entirely above config.max_airmass); a min-only
+    range leaves the top unbounded (horizon physics still applies)."""
+    lo = getattr(t, 'airmass_min', float('nan'))
+    hi = getattr(t, 'airmass_max', float('nan'))
+    has_lo = isinstance(lo, (int, float)) and math.isfinite(lo)
+    has_hi = isinstance(hi, (int, float)) and math.isfinite(hi)
+    if not has_lo and not has_hi:
+        return 1.0, config.max_airmass
+    return ((float(lo) if has_lo else 1.0),
+            (float(hi) if has_hi else float('inf')))
+
+
+def _am_ok(t, am: float, config) -> bool:
+    """Slot-time airmass check against the target's effective bounds. This is
+    what enforces a min-airmass band through its mid-window violation (the
+    [start, end] envelope from _find_window is not gap-free)."""
+    lo, hi = _airmass_bounds(t, config)
+    return lo <= am <= hi
+
+
 def _find_window(coord: SkyCoord, evening: Time, morning: Time,
-                 location, max_airmass: float) -> tuple:
+                 location, max_airmass: float,
+                 min_airmass: float = 1.0) -> tuple:
     """Find the observable window for a target.
+
+    ``min_airmass``/``max_airmass`` bound the target's ALLOWED airmass band
+    (per-target ranges from stamped #5; the default band is [1, global max]).
+    Note the returned [start, end] span is the ENVELOPE of allowed times —
+    for a min-airmass band it can contain a mid-night violation (the target
+    culminating too high), which the scheduler re-checks per slot.
 
     Returns
     -------
-    (transit_time, min_airmass, window_start, window_end) or
-    (None, None, None, None) if target never reaches max_airmass.
+    (transit_time, min_airmass, window_start, window_end) — transit/min are
+    the best allowed point — or (None, None, None, None) if the target never
+    enters the allowed band.
     """
     duration_min = (morning - evening).to(u.minute).value
     times = evening + np.linspace(0, duration_min, 500) * u.minute
     am = _get_airmass_grid(coord, times, location)
 
-    obs_mask = am <= max_airmass
+    obs_mask = (am <= max_airmass) & (am >= min_airmass)
     if not np.any(obs_mask):
         return None, None, None, None
 
     idx = np.where(obs_mask)[0]
-    transit_time = times[np.argmin(am)]
-    min_am = float(am.min())
+    best = idx[np.argmin(am[idx])]      # best ALLOWED point, not global min
+    transit_time = times[best]
+    min_am = float(am[best])
     window_start = times[idx[0]]
     window_end = times[idx[-1]]
 
@@ -201,8 +235,10 @@ def compute_observability(targets: List[Target], evening: Time,
 
     observable = []
     for t in targets:
+        am_lo, am_hi = _airmass_bounds(t, config)
         transit, min_am, ws, we = _find_window(
-            t.coord, evening, morning, config.location, config.max_airmass
+            t.coord, evening, morning, config.location,
+            max_airmass=am_hi, min_airmass=am_lo,
         )
         if transit is None:
             # No window at all (never reaches the airmass limit). Even an
@@ -719,10 +755,11 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             if _overlaps_reserved(current, current + dur):
                 continue
 
-            # Check airmass at midpoint
+            # Check airmass at midpoint against the target's effective bounds
+            # (per-target ranges are hard constraints; see _am_ok)
             mid = current + dur / 2
             am = _get_airmass(t.coord, mid, config.location)
-            if am > config.max_airmass:
+            if not _am_ok(t, am, config):
                 continue
 
             # Slew score penalty (tie-breaker; the slew TIME is charged in
@@ -818,7 +855,7 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                             and not _overlaps_reserved(current, extended_end)):
                         mid_ext = current + (extended_end - current) / 2
                         am_ext = _get_airmass(best.coord, mid_ext, config.location)
-                        if am_ext <= config.max_airmass:
+                        if _am_ok(best, am_ext, config):
                             dur = extended_end - current
 
             # Calculate exposure parameters
@@ -899,7 +936,7 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             if added > 0 and not _overlaps_reserved(entry.start, new_end):
                 new_mid = entry.start + (new_end - entry.start) / 2
                 new_am = _get_airmass(t.coord, new_mid, config.location)
-                if new_am <= config.max_airmass:
+                if _am_ok(t, new_am, config):
                     entry.end = new_end
                     entry.airmass = new_am
                     total_exp_min = (entry.end - entry.start).to(u.minute).value - config.overhead_minutes

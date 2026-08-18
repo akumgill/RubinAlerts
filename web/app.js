@@ -226,6 +226,8 @@ async function addTarget(ev) {
     toast("Exposure (min) is required — set the integration you want.", "err");
     return;
   }
+  const aminS = $("t-amin").value.trim();
+  const amaxS = $("t-amax").value.trim();
   const item = {
     name: name || null,
     ra: raS === "" ? null : Number(raS),
@@ -234,6 +236,10 @@ async function addTarget(ev) {
     instrument: $("t-inst").value,
     exposure_minutes: expS === "" ? null : Number(expS),
     mag: magS === "" ? null : Number(magS),
+    // optional airmass range: hard scheduling constraint; empty = default
+    // behavior (observe at minimum airmass)
+    airmass_min: aminS === "" ? null : Number(aminS),
+    airmass_max: amaxS === "" ? null : Number(amaxS),
   };
 
   const btn = $("addbtn");

@@ -102,7 +102,8 @@ def _moon_phase_for(date: str) -> str:
 
 def _materialize_csv(targets, path: str) -> None:
     cols = ["name", "ra", "dec", "priority", "mag", "redshift",
-            "exposure", "program", "keywords", "notes"]
+            "exposure", "program", "keywords", "notes",
+            "airmass_min", "airmass_max"]
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
@@ -120,6 +121,11 @@ def _materialize_csv(targets, path: str) -> None:
                 "program": t.program,
                 "keywords": "mandatory" if mandatory else "",
                 "notes": t.notes or "",
+                # per-target airmass range (stamped #5) -> hard planner constraint
+                "airmass_min": "" if not math.isfinite(t.airmass_min)
+                               else f"{t.airmass_min:.2f}",
+                "airmass_max": "" if not math.isfinite(t.airmass_max)
+                               else f"{t.airmass_max:.2f}",
             })
 
 
@@ -431,6 +437,10 @@ def _target_row(t, airmass, plan, sched, over, estimate_exposure_minutes,
         "n_exposures": t.n_exposures,
         "exposure_seconds": None if not math.isfinite(t.exposure_seconds)
                             else round(t.exposure_seconds),
+        "airmass_min": None if not math.isfinite(t.airmass_min)
+                       else round(t.airmass_min, 2),
+        "airmass_max": None if not math.isfinite(t.airmass_max)
+                       else round(t.airmass_max, 2),
         "sched_utc": sched_utc,
         "status": status,
         "instrument": t.instrument,
@@ -475,6 +485,10 @@ def _compute_dashboard(service, date, instrument, airmass_limit) -> dict:
         "n_exposures": t.n_exposures,
         "exposure_seconds": None if not math.isfinite(t.exposure_seconds)
                             else round(t.exposure_seconds),
+        "airmass_min": None if not math.isfinite(t.airmass_min)
+                       else round(t.airmass_min, 2),
+        "airmass_max": None if not math.isfinite(t.airmass_max)
+                       else round(t.airmass_max, 2),
         "status": ("scheduled" if t.name in sched
                    else "overflow" if t.name in over else "queued"),
     } for t in service.active()]

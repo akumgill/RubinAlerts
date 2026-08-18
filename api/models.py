@@ -48,6 +48,13 @@ class Target:
     n_exposures: Optional[int] = None        # sub-exposure count, e.g. 3 x 600s
     exposure_seconds: float = float("nan")   # seconds per sub-exposure (with n_exposures)
     valid_until: Optional[str] = None   # ISO date; drop after
+    # Optional airmass RANGE (stamped #5): schedulable ONLY while the target's
+    # airmass lies in [airmass_min, airmass_max]. NaN = unconstrained (default:
+    # minimize airmass). Either bound may be given alone — max-only tightens
+    # the global limit; min-only serves high-airmass calibration points
+    # (standards observed AT a specific airmass, entered as pseudo-targets).
+    airmass_min: float = float("nan")
+    airmass_max: float = float("nan")
     notes: str = ""
 
     # --- system-assigned ---

@@ -69,6 +69,10 @@
           <select id="t-inst"><option>LLAMAS</option><option selected>LDSS3</option><option>EITHER</option></select></div>
         <div class="fld"><label for="t-exp">Exp (min) *</label><input class="w-num" id="t-exp" inputmode="numeric" placeholder="e.g. 30" required></div>
         <div class="fld"><label for="t-mag">r mag</label><input class="w-num" id="t-mag" inputmode="decimal" placeholder="—"></div>
+        <div class="fld"><label for="t-amin" title="leave empty to observe at minimum airmass">Airmass range</label>
+          <span style="display:inline-flex;align-items:center;gap:.2rem">
+            <input class="w-num" id="t-amin" inputmode="decimal" placeholder="min" style="width:3.4rem" title="leave empty to observe at minimum airmass">–
+            <input class="w-num" id="t-amax" inputmode="decimal" placeholder="max" style="width:3.4rem" title="leave empty to observe at minimum airmass"></span></div>
         <div class="fld"><label>&nbsp;</label><button class="btn primary" type="submit" id="addbtn">Add target</button></div>
       </div>
       <div class="hint2" id="etc-note" hidden style="color:var(--copper)"></div>

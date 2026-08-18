@@ -225,6 +225,41 @@ def withdraw(request: Request, target_id: int, authorization: str = Header(None)
 
 
 # ---------------------------------------------------------------------------
+# ETC suggestion (stamped #2): exposure from anticipated magnitude via the
+# LLAMAS S/N ETC. This is a pre-filled EDITABLE suggestion for the add-target
+# form — the submitter still owns (and must state) the exposure; nothing is
+# ever silently auto-sized.
+# ---------------------------------------------------------------------------
+@app.get("/v1/etc")
+def etc_suggest(request: Request, mag: float, authorization: str = Header(None)):
+    """Suggested LLAMAS exposure for an anticipated magnitude, expressed as
+    the canonical cosmic-ray-rejection triplet: 3 equal sub-exposures rounded
+    to the nearest 10 s. Returns {minutes, n_exposures, exposure_seconds,
+    snr, n_bin, extrapolated}."""
+    _identity(request, authorization)
+    try:
+        from core.snr_etc import (snr_exposure_minutes, MIN_EXPOSURE_MINUTES,
+                                  MAX_EXPOSURE_MIN, DEFAULT_TARGET_SNR,
+                                  DEFAULT_N_BIN)
+    except Exception as e:  # container without the ETC module/curve
+        logger.warning("ETC unavailable: %s", e)
+        raise HTTPException(503, "exposure calculator unavailable on this "
+                                 "deployment — enter the exposure manually")
+    import math
+    if not math.isfinite(mag):
+        raise HTTPException(422, "mag must be a finite magnitude")
+    t, extrapolated = snr_exposure_minutes(mag)
+    if not math.isfinite(t):
+        raise HTTPException(422, "ETC could not size an exposure for this mag")
+    minutes = float(min(MAX_EXPOSURE_MIN, max(MIN_EXPOSURE_MINUTES, t)))
+    # canonical CR-median protocol: 3 equal sub-exposures, each a multiple of 10 s
+    sub_s = max(10.0, round(minutes * 60.0 / 3.0 / 10.0) * 10.0)
+    return {"minutes": round(3 * sub_s / 60.0, 2), "n_exposures": 3,
+            "exposure_seconds": sub_s, "snr": DEFAULT_TARGET_SNR,
+            "n_bin": DEFAULT_N_BIN, "extrapolated": bool(extrapolated)}
+
+
+# ---------------------------------------------------------------------------
 # Reads (collaboration-wide; require a valid session or bearer)
 # ---------------------------------------------------------------------------
 @app.get("/v1/queue")

@@ -71,7 +71,8 @@
         <div class="fld"><label for="t-mag">r mag</label><input class="w-num" id="t-mag" inputmode="decimal" placeholder="—"></div>
         <div class="fld"><label>&nbsp;</label><button class="btn primary" type="submit" id="addbtn">Add target</button></div>
       </div>
-      <div class="hint2">Provide a <b>name</b> or an <b>RA + Dec</b> pair, and the <b>exposure</b> you want (we size exposures only for our own pipeline Ia candidates — you set yours). Submitted to <code>POST /v1/targets</code> for your program.</div>
+      <div class="hint2" id="etc-note" hidden style="color:var(--copper)"></div>
+      <div class="hint2">Provide a <b>name</b> or an <b>RA + Dec</b> pair, and the <b>exposure</b> you want (we size exposures only for our own pipeline Ia candidates — you set yours; typing a mag pre-fills a LLAMAS ETC <i>suggestion</i> you can edit). Submitted to <code>POST /v1/targets</code> for your program.</div>
     </form>
 
     <h2>Observing plan <span class="hint">priority order with each target&rsquo;s observable window &mdash; reorder freely; the UTC is only a suggested pace. Do the &ldquo;sets&rdquo; targets first. What&rsquo;s actually observed is decided live (see &ldquo;Right now&rdquo;)</span></h2>

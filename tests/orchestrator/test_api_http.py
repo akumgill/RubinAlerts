@@ -111,6 +111,27 @@ def test_multiprogram_shared_queue_deterministic(client):
     assert order[-1] == "S-lo"
 
 
+def test_etc_suggestion_endpoint(client):
+    # auth required
+    assert client.get("/v1/etc?mag=19").status_code == 401
+    # happy path: finite minutes for mag 19, expressed as the canonical
+    # 3-sub-exposure CR triplet rounded to 10 s
+    r = client.get("/v1/etc?mag=19", headers=STUBBS)
+    assert r.status_code == 200
+    b = r.json()
+    assert b["n_exposures"] == 3
+    assert b["exposure_seconds"] > 0 and b["exposure_seconds"] % 10 == 0
+    # triplet arithmetic: minutes IS the triplet total
+    assert b["minutes"] == pytest.approx(3 * b["exposure_seconds"] / 60.0, abs=0.01)
+    assert 0 < b["minutes"] <= 240.0
+    assert b["snr"] > 0 and b["n_bin"] >= 1
+    # a bright mag suggests less time than a faint one
+    faint = client.get("/v1/etc?mag=21", headers=STUBBS).json()
+    assert faint["minutes"] >= b["minutes"]
+    # nonsense mag rejected
+    assert client.get("/v1/etc?mag=nan", headers=STUBBS).status_code == 422
+
+
 def test_login_cookie_auth(client):
     # program list is public (populates the login screen)
     assert client.get("/v1/programs").json()["programs"] == ["CfA-Stubbs", "UA"]

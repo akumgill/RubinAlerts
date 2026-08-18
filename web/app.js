@@ -253,6 +253,8 @@ async function addTarget(ev) {
       $("addform").reset();
       $("t-pri").value = "P1";
       $("t-inst").value = "LDSS3";
+      $("etc-note").hidden = true;
+      etcSuggested = null;
     }
     await refresh();
   } catch (e) {
@@ -752,4 +754,33 @@ function renderFoot() {
 
 // ---- wire the add form + go ------------------------------------------
 $("addform").addEventListener("submit", addTarget);
+
+// ---- ETC pre-fill (stamped #2) -----------------------------------------
+// Typing an anticipated magnitude pre-fills the exposure from the LLAMAS
+// S/N ETC as an EDITABLE suggestion (canonical 3-sub-exposure CR triplet).
+// Exposure ownership is respected: only an empty field — or our own previous
+// suggestion — is ever (re)filled; anything the user typed stays untouched.
+let etcSuggested = null;   // the last value WE wrote into t-exp
+async function suggestExposure() {
+  const magS = $("t-mag").value.trim();
+  const note = $("etc-note");
+  if (magS === "" || isNaN(Number(magS))) return;
+  const expEl = $("t-exp");
+  const cur = expEl.value.trim();
+  if (cur !== "" && cur !== etcSuggested) return;   // user owns this value
+  try {
+    const r = await fetch("/v1/etc?mag=" + encodeURIComponent(magS),
+                          { credentials: "include" });
+    if (!r.ok) { note.hidden = true; return; }      // 401/503/422: stay quiet
+    const b = await r.json();
+    etcSuggested = String(Math.round(b.minutes));
+    expEl.value = etcSuggested;
+    note.textContent = `suggested for mag ${magS} (editable): `
+      + `${b.n_exposures} × ${Math.round(b.exposure_seconds)} s ≈ ${b.minutes} min `
+      + `(LLAMAS ETC, binned S/N ${b.snr})`
+      + (b.extrapolated ? " — outside the calibrated range, treat as rough" : "");
+    note.hidden = false;
+  } catch (e) { /* offline / no backend: leave the field alone */ }
+}
+$("t-mag").addEventListener("change", suggestExposure);
 boot();

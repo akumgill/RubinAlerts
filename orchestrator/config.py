@@ -109,7 +109,11 @@ class LLAMASConfig:
     # relative schedule is unchanged) until Rubin delivers high-z SNe that then
     # rise to the top automatically. Unknown z -> neutral (1.0): not penalized.
     # ------------------------------------------------------------------
-    z_preference_enabled: bool = True
+    # DEFAULT OFF since 2026-08-18: superseded by the alert pipeline's V(z)
+    # sample-density factor in the PI-approved score (score = P x V(z) x G x U)
+    # — applying both would double-tilt the ranking in redshift. Re-enable only
+    # for candidate lists that carry no score columns.
+    z_preference_enabled: bool = False
     z_preference_range: tuple = (0.6, 0.8)
     z_preference_sigma: float = 0.2
     z_preference_floor: float = 0.3

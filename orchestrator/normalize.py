@@ -473,11 +473,17 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
     # Per-target ranking merit: the program's own profile column when
     # configured and present, else the shared (Ia) merit.
     if merit_col in df.columns:
-        # Ranking merit: prefer the value-density column (merit_rate =
-        # merit x (45min/exposure)^alpha) when the pipeline provides it —
+        # Ranking merit: prefer the PI-approved score-density column
+        # (score_rate = P x V(z) x G x U x (45min/exposure)^alpha,
+        # 2026-08-18), falling back to merit_rate, then plain merit —
         # ranking rewards science per hour, while `merit` itself remains the
         # pure science value for auditability.
-        base_rate = 'merit_rate' if 'merit_rate' in df.columns else merit_col
+        if 'score_rate' in df.columns and df['score_rate'].notna().any():
+            base_rate = 'score_rate'
+        elif 'merit_rate' in df.columns:
+            base_rate = 'merit_rate'
+        else:
+            base_rate = merit_col
         df['_rank_merit'] = df[base_rate]
         if program_profiles and 'program' in df.columns:
             for prog, prof in program_profiles.items():
@@ -542,9 +548,14 @@ def load_from_rubinalerts(path: str, max_targets: int = 30,
         elif 'mag' in df.columns and pd.notna(row.get('mag')):
             mag_val, mag_filt = parse_magnitude(str(row['mag']))
 
-        # Phase weight from alert pipeline (w_time = exp(-dt²/2τ²))
+        # Phase weight from the alert pipeline. Prefer the deadline-shaped
+        # rest-frame urgency U (u_urgency, PI-approved score 2026-08-18 —
+        # fixes the (1+z) time-dilation bias of the Gaussian); fall back to
+        # the legacy w_time = exp(-dt²/2τ²) for older candidates files.
         phase_w = float('nan')
-        if 'w_time' in df.columns and pd.notna(row.get('w_time')):
+        if 'u_urgency' in df.columns and pd.notna(row.get('u_urgency')):
+            phase_w = float(row['u_urgency'])
+        elif 'w_time' in df.columns and pd.notna(row.get('w_time')):
             phase_w = float(row['w_time'])
 
         # Signed time-from-peak (days) from the alert pipeline, used for

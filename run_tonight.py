@@ -52,7 +52,9 @@ from core.peak_fitting import (
 from core.magellan_planning import (
     compute_merit, compute_merit_breakdown, filter_observable_targets,
     radec_to_sexagesimal, EXOTIC_PROFILE,
+    compute_score_breakdown, ledger_redshift_counts,
 )
+from config import SCORE_CONFIG
 from core.ddf_fields import DDF_FIELDS, is_in_ddf, max_possible_brokers
 from core.fink_breaker import (
     FinkBreaker, ACTION_FETCH, ACTION_COOLDOWN, ACTION_PROCEED,
@@ -1886,7 +1888,9 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
         salt_status = salt.get('status', '') if salt else ''
         salt_ok = bool(salt) and salt.get('status') == 'ok'
         salt_x1 = salt.get('x1', np.nan) if salt_ok else np.nan
+        salt_x1_err = salt.get('x1_err', np.nan) if salt_ok else np.nan
         salt_c = salt.get('c', np.nan) if salt_ok else np.nan
+        salt_c_err = salt.get('c_err', np.nan) if salt_ok else np.nan
         salt_chi2_dof = salt.get('chi2_dof', np.nan) if salt_ok else np.nan
         salt_z = salt.get('z', np.nan) if salt_ok else np.nan
         salt_peak_mag_B = salt.get('peak_mag_B', np.nan) if salt_ok else np.nan
@@ -2005,7 +2009,9 @@ def build_summary_table(candidates_df, fit_results, mjd_now, host_info=None,
             # SALT fit results
             'salt_status': salt_status,
             'salt_x1': salt_x1,
+            'salt_x1_err': salt_x1_err,
             'salt_c': salt_c,
+            'salt_c_err': salt_c_err,
             'salt_chi2_dof': salt_chi2_dof,
             'salt_z': salt_z,
             'salt_peak_mag_B': salt_peak_mag_B,
@@ -2180,7 +2186,9 @@ def enrich_finalist_redshifts(summary, fit_results, use_salt=False):
                     if refit.get('status') == 'ok':
                         summary.at[idx, 'salt_chi2_dof'] = refit.get('chi2_dof', np.nan)
                         summary.at[idx, 'salt_x1'] = refit.get('x1', np.nan)
+                        summary.at[idx, 'salt_x1_err'] = refit.get('x1_err', np.nan)
                         summary.at[idx, 'salt_c'] = refit.get('c', np.nan)
+                        summary.at[idx, 'salt_c_err'] = refit.get('c_err', np.nan)
                         summary.at[idx, 'salt_z'] = z
                         pmB = refit.get('peak_mag_B', np.nan)
                         if np.isfinite(pmB):
@@ -2514,6 +2522,10 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
 
     has_rate = ('merit_rate' in summary_df.columns
                 and summary_df['merit_rate'].notna().any())
+    # PI-approved score (2026-08-18): when present, summary_df arrives sorted
+    # by score_rate and the report labels/annotations follow that ordering.
+    has_score = ('score_rate' in summary_df.columns
+                 and summary_df['score_rate'].notna().any())
 
     with PdfPages(pdf_path) as pdf:
         # --- Title page ---
@@ -2568,7 +2580,9 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
         if len(summary_df) > 0:
             fig, ax = plt.subplots(figsize=(11, 8.5))
             ax.axis('off')
-            title = ('Top 30 Candidates — ranked by merit per hour'
+            title = ('Top 30 Candidates — ranked by score per hour'
+                     if has_score else
+                     'Top 30 Candidates — ranked by merit per hour'
                      if has_rate else 'Top 30 Candidates by Merit')
             ax.set_title(title, fontsize=14, pad=20)
 
@@ -2588,7 +2602,8 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
             table_df['name'] = table_df.apply(_display_name, axis=1)
 
             display_cols = ['name', 'ddf_field', 'RA_s', 'Dec_s',
-                           'peak_mag', 'peak_band', 'delta_t', 'merit',
+                           'peak_mag', 'peak_band', 'delta_t',
+                           'score', 'score_rate', 'merit',
                            'merit_rate', 'exposure_minutes',
                            'brokers_detected', 'fit_method', 'surveys']
             display_df = table_df[
@@ -2598,7 +2613,8 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
             display_df = display_df.dropna(axis=1, how='all')
 
             # Format numbers
-            for col in ['peak_mag', 'merit', 'merit_rate', 'sn_score']:
+            for col in ['peak_mag', 'score', 'score_rate', 'merit',
+                        'merit_rate', 'sn_score']:
                 if col in display_df.columns:
                     display_df[col] = display_df[col].apply(
                         lambda x: f'{x:.2f}' if pd.notna(x) and np.isfinite(x) else '--')
@@ -2610,7 +2626,7 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
                     lambda x: f'{x:.0f}m' if pd.notna(x) and np.isfinite(x) else '--')
             display_df = display_df.rename(columns={
                 'name': 'Object', 'merit_rate': 'merit/hr',
-                'exposure_minutes': 'exp est.'})
+                'score_rate': 'score/hr', 'exposure_minutes': 'exp est.'})
 
             tbl = ax.table(
                 cellText=display_df.values,
@@ -2623,8 +2639,13 @@ def generate_pdf_report(summary_df, fit_results, plot_paths,
             tbl.auto_set_column_width(range(len(display_df.columns)))
             tbl.scale(1.0, 1.12)
 
-            if has_rate:
+            if has_rate or has_score:
+                note = ('score = P x V(z) x G x U (usable-Ia x sample value x '
+                        'info gain x urgency); score/hr = score x '
+                        '(45 min / exp)^0.5 is the primary ordering. '
+                        if has_score else '')
                 ax.text(0.5, -0.06,
+                        note +
                         'merit/hr = merit x (45 min / exp)^0.5. "exp est." is the '
                         'ranking\'s magnitude-based estimate; the LLAMAS plan '
                         're-sizes exposures with redshift where known (see the '
@@ -2917,7 +2938,7 @@ W_absmag — Absolute Magnitude: Gaussian at M_B = −19.3, σ = 0.7
         # --- Remaining pages: light curve plots, 4 per page ---
         # Keep the ranking order (merit per hour when available) so plot
         # rank numbers match the summary table and the LLAMAS plan inputs.
-        ordered = (summary_df if has_rate else
+        ordered = (summary_df if (has_rate or has_score) else
                    summary_df.sort_values('merit', ascending=False,
                                           na_position='last'))
         # Build ranked list: (rank, diaObjectId) for candidates with plots
@@ -2945,6 +2966,8 @@ W_absmag — Absolute Magnitude: Gaussian at M_B = −19.3, σ = 0.7
                 if len(row) > 0:
                     r = row.iloc[0]
                     info = f"#{rank}"
+                    if has_score and pd.notna(r.get('score_rate')):
+                        info += f"  Score/hr={r['score_rate']:.3f}"
                     if pd.notna(r['merit']):
                         info += f"  Merit={r['merit']:.3f}"
                     if has_rate and pd.notna(r.get('merit_rate')):
@@ -3679,7 +3702,47 @@ def main():
         if 'merit_exotic_rate' in summary.columns:
             summary['merit_exotic_rank'] = summary['merit_exotic_rate'].rank(
                 ascending=False, method='min', na_option='bottom').astype(int)
-        summary = summary.sort_values('merit_rate', ascending=False,
+
+        # --- PI-approved score (2026-08-18): score = P x V(z) x G x U ---
+        # Computed ALONGSIDE merit (which stays in the CSV unchanged for
+        # continuity); every factor persisted as its own column. score_rate
+        # applies the SAME value-density factor as merit_rate, and the
+        # PRIMARY ORDERING (CSV, top-5 log, PDF, LLAMAS hand-off) is now
+        # score_rate, falling back to merit_rate when score is all-NaN.
+        try:
+            z_score = pd.to_numeric(
+                summary['z_best'] if 'z_best' in summary.columns
+                else summary.get('redshift'), errors='coerce')
+            ledger_counts = ledger_redshift_counts(SCORE_CONFIG.ledger_path)
+            sb = compute_score_breakdown(
+                w_prob=pd.to_numeric(summary.get('w_prob'), errors='coerce'),
+                w_iaspec=pd.to_numeric(summary.get('w_iaspec'), errors='coerce'),
+                salt_c_err=pd.to_numeric(summary.get('salt_c_err'), errors='coerce'),
+                tns_type=summary.get('tns_type'),
+                z_source=summary.get('z_source'),
+                delta_t=pd.to_numeric(summary.get('delta_t'), errors='coerce'),
+                z=z_score, ledger_counts=ledger_counts)
+            for col in ('score', 'p_usable', 'v_z', 'g_info', 'u_urgency',
+                        'w_lcq'):
+                summary[col] = sb[col]
+            summary['score_rate'] = summary['score'] * density
+            s = summary['score_rate']
+            summary['score_rank'] = s.rank(ascending=False, method='min',
+                                           na_option='bottom').astype(int)
+            n_sranked = s.notna().sum()
+            if n_sranked > 1:
+                summary['score_percentile'] = ((n_sranked - summary['score_rank'])
+                                               / (n_sranked - 1) * 100).clip(0, 100).round(1)
+            else:
+                summary['score_percentile'] = np.where(s.notna(), 100.0, np.nan)
+        except Exception as e:
+            logger.warning("Score computation failed (falling back to "
+                           "merit_rate ordering): %s", e)
+
+        sort_col = ('score_rate'
+                    if 'score_rate' in summary.columns
+                    and summary['score_rate'].notna().any() else 'merit_rate')
+        summary = summary.sort_values(sort_col, ascending=False,
                                       na_position='last').reset_index(drop=True)
 
     # --- Step 7: Generate light curve plots ---
@@ -3782,16 +3845,24 @@ def main():
             logger.info("  SALT2 fits: %d successful (%d with chi2/dof < 2)",
                        n_salt_ok, len(good_chi2))
 
-    # Print top 5 by merit (ranking preview; the schedule lives in llamas/)
+    # Print top 5 by the primary ordering (score_rate when the score computed,
+    # else merit_rate/merit — ranking preview; the schedule lives in llamas/)
     if len(summary) > 0:
-        top = summary.sort_values('merit', ascending=False).head(5)
-        logger.info("\nTop 5 by merit:")
+        rank_col = next((c for c in ('score_rate', 'merit_rate', 'merit')
+                         if c in summary.columns
+                         and summary[c].notna().any()), 'merit')
+        top = summary.sort_values(rank_col, ascending=False,
+                                  na_position='last').head(5)
+        logger.info("\nTop 5 by %s:", rank_col)
         for _, r in top.iterrows():
             ra_s, dec_s = radec_to_sexagesimal(r['ra'], r['dec'])
-            logger.info("  %s  %s %s  mag=%.1f  dt=%+.0fd  merit=%.3f  %s",
+            score_v = r.get('score', np.nan)
+            score_s = f"{score_v:.3f}" if pd.notna(score_v) else "--"
+            logger.info("  %s  %s %s  mag=%.1f  dt=%+.0fd  score=%s  merit=%.3f  %s",
                         str(r['diaObjectId'])[-12:], ra_s, dec_s,
                         r['peak_mag'] if np.isfinite(r['peak_mag']) else 0,
                         r['delta_t'] if np.isfinite(r['delta_t']) else 0,
+                        score_s,
                         r['merit'] if np.isfinite(r['merit']) else 0,
                         r.get('ddf_field', ''))
 

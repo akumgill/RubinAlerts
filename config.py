@@ -61,6 +61,64 @@ class MeritConfig:
 
 
 # =============================================================================
+# Score Function Parameters (PI-approved ranking, 2026-08-18)
+# =============================================================================
+
+@dataclass
+class ScoreConfig:
+    """Configuration for the PI-approved selection score (2026-08-18).
+
+    score = P x V(z) x G x U, computed ALONGSIDE the legacy merit (which stays
+    in the outputs for continuity):
+
+      P  — usable-cosmology-Ia probability: w_prob x w_iaspec x w_lcq, where
+           w_lcq is a light-curve-quality factor from the SALT2 color error.
+      V  — Hubble-diagram sample value: inverse density of the already-observed
+           (+ community prior) sample in Delta-z bins.
+      G  — information gain from a spectrum: near-zero when the object is
+           already spec-typed AND has a spec-z, graded in between.
+      U  — urgency: deadline-shaped in REST-FRAME days past peak (replaces the
+           Gaussian w_time as the ranking's phase factor).
+
+    EVERY DEFAULT BELOW IS PROVISIONAL pending PI (Chris) review — they encode
+    the 2026-08-18 proposal, not a calibrated policy.
+    """
+
+    # --- P: light-curve-quality factor w_lcq from SALT2 color error ---
+    # w_lcq = clip(1 / (1 + (salt_c_err / c_err_ref)^2), floor, 1.0);
+    # missing/non-finite c_err -> neutral 1.0 (codebase convention).
+    lcq_c_err_ref: float = 0.06     # provisional
+    lcq_floor: float = 0.4          # provisional
+
+    # --- V(z): Hubble-diagram sample-density value ---
+    v_bin_width: float = 0.05       # Delta-z bin width over [0, v_z_max]
+    v_z_max: float = 0.5
+    # prior(bin) = v_prior_amp * exp(-z_mid / v_prior_scale): community low-z
+    # saturation (nearby Hubble-diagram bins are already full). Provisional.
+    v_prior_amp: float = 30.0
+    v_prior_scale: float = 0.08
+    v_floor: float = 0.05           # after max-bin normalization to 1.0
+    v_unknown_default: float = 0.5  # unknown z when NO night candidate has one
+    # Ledger of past observations (orchestrator target ledger) counted into
+    # n_eff per bin; missing/unreadable -> counts of 0 (prior only).
+    ledger_path: str = 'target_ledger.json'
+
+    # --- G: information gain of taking a spectrum ---
+    g_both: float = 0.05            # spec-typed AND spec-z: nearly nothing to gain
+    g_type_only: float = 0.7        # typed but no spec-z: z is the gain
+    g_z_only: float = 0.9           # spec-z but untyped: type is the gain
+    g_neither: float = 1.0
+
+    # --- U: urgency, deadline-shaped in rest-frame days past peak ---
+    # p = delta_t / (1 + z) (rest-frame; observer-frame when z unknown).
+    # U = 1.0 for p <= u_flat_rest_days (including all pre-peak);
+    # U = exp(-(p - flat) / u_tau_rest_days) beyond, floored at u_floor.
+    u_flat_rest_days: float = 5.0   # provisional
+    u_tau_rest_days: float = 12.0   # provisional
+    u_floor: float = 0.05           # provisional
+
+
+# =============================================================================
 # Observability Parameters
 # =============================================================================
 
@@ -163,6 +221,7 @@ class PathConfig:
 
 # Create default config instances for easy import
 MERIT_CONFIG = MeritConfig()
+SCORE_CONFIG = ScoreConfig()
 OBSERVATORY_CONFIG = ObservatoryConfig()
 BROKER_CONFIG = BrokerConfig()
 PIPELINE_CONFIG = PipelineConfig()
@@ -173,6 +232,7 @@ def get_config() -> Dict:
     """Return all configuration as a dictionary for logging/serialization."""
     return {
         'merit': MERIT_CONFIG.__dict__,
+        'score': SCORE_CONFIG.__dict__,
         'observatory': OBSERVATORY_CONFIG.__dict__,
         'broker': BROKER_CONFIG.__dict__,
         'pipeline': PIPELINE_CONFIG.__dict__,

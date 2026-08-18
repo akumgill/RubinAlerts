@@ -788,3 +788,43 @@ exposure than Type II" interplays with the resolution standardization needs):
   mind, or does any planned measurement need narrow features? His answer sets
   n_bin, which sets every exposure the ETC produces (see core/snr_etc.py:50-51,
   DEFAULT_N_BIN; the "target binned SNR" is also still an OPEN QUESTION there).
+
+### 2026-08-18 — PI-approved ranking function: score = P × V(z) × G × U
+
+PI (Chris) approved a new PRIMARY ranking for the alert pipeline, computed
+alongside the legacy merit (merit/merit_rate/merit_rank stay in candidates.csv
+unchanged for continuity). Decisions recorded:
+
+- **w_iaspec keeps the purity role** (Ia-evidence preference inside P);
+  the NEW **G info-gain factor** is what deprioritizes already-typed+z'd
+  objects — G = 0.05 when TNS spec-type AND spec-z are both known ("free
+  sample": it enters the cosmology sample without costing a follow-up slot),
+  0.7 type-only, 0.9 spec-z-only, 1.0 neither. Purity (is it a usable Ia?)
+  and information gain (do we learn anything by pointing?) are now separate,
+  auditable factors instead of one overloaded weight.
+- **score = P × V(z) × G × U**, per-factor columns persisted
+  (p_usable, v_z, g_info, u_urgency, w_lcq; plus salt_x1_err/salt_c_err now
+  written through from the SALT fits). P = w_prob × w_iaspec × w_lcq with
+  w_lcq = clip(1/(1+(salt_c_err/0.06)²), 0.4, 1.0) — a cosmology-usability
+  light-curve-quality gate from the SALT2 color error.
+- **score_rate ordering**: score × (45 min/exp)^α, the SAME value-density
+  factor as merit_rate — the ÷T_exp division stays per the July 2026
+  α = 0.5 density decision (--rank-alpha). candidates.csv, the top-5 log,
+  the PDF report and the LLAMAS hand-off now order by score_rate, falling
+  back to merit_rate when score is all-NaN (old inputs).
+- **V(z) sample-density supersedes the orchestrator z_preference** —
+  Δz = 0.05 bins over [0, 0.5]; n_eff(bin) = ledger count (last non-null
+  required_seconds_history redshift per target_ledger.json entry) +
+  prior 30·exp(−z_mid/0.08) (community low-z saturation); V = 1/(1+n_eff),
+  max-bin-normalized, floor 0.05; unknown z → median V of the night's
+  known-z candidates. LLAMASConfig.z_preference_enabled default flipped to
+  False to avoid double-tilting the ranking in redshift.
+- **U replaces w_time as the orchestrator phase weight** (normalize prefers
+  a u_urgency column, w_time fallback): deadline-shaped in REST-FRAME days
+  past peak — p = Δt/(1+z), U = 1 for p ≤ 5 (incl. all pre-peak), then
+  exp(−(p−5)/12), floor 0.05. Fixes the (1+z) time-dilation bias and stops
+  penalizing pre-peak discoveries the way the Gaussian did.
+- **All constants provisional pending Chris** — collected in
+  config.ScoreConfig (module-level SCORE_CONFIG), every default flagged in
+  its docstring. Website (web/selection.*) and the selection upload script
+  rank/label by score_rate when a night carries it, legacy merit otherwise.

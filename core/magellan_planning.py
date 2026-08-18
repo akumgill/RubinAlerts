@@ -540,6 +540,200 @@ def compute_merit_breakdown(delta_t, peak_mag,
 
 
 # ---------------------------------------------------------------------------
+# PI-approved selection score (2026-08-18): score = P x V(z) x G x U
+#
+# A scoring layer ALONGSIDE the legacy merit (merit/merit_rate/merit_rank stay
+# in the outputs unchanged for continuity). Every factor is persisted as its
+# own column by run_tonight. All constants live in config.ScoreConfig and are
+# PROVISIONAL pending PI review.
+# ---------------------------------------------------------------------------
+
+def _score_config():
+    """Late import: config.py sits at the repo root (avoids import-order
+    coupling at module load)."""
+    from config import SCORE_CONFIG
+    return SCORE_CONFIG
+
+
+def compute_w_lcq(salt_c_err, config=None):
+    """Light-curve-quality factor from the SALT2 color error.
+
+    w_lcq = clip(1 / (1 + (c_err / c_err_ref)^2), floor, 1.0).
+    Missing/non-finite c_err -> neutral 1.0 (codebase convention).
+    """
+    cfg = config or _score_config()
+    c_err = np.asarray(salt_c_err, dtype=float)
+    with np.errstate(invalid='ignore', over='ignore'):
+        w = 1.0 / (1.0 + (c_err / cfg.lcq_c_err_ref) ** 2)
+    w = np.clip(w, cfg.lcq_floor, 1.0)
+    return np.where(np.isfinite(c_err), w, 1.0)
+
+
+def _is_missing_str(v) -> bool:
+    """True for the missing-string spellings that reach us from CSV/pandas."""
+    if v is None:
+        return True
+    if isinstance(v, float):
+        return not np.isfinite(v)
+    s = str(v).strip().lower()
+    return s in ('', 'nan', 'none', 'null')
+
+
+def compute_g_info(tns_type, z_source, config=None):
+    """Information gain of taking a spectrum of this object.
+
+    has_spec_type = TNS spectroscopic type present; has_spec_z = the adopted
+    redshift is a TNS spec-z. Both known -> almost nothing to gain (the object
+    enters the cosmology sample for free); graded in between.
+    """
+    cfg = config or _score_config()
+    tns_type = np.atleast_1d(np.asarray(tns_type, dtype=object))
+    z_source = np.atleast_1d(np.asarray(z_source, dtype=object))
+    has_type = np.array([not _is_missing_str(t) for t in tns_type])
+    has_z = np.array([(not _is_missing_str(s))
+                      and str(s).strip() == 'tns_specz' for s in z_source])
+    g = np.where(has_type & has_z, cfg.g_both,
+                 np.where(has_type, cfg.g_type_only,
+                          np.where(has_z, cfg.g_z_only, cfg.g_neither)))
+    return g.astype(float)
+
+
+def compute_u_urgency(delta_t, z=None, config=None):
+    """Deadline-shaped urgency in REST-FRAME days past peak.
+
+    p = delta_t / (1 + z) when z is finite, else delta_t (observer frame) —
+    this removes the (1+z) time-dilation bias of the old Gaussian w_time.
+    U = 1.0 for p <= flat (including all pre-peak); beyond the flat region
+    U = exp(-(p - flat) / tau), floored. Non-finite delta_t -> NaN
+    (propagates into the score exactly like merit's phase handling).
+    """
+    cfg = config or _score_config()
+    delta_t = np.asarray(delta_t, dtype=float)
+    if z is None:
+        p = delta_t
+    else:
+        z = np.asarray(z, dtype=float)
+        z_ok = np.isfinite(z) & (z > -0.9)
+        with np.errstate(invalid='ignore'):
+            p = np.where(z_ok, delta_t / (1.0 + z), delta_t)
+    with np.errstate(invalid='ignore', over='ignore'):
+        decay = np.exp(-np.maximum(p - cfg.u_flat_rest_days, 0.0)
+                       / cfg.u_tau_rest_days)
+    u = np.maximum(decay, cfg.u_floor)          # flat region: decay == 1.0
+    return np.where(np.isfinite(delta_t), u, np.nan)
+
+
+def ledger_redshift_counts(ledger_path=None, config=None):
+    """Per-Delta-z-bin counts of already-observed redshifts from the
+    orchestrator's target ledger (target_ledger.json).
+
+    For each ledger entry, the LAST non-null 'redshift' in its
+    required_seconds_history is taken; finite values are histogrammed into
+    the V(z) bins. Missing/unreadable ledger -> zeros (prior only), no crash.
+    """
+    cfg = config or _score_config()
+    if ledger_path is None:
+        ledger_path = cfg.ledger_path
+    n_bins = int(round(cfg.v_z_max / cfg.v_bin_width))
+    counts = np.zeros(n_bins, dtype=float)
+    try:
+        import json
+        with open(ledger_path) as f:
+            ledger = json.load(f)
+    except Exception as e:
+        logger.info("V(z): ledger %s unavailable (%s); prior-only bins",
+                    ledger_path, e)
+        return counts
+    entries = ledger.get('entries', {}) if isinstance(ledger, dict) else {}
+    for entry in entries.values():
+        z = None
+        for rec in reversed(entry.get('required_seconds_history') or []):
+            if rec.get('redshift') is not None:
+                z = rec['redshift']
+                break
+        try:
+            z = float(z) if z is not None else float('nan')
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(z) and 0.0 <= z < cfg.v_z_max:
+            # +1e-9: guard the bin edge against float artifacts (0.30/0.05
+            # = 5.999...9 would otherwise land one bin low)
+            counts[min(int(z / cfg.v_bin_width + 1e-9), n_bins - 1)] += 1
+    return counts
+
+
+def compute_vz_bins(ledger_counts=None, config=None):
+    """V value per Delta-z bin: V = 1/(1 + n_eff), n_eff = ledger + prior,
+    normalized so the best (max) bin = 1.0, floored at v_floor."""
+    cfg = config or _score_config()
+    n_bins = int(round(cfg.v_z_max / cfg.v_bin_width))
+    if ledger_counts is None:
+        ledger_counts = np.zeros(n_bins, dtype=float)
+    ledger_counts = np.asarray(ledger_counts, dtype=float)
+    z_mid = (np.arange(n_bins) + 0.5) * cfg.v_bin_width
+    prior = cfg.v_prior_amp * np.exp(-z_mid / cfg.v_prior_scale)
+    v = 1.0 / (1.0 + ledger_counts + prior)
+    v = v / v.max()
+    return np.maximum(v, cfg.v_floor)
+
+
+def compute_v_z(z, ledger_counts=None, config=None):
+    """Hubble-diagram sample value V(z) per candidate.
+
+    Finite z maps to its Delta-z bin (z beyond v_z_max uses the top bin —
+    beyond the binned range the sample is empty anyway). Unknown/non-finite z
+    gets the MEDIAN V of the night's known-z candidates (data-driven neutral),
+    or v_unknown_default when none is known.
+    """
+    cfg = config or _score_config()
+    z = np.asarray(z, dtype=float)
+    v_bins = compute_vz_bins(ledger_counts, cfg)
+    known = np.isfinite(z) & (z >= 0.0)
+    idx = np.zeros(z.shape, dtype=int)
+    with np.errstate(invalid='ignore'):
+        # +1e-9 guards bin edges against float artifacts (see ledger counts)
+        idx[known] = np.clip((z[known] / cfg.v_bin_width + 1e-9).astype(int),
+                             0, len(v_bins) - 1)
+    v = v_bins[idx]
+    neutral = (float(np.median(v[known])) if known.any()
+               else cfg.v_unknown_default)
+    return np.where(known, v, neutral)
+
+
+def compute_score_breakdown(w_prob, w_iaspec, salt_c_err, tns_type, z_source,
+                            delta_t, z, ledger_counts=None, config=None):
+    """The PI-approved score (2026-08-18) with every factor exposed.
+
+    score = P x V(z) x G x U
+      P = w_prob x w_iaspec x w_lcq   (usable cosmology Ia)
+      V = sample-density value of the candidate's Delta-z bin
+      G = information gain (spec-type / spec-z already known?)
+      U = rest-frame deadline urgency
+
+    Returns dict with 'score', 'p_usable', 'v_z', 'g_info', 'u_urgency',
+    'w_lcq' (all arrays). NaN w_prob/w_iaspec/delta_t propagate to NaN score,
+    matching the merit convention for unrankable candidates.
+    """
+    cfg = config or _score_config()
+    w_prob = np.asarray(w_prob, dtype=float)
+    w_iaspec = np.asarray(w_iaspec, dtype=float)
+    w_lcq = compute_w_lcq(salt_c_err, cfg)
+    p_usable = w_prob * w_iaspec * w_lcq
+    v_z = compute_v_z(z, ledger_counts, cfg)
+    g_info = compute_g_info(tns_type, z_source, cfg)
+    u_urgency = compute_u_urgency(delta_t, z, cfg)
+    score = p_usable * v_z * g_info * u_urgency
+    return {
+        'score': score,
+        'p_usable': p_usable,
+        'v_z': v_z,
+        'g_info': g_info,
+        'u_urgency': u_urgency,
+        'w_lcq': w_lcq,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Moon calculations
 # ---------------------------------------------------------------------------
 

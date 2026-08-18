@@ -56,7 +56,13 @@
 4. East-rising factor (hour angle at evening twilight) — ~1-2h  [IMPLEMENTING]
 5. Per-target airmass range + standards as fake objects per airmass bin
    — ~half day  [IMPLEMENTING]
-6. FITS-header accounting dashboard — ~1-2 days — BLOCKED: where do FITS land?
+6. Observation ingestion + accounting + observed-repository — UNBLOCKED via
+   mock: canonical record + POST /v1/observations + pointing association
+   (1 arcmin; standards disambiguated by airmass-at-obs-time) + budget
+   deduction (split evenly on cross-program dupes) + "Observed" dashboard
+   section + observed-badges informing later ranking (cross-night memory).
+   Only the FITS-header adapter waits on the real delivery location/dialect.
+   ~1 day  [IMPLEMENTING as item F, after 1-5]
 7. "Generate observing plan" button (batches 4-6, 3×N triplets, instrument
    file) — ~1 day — BLOCKED: LLAMAS/LDSS3 file format (Rob Simcoe / LCO docs)
 8. Standards list ingestion — small — BLOCKED: paper/electronic table incoming

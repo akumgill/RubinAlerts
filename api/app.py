@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from .service import TargetQueueService, AuthError, NotFound
+from .selection import SelectionStore, compute_persistence, MAX_PAYLOAD_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,16 @@ if SESSION_SECRET == "dev-insecure-session-secret":
     logger.warning("SESSION_SECRET is unset; using an insecure dev secret")
 
 svc = TargetQueueService(PROGRAMS, ALLOCATIONS, db_path=DB_PATH)
+
+# Nightly SN Ia selection results (separate table in the same DB file; not
+# part of the dashboard cache).
+selection_store = SelectionStore(db_path=DB_PATH)
+
+# Programs allowed to READ the selection view (uploads only need a valid
+# identity — the pipeline posts with its bearer key).
+SELECTION_PROGRAMS = frozenset(
+    p.strip() for p in
+    os.environ.get("SELECTION_PROGRAMS", "CfA-Stubbs").split(",") if p.strip())
 
 # One-time demo seed on a fresh (empty) database.
 if os.environ.get("SEED_DEMO") == "1" and not svc.has_targets():
@@ -261,6 +272,37 @@ def export_plan(request: Request, instrument: str = "LDSS3",
     fname = f"MAGNETS_{instrument}_{date}.{ext}"
     return Response(content=body, media_type=ctype,
                     headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+# ---------------------------------------------------------------------------
+# SN Ia target selection: nightly ranked candidates from the alert pipeline.
+# Ingest (POST) needs any valid identity — the pipeline uploads with its bearer
+# key. The read view is limited to the programs in SELECTION_PROGRAMS.
+# ---------------------------------------------------------------------------
+@app.post("/v1/selection/nights")
+def upload_selection_night(request: Request, payload: dict = Body(...),
+                           authorization: str = Header(None)):
+    _identity(request, authorization)
+    candidates = payload.get("candidates") or []
+    summary = payload.get("summary") or {}
+    if len(json.dumps({"summary": summary, "candidates": candidates})) > MAX_PAYLOAD_BYTES:
+        raise HTTPException(413, f"payload too large (max {MAX_PAYLOAD_BYTES} bytes)")
+    return _guard(lambda: selection_store.upsert_night(
+        str(payload.get("night_stamp") or ""), payload.get("mjd"),
+        summary, candidates))
+
+
+@app.get("/v1/selection")
+def selection(request: Request, limit_nights: int = 10,
+              authorization: str = Header(None)):
+    _, program = _identity(request, authorization)
+    if program not in SELECTION_PROGRAMS:
+        raise HTTPException(
+            403, f"the SN Ia selection view is limited to "
+                 f"{', '.join(sorted(SELECTION_PROGRAMS))}; "
+                 f"your program ({program}) does not have access")
+    nights = _guard(lambda: selection_store.fetch_nights(limit_nights))
+    return {"nights": nights, "persistence": compute_persistence(nights)}
 
 
 # ---------------------------------------------------------------------------

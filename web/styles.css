@@ -50,6 +50,8 @@ h2 .hint{font-weight:400;font-size:.8rem;color:var(--faint);margin-left:.4rem;}
   background:var(--panel);color:var(--ink);cursor:pointer;text-align:left;font:inherit;}
 .night:hover{border-color:var(--slate);}
 .night.on{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink);}
+.night.past:not(.on){opacity:.45;}
+.night.past:not(.on):hover{opacity:.8;}
 .night .nd{font-weight:600;font-size:.82rem;}
 .night .ni{font-family:var(--mono);font-size:.66rem;letter-spacing:.02em;
   padding:.02rem .3rem;border-radius:3px;color:#fff;}

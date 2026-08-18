@@ -13,9 +13,21 @@
 // On total fetch failure (no backend during local dev) -> ./sample.json
 // ===================================================================
 
-// Currently-selected observing night. Defaults to the first post-storm night
-// (Aug-13 LLAMAS); clicking a night in the schedule bar re-points and re-fetches.
+// Currently-selected observing night. The initial value is only a fetch seed;
+// boot() snaps to the next upcoming non-cancelled night from the calendar in
+// the first payload (falling back to the latest past night when the season is
+// over). Clicking a night in the schedule bar re-points and re-fetches.
 let NIGHT = { date: "2026-08-13", instrument: "LDSS3" };
+let NIGHT_SNAPPED = false;
+
+// First non-cancelled calendar night on/after today (local clock), else the
+// last non-cancelled night. Returns null if the payload carries no calendar.
+function upcomingNight(nights) {
+  const usable = (nights || []).filter((n) => n.status !== "cancelled" && n.date);
+  if (!usable.length) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  return usable.find((n) => n.date >= today) || usable[usable.length - 1];
+}
 const dashUrl = () =>
   "/v1/dashboard?date=" + encodeURIComponent(NIGHT.date) +
   "&instrument=" + encodeURIComponent(NIGHT.instrument);
@@ -82,6 +94,17 @@ async function boot() {
     return;
   }
   usingSample = false;
+  // One-time snap: the hardcoded fetch seed goes stale, so re-point to the
+  // next upcoming night from the calendar and re-fetch once.
+  if (!NIGHT_SNAPPED) {
+    NIGHT_SNAPPED = true;
+    const up = upcomingNight(DATA && DATA.nights);
+    if (up && (up.date !== NIGHT.date || up.instrument !== NIGHT.instrument)) {
+      NIGHT = { date: up.date, instrument: up.instrument };
+      await refresh();
+      return;
+    }
+  }
   renderAll();
 }
 
@@ -129,6 +152,10 @@ async function showLogin() {
   $("loading").hidden = true;
   $("dashview").hidden = true;
   $("loginview").hidden = false;
+  // a fresh session may be a different program: re-hide + re-probe the
+  // selection nav link after the next successful load
+  selNavProbed = false;
+  $("selnav").hidden = true;
   fillProgramOptions(programChoices());       // instant, from fallback/sample
   // Then refine from the server's actual configured groups (public endpoint),
   // so every configured program appears even before anyone signs in.
@@ -307,6 +334,19 @@ function renderAll() {
   renderAllocations();
   renderQueue();
   renderFoot();
+  probeSelectionNav();
+}
+
+// Show the "SN Ia target selection" nav link only to programs the selection
+// endpoint admits (a cheap authorized probe; 403/401 leave it hidden).
+let selNavProbed = false;
+async function probeSelectionNav() {
+  if (selNavProbed || usingSample) return;
+  selNavProbed = true;
+  try {
+    const r = await fetch("/v1/selection?limit_nights=1", { credentials: "include" });
+    if (r.ok) $("selnav").hidden = false;
+  } catch (e) { /* leave hidden */ }
 }
 
 function renderHeader() {
@@ -370,9 +410,12 @@ function renderNights() {
   box.innerHTML = nights.map((n) => {
     const on = n.date === cur.date && n.instrument === cur.instrument;
     const cancelled = n.status === "cancelled";
+    const past = !cancelled && n.date < new Date().toISOString().slice(0, 10);
     const half = (n.length === "half") ? `<span class="nl">½</span>` : "";
-    const cls = "night" + (on ? " on" : "") + (cancelled ? " cancelled" : "");
-    const title = esc((cancelled ? (n.note || "cancelled") : (n.observer || ""))
+    const cls = "night" + (on ? " on" : "") + (cancelled ? " cancelled" : "")
+      + (past ? " past" : "");
+    const title = esc((cancelled ? (n.note || "cancelled")
+                       : (past ? "observed · " : "") + (n.observer || ""))
                       + (n.program ? " · " + n.program : ""));
     const mark = cancelled ? `<span class="nx" aria-label="cancelled">✕</span>` : "";
     return `<button type="button" class="${cls}"${cancelled ? " disabled" : ""}
@@ -380,7 +423,7 @@ function renderNights() {
       ${mark}
       <span class="nd">${esc(prettyDate(n.date))}</span>
       <span class="ni ni-${esc((n.instrument || "").toLowerCase())}">${esc(n.instrument)}</span>${half}
-      <span class="no">${esc(cancelled ? "cancelled" : (n.observer || ""))}</span>
+      <span class="no">${esc(cancelled ? "cancelled" : (past ? "done · " : "") + (n.observer || ""))}</span>
     </button>`;
   }).join("");
 }

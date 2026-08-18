@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SN Ia target selection</title>
+  <link rel="stylesheet" href="./styles.css">
+  <style>
+    /* selection-page-only styles; everything else reuses styles.css */
+    .backlink{color:var(--slate);text-decoration:none;border-bottom:1px dotted var(--slate);font-size:.8rem;}
+    .backlink:hover{color:var(--ink);border-bottom-color:var(--ink);}
+    .badge{display:inline-block;font-size:.66rem;font-weight:700;font-family:var(--mono);
+      padding:.1em .45em;border-radius:3px;margin-right:.25rem;white-space:nowrap;
+      border:1px solid transparent;}
+    .badge.specia{color:var(--ok);border-color:var(--ok);}
+    .badge.spectype{color:#b3802e;border-color:#b3802e;}
+    @media (prefers-color-scheme: dark){ .badge.spectype{color:#d9a44a;border-color:#d9a44a;} }
+    :root[data-theme="dark"] .badge.spectype{color:#d9a44a;border-color:#d9a44a;}
+    :root[data-theme="light"] .badge.spectype{color:#b3802e;border-color:#b3802e;}
+    .badge.nuclear{color:var(--err);border-color:var(--err);}
+    .badge.sparse{color:var(--faint);border-color:var(--faint);}
+    .badge.freesample{color:#6a4a86;border-color:#6a4a86;}
+    @media (prefers-color-scheme: dark){ .badge.freesample{color:#b394d6;border-color:#b394d6;} }
+    :root[data-theme="dark"] .badge.freesample{color:#b394d6;border-color:#b394d6;}
+    :root[data-theme="light"] .badge.freesample{color:#6a4a86;border-color:#6a4a86;}
+    .meritcell{min-width:7rem;}
+    .meritbar{display:flex;align-items:center;gap:.45rem;}
+    .meritbar .track{flex:1;height:.4rem;min-width:3.5rem;background:var(--hair2);border-radius:2px;overflow:hidden;}
+    .meritbar .fill{display:block;height:100%;background:var(--copper);}
+    .meritbar .mv{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:.8rem;}
+    .objlink{color:var(--copper);font-weight:600;text-decoration:none;}
+    .objlink:hover{text-decoration:underline;}
+    .subid{display:block;font-size:.66rem;color:var(--faint);font-family:var(--mono);}
+    .showall{margin:.6rem 0 0;}
+    .ranktrail{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap;}
+    .ranktrail .miss{color:var(--faint);}
+    .denied{max-width:30rem;margin:4rem auto;padding:1.2rem 1.4rem;background:var(--panel);
+      border:1px solid var(--hair);border-left:3px solid var(--err);border-radius:6px;
+      font-size:.9rem;color:var(--slate);}
+    .denied b{color:var(--ink);}
+  </style>
+</head>
+<body>
+  <!-- Login view (hidden until 401) — same pattern as index.html -->
+  <div class="wrap" id="loginview" hidden>
+    <div class="eyebrow">SN Ia target selection</div>
+    <div class="login">
+      <h2>Sign in to your program</h2>
+      <form id="loginform">
+        <label for="lg-prog">Program</label>
+        <select id="lg-prog" name="program" required></select>
+        <label for="lg-pass">Password</label>
+        <input type="password" id="lg-pass" name="password" autocomplete="current-password" required>
+        <button class="btn primary" type="submit">Sign in</button>
+        <div class="err" id="lg-err" role="alert"></div>
+      </form>
+      <div class="guidecallout"><a href="./index.html">&larr; Back to the shared queue dashboard</a></div>
+    </div>
+  </div>
+
+  <!-- 403 view -->
+  <div class="wrap" id="deniedview" hidden>
+    <div class="eyebrow">SN Ia target selection</div>
+    <div class="denied" id="deniedmsg"></div>
+    <div style="text-align:center"><a class="backlink" href="./index.html">&larr; Back to the shared queue dashboard</a></div>
+  </div>
+
+  <!-- Selection view -->
+  <div class="wrap" id="selview" hidden>
+    <div class="topbar">
+      <div>
+        <div class="eyebrow">MAGNETS &mdash; alert pipeline</div>
+        <h1 id="title">SN Ia target selection<span class="proto">nightly</span></h1>
+        <div class="meta" id="meta"></div>
+      </div>
+      <div class="whoami">
+        <div id="whoami-line"></div>
+        <div style="margin-top:.4rem"><a class="backlink" href="./index.html">&larr; shared queue dashboard</a></div>
+      </div>
+    </div>
+
+    <h2>Nights <span class="hint">each pill is one pipeline run &mdash; pick one to inspect its ranked list</span></h2>
+    <div class="nights" id="nightpills"></div>
+
+    <div class="summary" id="nightsummary"></div>
+
+    <h2 id="cand-h">Ranked candidates <span class="hint" id="cand-hint">the pipeline&rsquo;s ordering for this night &mdash; score/hr = P &times; V(z) &times; G &times; U per unit exposure on new nights (hover a score for the factor breakdown); older nights rank by the multiplicative merit</span></h2>
+    <div class="tablewrap"><table>
+      <thead><tr><th>#</th><th>Object</th><th>RA / Dec</th><th>mag</th><th>&Delta;t (d)</th><th>z</th><th>pts</th><th class="meritcell" id="rankval-th">Merit</th><th>Flags</th></tr></thead>
+      <tbody id="candbody"></tbody></table></div>
+    <button class="btn showall" id="showall" hidden></button>
+
+    <h2>Persistent across nights <span class="hint">objects ranked in two or more of the recent uploads &mdash; rank trail reads oldest &rarr; newest</span></h2>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Object</th><th>Nights</th><th>Rank trail</th><th title="score/hr on nights ranked by the 2026-08-18 score; merit on older nights">Latest value</th></tr></thead>
+      <tbody id="persistbody"></tbody></table></div>
+
+    <div class="foot" id="foot"></div>
+  </div>
+
+  <div class="loading" id="loading">Loading the nightly selection&hellip;</div>
+
+  <script src="./selection.js"></script>
+</body>
+</html>

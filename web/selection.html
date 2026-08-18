@@ -75,6 +75,17 @@
     .linkrow a{color:var(--slate);text-decoration:none;border:1px solid var(--hair);
       border-radius:4px;padding:.15rem .55rem;}
     .linkrow a:hover{color:var(--ink);border-color:var(--slate);}
+    /* one-click enqueue (detail panel) */
+    .enqrow{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;font-size:.78rem;
+      border-top:1px dotted var(--hair);padding-top:.6rem;}
+    .enq-form{display:inline-flex;align-items:center;gap:.35rem;flex-wrap:wrap;color:var(--slate);}
+    .enq-form[hidden]{display:none;}
+    .enq-form b{color:var(--ink);}
+    .enq-form select,.enq-form input{font-size:.76rem;padding:.15rem .3rem;
+      border:1px solid var(--hair);border-radius:4px;background:var(--paper);color:var(--ink);}
+    .enq-note{font-size:.75rem;}
+    .enq-note.err{color:var(--err);}
+    .enq-done{color:var(--ok);font-weight:650;font-size:.8rem;}
     /* photometry band colors (light theme): ZTF g/r, Rubin ugrizy, ATLAS c/o.
        Distinguishable on the paper background; dark overrides below. */
     :root{

@@ -477,12 +477,126 @@ function linkRow(c) {
   return links.length ? `<div class="linkrow">${links.join("")}</div>` : "";
 }
 
-function detailRow(c, n, colspan) {
+// ---- one-click enqueue (stamped #1) ------------------------------------
+// Submits the candidate to the shared observing queue (POST /v1/targets) as
+// the logged-in program. Values are PRE-FILLED but editable in an inline
+// confirm popover: tier from tonight's rank (top 5 -> P1, 6-15 -> P2, rest
+// -> P3), mag = peak_mag faded to TONIGHT with the same coarse rates the
+// LLAMAS orchestrator uses (LLAMASConfig: rise 0.10 mag/d pre-peak, decline
+// 0.05 mag/d post-peak, capped at 3.0 mag), exposure = /v1/etc triplet for
+// that mag (fallback 3 x 900 s if the ETC is unavailable).
+const ENQ_RATE_RISE = 0.10, ENQ_RATE_DECLINE = 0.05, ENQ_FADE_CAP = 3.0;
+const ENQUEUED = new Map();   // candidate id -> "note text" (session-local)
+
+const candId = (c) => String(c.ztf_oid || c.diaObjectId || c.tns_name || "?");
+const candName = (c) => c.ztf_oid || c.tns_name || String(c.diaObjectId || "");
+
+function anticipatedMag(c) {
+  if (c.peak_mag == null) return null;
+  if (c.delta_t == null || !isFinite(c.delta_t)) return c.peak_mag;
+  const fade = c.delta_t < 0 ? Math.abs(c.delta_t) * ENQ_RATE_RISE
+                             : c.delta_t * ENQ_RATE_DECLINE;
+  return c.peak_mag + Math.min(ENQ_FADE_CAP, fade);
+}
+
+const tierForRank = (rank) => (rank <= 5 ? "P1" : rank <= 15 ? "P2" : "P3");
+
+function enqueueBlock(c, i) {
+  if (c.ra == null || c.dec == null) return "";   // nothing to point at
+  const done = ENQUEUED.get(candId(c));
+  if (done) {
+    return `<div class="enqrow"><span class="enq-done">enqueued ✓ ${esc(done)}</span></div>`;
+  }
+  const tiers = ["P1", "P2", "P3", "P4", "P5"];
+  const tier0 = tierForRank(i + 1);
+  const opts = tiers.map((t) =>
+    `<option${t === tier0 ? " selected" : ""}>${t}</option>`).join("");
+  return `<div class="enqrow" data-ix="${i}">
+    <button type="button" class="btn primary enq-btn" data-ix="${i}">Enqueue for LLAMAS…</button>
+    <span class="enq-form" hidden>
+      <b>${esc(candName(c))}</b>
+      <span class="enq-mag"></span>
+      · tier <select class="enq-tier" aria-label="priority tier">${opts}</select>
+      · 3 × <input class="enq-sec" inputmode="numeric" size="4" aria-label="sub-exposure seconds"> s
+      <button type="button" class="btn primary enq-go" data-ix="${i}">Add to queue</button>
+      <button type="button" class="btn enq-cancel">Cancel</button>
+    </span>
+    <span class="enq-note"></span>
+  </div>`;
+}
+
+async function openEnqueue(c, box) {
+  const magEl = box.querySelector(".enq-mag");
+  const secEl = box.querySelector(".enq-sec");
+  const mag = anticipatedMag(c);
+  magEl.textContent = mag != null
+    ? `· mag tonight ≈ ${mag.toFixed(1)}` : "· no mag estimate";
+  let sec = 900;                        // fallback: 3 x 900 s
+  let src = "default";
+  if (mag != null) {
+    try {
+      const r = await fetch("/v1/etc?mag=" + encodeURIComponent(mag.toFixed(2)),
+                            { credentials: "include" });
+      if (r.status === 401) { showLogin(); return; }
+      if (r.ok) { sec = (await r.json()).exposure_seconds; src = "ETC"; }
+    } catch (e) { /* keep fallback */ }
+  }
+  secEl.value = Math.round(sec);
+  secEl.dataset.src = src;
+  box.querySelector(".enq-btn").hidden = true;
+  box.querySelector(".enq-form").hidden = false;
+}
+
+async function submitEnqueue(c, box) {
+  const note = box.querySelector(".enq-note");
+  const go = box.querySelector(".enq-go");
+  const sec = Number(box.querySelector(".enq-sec").value);
+  if (!isFinite(sec) || sec <= 0) {
+    note.className = "enq-note err";
+    note.textContent = "sub-exposure seconds must be a positive number";
+    return;
+  }
+  const mag = anticipatedMag(c);
+  const item = {
+    name: candName(c), ra: c.ra, dec: c.dec,
+    priority: box.querySelector(".enq-tier").value,
+    instrument: "LLAMAS",
+    mag: mag != null ? Number(mag.toFixed(2)) : null,
+    n_exposures: 3, exposure_seconds: sec,
+  };
+  go.disabled = true;                    // double-click guard
+  try {
+    const res = await fetch("/v1/targets", {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([item]),
+    });
+    if (res.status === 401) { showLogin(); return; }
+    let r0 = null;
+    try { r0 = (await res.json())[0]; } catch (e) { /* non-json */ }
+    if (res.ok && r0 && r0.status === "ok") {
+      ENQUEUED.set(candId(c),
+        `${item.priority} · 3×${Math.round(sec)}s${r0.updated ? " (updated existing entry)" : ""}`);
+      renderCandidates();                // re-render shows the ✓ state
+    } else {
+      note.className = "enq-note err";
+      note.textContent = "rejected: " + ((r0 && r0.error) || `HTTP ${res.status}`);
+      go.disabled = false;
+    }
+  } catch (e) {
+    note.className = "enq-note err";
+    note.textContent = "network error — not submitted";
+    go.disabled = false;
+  }
+}
+
+function detailRow(c, n, colspan, i) {
   return `<tr class="detail-tr"><td colspan="${colspan}"><div class="detail">
     ${lcSvg(c, n)}
     ${scoreChain(c)}
     ${factGrid(c)}
     ${linkRow(c)}
+    ${enqueueBlock(c, i)}
   </div></td></tr>`;
 }
 
@@ -527,7 +641,7 @@ function renderCandidates() {
       <td class="num">${c.n_points == null ? "—" : esc(c.n_points)}</td>
       <td class="meritcell">${meritCell}</td>
       <td>${badges(c)}</td></tr>` +
-      (open ? detailRow(c, n, 9) : "");
+      (open ? detailRow(c, n, 9, i) : "");
   }).join("") ||
     `<tr><td colspan="9" style="color:var(--faint)">no candidates for this night</td></tr>`;
 
@@ -535,6 +649,20 @@ function renderCandidates() {
   // sources can be compared); clicks on links (TNS etc.) pass through untouched
   $("candbody").onclick = (e) => {
     if (e.target.closest("a")) return;
+    // enqueue controls live inside the detail row — handle and stop there
+    const enqBox = e.target.closest(".enqrow");
+    if (enqBox) {
+      const c = cands[+enqBox.dataset.ix];
+      if (e.target.closest(".enq-btn")) openEnqueue(c, enqBox);
+      else if (e.target.closest(".enq-go")) submitEnqueue(c, enqBox);
+      else if (e.target.closest(".enq-cancel")) {
+        enqBox.querySelector(".enq-form").hidden = true;
+        enqBox.querySelector(".enq-btn").hidden = false;
+        enqBox.querySelector(".enq-note").textContent = "";
+      }
+      return;
+    }
+    if (e.target.closest("tr.detail-tr")) return;   // clicks in the panel are inert
     const tr = e.target.closest("tr.cand-row");
     if (!tr) return;
     const ix = +tr.dataset.ix;

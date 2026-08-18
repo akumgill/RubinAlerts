@@ -111,6 +111,10 @@ def parse_candidate(row: dict) -> dict:
         # lives in z_source (newer) with ned_name as the legacy carrier
         "z": _f(row, "z_best") if _f(row, "z_best") is not None else _f(row, "redshift"),
         "z_source": _s(row, "z_source") or _s(row, "ned_name"),
+        # SALT2 free-z fit: a light-curve-based z ESTIMATE for candidates with
+        # no spec/host redshift (displayed as "~z", never used as a real z)
+        "salt_z": _f(row, "salt_z"),
+        "salt_z_railed": _b(row, "salt_z_railed"),
         "merit": _f(row, "merit"),
         # PI-approved score (2026-08-18): score = P x V(z) x G x U, ranked by
         # score_rate = score x (45min/exp)^alpha. Old CSVs lack these -> null.

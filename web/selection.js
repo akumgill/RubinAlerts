@@ -424,7 +424,11 @@ function scoreChain(c) {
 function factGrid(c) {
   const f = [];
   const add = (k, v) => { if (v != null && v !== "") f.push([k, v]); };
-  add("z", c.z != null ? `${fmt(c.z, 3)}${c.z_source ? " (" + esc(c.z_source) + ")" : ""}` : null);
+  add("z", c.z != null
+    ? `${fmt(c.z, 3)}${c.z_source ? " (" + esc(c.z_source) + ")" : ""}`
+    : (c.salt_z != null
+      ? `~${fmt(c.salt_z, 2)} (SALT2 LC fit${c.salt_z_railed ? ", railed" : ""})`
+      : null));
   if (c.delta_t != null) {
     const rest = c.z != null ? ` · ${fmt(c.delta_t / (1 + c.z), 1)} rest` : "";
     add("phase (d from peak)", `${fmt(c.delta_t, 1)}${rest}`);
@@ -506,7 +510,10 @@ function renderCandidates() {
       <td class="num">${coords}</td>
       <td class="num">${mag}</td>
       <td class="num">${fmt(c.delta_t, 1)}</td>
-      <td class="num"${zsrc}>${fmt(c.z, 3)}</td>
+      <td class="num"${zsrc}>${c.z != null ? fmt(c.z, 3)
+        : (c.salt_z != null
+          ? `<span style="color:var(--faint)" title="no spec/host redshift — SALT2 light-curve fit estimate${c.salt_z_railed ? " (fit railed at the z bound — treat as a limit)" : ""}">~${fmt(c.salt_z, 2)}</span>`
+          : "—")}</td>
       <td class="num">${c.n_points == null ? "—" : esc(c.n_points)}</td>
       <td class="meritcell">${meritCell}</td>
       <td>${badges(c)}</td></tr>` +

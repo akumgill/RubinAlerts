@@ -40,9 +40,47 @@ location) is now live:
   ref/march_obs_run/catalog.cat), LDSS3-convention plan sheet, LLAMAS macro
   PROVISIONAL pending Simcoe.
 
-Post-push: 7-night rerun (61265-61271) under final scoring uploading to the
-site; tonight ut20260819 is the live night. Remaining external asks: FITS
-landing spot, LLAMAS macro format, service-observer chat.
+### SESSION END STATE (2026-08-19) — handoff for next session
+
+**Everything committed & pushed** (fork/main = 07d0ccc + notebook commits);
+Render deployed and healthy; working tree clean; no background jobs.
+
+**Site data (magnets-collab.onrender.com):** 7 nights live under the FINAL
+scoring (ut20260813–18 backfilled, ut20260819 = live night; 59–74 candidates
+each; 69 persistent objects). Result of the meeting's changes: **AT 2026ydy
+(the pre-peak object the old merit under-ranked) is now #1** — E=1.0 (eastern,
+2 months of LC ahead), G=1.0 (untyped); AT 2026xle (+10d, ballooning exposure
+25→36 min over the week) slipped to #2. Good demo narrative.
+
+**Dry run: possible TODAY end-to-end** with two labeled stand-ins:
+(a) LLAMAS macro file provisional (TCS catalog + plan sheet are REAL formats);
+(b) mock FITS for the post-night half (scripts/mock_observations.py). Mocks
+are LOCAL-ONLY by design — never ingest mocks into prod (fake observed-marks
+on real targets would mislead).
+
+**Open external asks (each = one-function swap when answered):**
+1. LLAMAS macro dialect — ask Rob Simcoe / LCO docs → orchestrator/obsfiles.py
+   llamas_macro().
+2. Where FITS files land → scripts/ingest_fits_night.py header mapping.
+3. Service-observer chat (triplet conventions; he's "the #1 user").
+
+**Operational facts:**
+- Credentials: ~/.magnets_credentials (GROUPS_JSON copy; Stubbs key inside).
+- Nightly cycle (manual; cron parked): `python run_tonight.py <MJD> --sky-mode
+  wide --output-dir nights/wide` then `python scripts/upload_selection_night.py
+  nights/wide/ut<date> --api https://magnets-collab.onrender.com --key <key>`
+  (--backfilled for retrospectives; MJD 61271 = 2026-08-19).
+- Standards enqueue (pick 1-2 RA-appropriate per night, NOT all):
+  `python scripts/enqueue_standards.py ref/boyd2025_wdfs_standards.csv
+  --names GD71,... --api ... --key ...`
+- Rubin stream still dark (newest Fink-LSST alert 2026-07-14); all sources ZTF.
+
+**Backlog (non-blocking):** nightly cron automation; ScoreConfig constants
+review with Chris (V(z) prior, G values, E shape, target binned S/N — the
+last scales EVERY exposure); w_prob youth-tempering (pending program-intent
+answer); optional continuous %-remaining budget factor; knowledge-base wiki
+merit-scoring entry still describes old merit; LDSS3 long-slit deprioritized
+for our targets (Villar-only).
 
 ## 2026-08-18 (later) — Chris 1:1 outcomes (dry run tomorrow) + enqueue-bug fix
 

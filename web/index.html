@@ -111,6 +111,10 @@
 
     <h2>The queue <span class="hint">the shared queue, by priority, split by instrument (LLAMAS and LDSS3 are parallel systems) &mdash; pick a program to filter. Your own rows are editable.</span></h2>
     <div class="filters" id="filters"></div>
+    <div style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap;margin:0 0 .6rem">
+      <button class="btn" id="planbtn" disabled>Generate observing plan</button>
+      <span class="hint" style="font-size:.75rem;color:var(--faint)">tick 4&ndash;6 queue targets (the operator batch protocol &mdash; never full nights); exposures come out as 3&times;N&thinsp;s cosmic-ray triplets in TCS catalog + plan sheet + LLAMAS macro files</span>
+    </div>
     <div id="qgroups"></div>
 
     <div class="foot" id="foot"></div>

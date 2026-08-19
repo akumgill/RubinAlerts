@@ -477,6 +477,7 @@ function selectNight(date, instrument) {
   }
   if (NIGHT.date === date && NIGHT.instrument === instrument) return;
   NIGHT = { date, instrument };
+  PLAN_PICKS.clear();          // plan batches are per night/instrument
   if (usingSample) { renderNights(); return; }  // no backend to re-fetch
   $("nights").classList.add("loading");
   refresh().finally(() => $("nights").classList.remove("loading"));
@@ -744,6 +745,54 @@ function renderAllocations() {
 
 // ---- the queue (by priority; caller rows are editable) --------------
 let queueFilter = "All";
+// observing-plan batch picks (item G): target ids ticked for a 4-6 batch
+let PLAN_PICKS = new Set();
+
+function updatePlanBtn() {
+  const n = PLAN_PICKS.size;
+  const btn = $("planbtn");
+  btn.disabled = n < 1 || n > 6 || usingSample;
+  btn.textContent = n
+    ? `Generate observing plan (${n} selected${n > 6 ? " — max 6" : ""})`
+    : "Generate observing plan";
+}
+
+function downloadText(filename, text) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+async function generatePlan() {
+  const ids = [...PLAN_PICKS].map(Number);
+  const btn = $("planbtn");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/v1/obsplan", {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_ids: ids, instrument: NIGHT.instrument,
+                             date: NIGHT.date }),
+    });
+    if (res.status === 401) { showLogin(); return; }
+    const body = await res.json();
+    if (!res.ok) {
+      toast("Plan rejected: " + (body.detail || res.status), "err");
+      return;
+    }
+    const stamp = `MAGNETS_${body.instrument}_${body.date}`;
+    downloadText(`${stamp}.cat`, body.catalog_cat);
+    downloadText(`${stamp}_plan.txt`, body.plan_txt);
+    downloadText(`${stamp}_llamas.macro`, body.instrument_macro);
+    toast(`Observing plan for ${ids.length} targets downloaded (${body.order.join(" → ")})`, "ok");
+  } catch (e) {
+    toast("Network error generating plan", "err");
+  } finally {
+    updatePlanBtn();
+  }
+}
 function queueRow(t, caller, brk) {
   const st = t.status === "scheduled"
     ? `<span class="st st-sched"><span class="d" style="background:var(--ok)"></span>scheduled</span>`
@@ -758,8 +807,14 @@ function queueRow(t, caller, brk) {
     ? ` <span style="color:var(--ok);font-size:.72rem;white-space:nowrap"
          title="ingested observation(s); latest ${esc(prettyStamp(obsNight))}">observed ✓ ${esc(prettyStamp(obsNight))}</span>`
     : "";
+  // observing-plan batch pick (item G): numeric-id targets only
+  const pick = t.id != null
+    ? `<input type="checkbox" class="planpick" data-id="${esc(t.id)}"
+        ${PLAN_PICKS.has(String(t.id)) ? "checked" : ""}
+        aria-label="select ${esc(t.name)} for an observing plan">`
+    : "";
   return `<tr class="q${brk ? " tierbreak" : ""}${mine ? " mine" : ""}" data-prog="${esc(t.program)}">
-    <td>${chip(t.tier)}</td><td>${esc(t.name)}${obsMark}</td>
+    <td>${pick}</td><td>${chip(t.tier)}</td><td>${esc(t.name)}${obsMark}</td>
     <td><span class="dot" style="background:${RAW[t.program] || "var(--slate)"}"></span>${esc(t.program)}</td>
     <td class="num">${t.mag == null ? "—" : esc(t.mag)}</td><td>${st}</td>
     <td>${manage}</td></tr>`;
@@ -777,12 +832,12 @@ function renderQueue() {
     const body = rows.map((t) => {
       const brk = t.tier !== last; last = t.tier;
       return queueRow(t, caller, brk);
-    }).join("") || `<tr><td colspan="6" style="color:var(--faint)">no targets on this instrument</td></tr>`;
+    }).join("") || `<tr><td colspan="7" style="color:var(--faint)">no targets on this instrument</td></tr>`;
     return `<div class="qgroup">
       <h3 class="qgroup-h"><span class="ai ai-${esc(inst.toLowerCase())}">${esc(inst)}</span>
         <span class="qcount">${rows.length} target${rows.length === 1 ? "" : "s"}</span></h3>
       <div class="tablewrap"><table>
-        <thead><tr><th>Tier</th><th>Target</th><th>Program</th><th>r</th><th>Status</th><th>Manage</th></tr></thead>
+        <thead><tr><th title="select for an observing plan">Plan</th><th>Tier</th><th>Target</th><th>Program</th><th>r</th><th>Status</th><th>Manage</th></tr></thead>
         <tbody>${body}</tbody></table></div></div>`;
   }).join("") || `<div style="color:var(--faint)">queue is empty</div>`;
 
@@ -803,9 +858,17 @@ function renderQueue() {
   // per-row edit controls (event delegation on the groups container)
   const groups = $("qgroups");
   groups.onchange = (e) => {
+    const pick = e.target.closest("input.planpick");
+    if (pick) {
+      if (pick.checked) PLAN_PICKS.add(pick.dataset.id);
+      else PLAN_PICKS.delete(pick.dataset.id);
+      updatePlanBtn();
+      return;
+    }
     const sel = e.target.closest("select.pri-select");
     if (sel) changePriority(sel.dataset.id, sel.value);
   };
+  updatePlanBtn();
   groups.onclick = (e) => {
     const btn = e.target.closest("button.withdraw");
     if (btn) withdraw(btn.dataset.id, btn.dataset.name);
@@ -838,6 +901,7 @@ function renderFoot() {
 
 // ---- wire the add form + go ------------------------------------------
 $("addform").addEventListener("submit", addTarget);
+$("planbtn").addEventListener("click", generatePlan);
 
 // ---- ETC pre-fill (stamped #2) -----------------------------------------
 // Typing an anticipated magnitude pre-fills the exposure from the LLAMAS

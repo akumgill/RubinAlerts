@@ -354,6 +354,77 @@ def selection(request: Request, limit_nights: int = 10,
 
 
 # ---------------------------------------------------------------------------
+# Observing-plan bundle for an operator batch (item G): the top-of-queue picks
+# rendered as the three files an observer actually loads. Batches of 4-6 only
+# (Chris's protocol) — never full nights; exposures as CR-median triplets.
+# ---------------------------------------------------------------------------
+def _obsplan_row(t) -> dict:
+    """Queue target -> serializer row. Exposure: the target's own triplet
+    spec when set, else the total split into 3 equal subs rounded to 10 s
+    (the canonical CR protocol), else the 45-min fallback as 3 x 900 s."""
+    import math as _math
+    if t.n_exposures and _math.isfinite(t.exposure_seconds):
+        n_exp, exp_sec = int(t.n_exposures), float(t.exposure_seconds)
+    else:
+        total_min = (t.exposure_minutes
+                     if _math.isfinite(t.exposure_minutes) else 45.0)
+        n_exp = 3
+        exp_sec = max(10.0, round(total_min * 60.0 / 3.0 / 10.0) * 10.0)
+    return {"name": t.name or f"{t.program}-{t.id}",
+            "ra": t.canonical_ra, "dec": t.canonical_dec,
+            "mag": t.mag if _math.isfinite(t.mag) else None,
+            "priority": t.priority, "instrument": t.instrument,
+            "n_exp": n_exp, "exp_sec": exp_sec, "notes": t.notes or ""}
+
+
+@app.post("/v1/obsplan")
+def obsplan(request: Request, payload: dict = Body(...),
+            authorization: str = Header(None)):
+    """Render 1-6 queue targets as an observing bundle: {catalog_cat,
+    plan_txt, instrument_macro, order, date}. Ordered by tonight's
+    observability (window start); input order when planning is unavailable."""
+    from datetime import datetime, timezone
+    _identity(request, authorization)
+    ids = payload.get("target_ids") or []
+    instrument = str(payload.get("instrument") or "LLAMAS").upper()
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(422, "target_ids must be a non-empty list")
+    if len(ids) > 6:
+        raise HTTPException(
+            422, f"{len(ids)} targets requested — observing plans are "
+                 "generated in batches of 4-6 (never full nights); trim the "
+                 "selection")
+    by_id = {t.id: t for t in svc._targets}
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        raise HTTPException(422, f"unknown target ids: {missing}")
+    rows = [_obsplan_row(by_id[i]) for i in ids]
+    date = payload.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # tonight's ordering: observability-window start (the planner's geometry);
+    # fall back to the operator's input order if the solve fails
+    try:
+        from orchestrator.planner import calculate_twilight, compute_observability
+        from orchestrator.models import Target as OTarget
+        evening, morning = calculate_twilight(date)
+        ots = [OTarget(name=r["name"], ra_deg=r["ra"], dec_deg=r["dec"],
+                       exposure_minutes=r["n_exp"] * r["exp_sec"] / 60.0)
+               for r in rows]
+        obs = compute_observability(ots, evening, morning)
+        start_mjd = {t.name: t.window_start.mjd for t in obs
+                     if t.window_start is not None}
+        rows.sort(key=lambda r: start_mjd.get(r["name"], float("inf")))
+    except Exception as e:
+        logger.warning("obsplan: observability ordering failed (%s); "
+                       "keeping input order", e)
+    from orchestrator.obsfiles import tcs_catalog, plan_sheet, llamas_macro
+    return {"date": date, "instrument": instrument,
+            "order": [r["name"] for r in rows],
+            "catalog_cat": tcs_catalog(rows),
+            "plan_txt": plan_sheet(rows, date, instrument),
+            "instrument_macro": llamas_macro(rows)}
+
+
+# ---------------------------------------------------------------------------
 # Observation ingestion + observed repository (item F). The FITS source is
 # mocked for now: scripts/ingest_fits_night.py adapts headers into canonical
 # records and POSTs them here; the server owns association + accounting.

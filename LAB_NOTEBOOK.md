@@ -1,5 +1,49 @@
 # RubinAlerts Lab Notebook
 
+## 2026-08-19 — Stamped batch SHIPPED (items 1–8 all done; dry-run ready)
+
+Eight commits (7abc565..07d0ccc), suite 389 → **415 passed** (+26). Pushed;
+Render deployed. Everything from the 08-18 Chris 1:1 except the two
+truly-external unknowns (LLAMAS macro dialect — Rob Simcoe; FITS delivery
+location) is now live:
+
+- **#3 G downweight**: typed-but-no-z 0.7 → 0.15 (host z via MOS later).
+- **#4 East-rising factor E**: score = P×V×G×U×E; HA at evening twilight,
+  east=1.0, meridian 0.9, half-cosine to 0.3 floor by HA+6h; feeds the
+  score-chain display. Constants provisional in ScoreConfig.
+- **#2 ETC pre-fill**: GET /v1/etc?mag= → 3×N triplet suggestion; add-target
+  form fills only-if-empty, editable.
+- **#1 One-click enqueue** from the selection detail panel: tier from rank
+  (top5→P1, 6-15→P2, rest→P3), mag faded to tonight, ETC triplet, explicit
+  ra/dec (no resolver dependency), dedupe-safe.
+- **#5 Airmass ranges**: airmass_min/max end-to-end (hard window in planner;
+  min-only + max-only both work; overrides max_airmass);
+  scripts/enqueue_standards.py → per-bin pseudo-targets (GD71@am1.0-1.3),
+  default bins 1.0-1.3/1.3-1.7/1.7-2.3.
+- **#8 Standards ingested**: ref/boyd2025_wdfs_standards.csv — Boyd et al.
+  2025 (MNRAS 540,385), 35 WDs from the Zenodo machine-readable table,
+  Gaia-DR3-verified (faint 32 match <1"; the 3 CALSPEC primaries were
+  1.6-3.6" off = older-epoch coords on high-PM WDs → re-anchored to Gaia,
+  pm noted). Gaia G 11.7-20.0; 27/35 LCO-reachable. NOT enqueued to prod —
+  pick 1-2 RA-appropriate per night (Chris), one command when wanted.
+- **#6 Observation ingestion (mocked source)**: POST /v1/observations,
+  pointing association ≤1' (standards disambiguated by airmass-at-obs-time),
+  even split across programs sharing coords, idempotent by filename;
+  burndown folds observed time into 'used'; "Observed" dashboard section +
+  queue/selection observed-badges. FITS adapter isolated in
+  scripts/ingest_fits_night.py (the ONLY swap point);
+  scripts/mock_observations.py generates synthetic nights. Mocks seeded
+  LOCAL DB only — deliberately NOT production (fake observed-markers on real
+  targets would mislead the dry run).
+- **#7 Observing-plan bundle**: POST /v1/obsplan (1-6 targets, triplets) +
+  queue checkboxes → TCS catalog (column-exact vs real
+  ref/march_obs_run/catalog.cat), LDSS3-convention plan sheet, LLAMAS macro
+  PROVISIONAL pending Simcoe.
+
+Post-push: 7-night rerun (61265-61271) under final scoring uploading to the
+site; tonight ut20260819 is the live night. Remaining external asks: FITS
+landing spot, LLAMAS macro format, service-observer chat.
+
 ## 2026-08-18 (later) — Chris 1:1 outcomes (dry run tomorrow) + enqueue-bug fix
 
 ### Meeting decisions (Flow notes; "YAMAS" = LLAMAS)

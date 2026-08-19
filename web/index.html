@@ -101,6 +101,14 @@
     <h2>Time allocations <span class="hint">each group&rsquo;s 2026B budget across both instruments &mdash; used vs remaining (used updates after post-night reconciliation)</span></h2>
     <div class="allocs" id="allocs"></div>
 
+    <h2 id="obs-h" hidden>Observed <span class="hint">what actually went on sky this night &mdash; ingested from the observation files; associated time is charged to program budgets above</span></h2>
+    <div id="obs-section" hidden>
+      <div id="obs-callout"></div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Target</th><th>Program</th><th>Exposures</th><th>Total</th><th>Match</th><th>Airmass</th></tr></thead>
+        <tbody id="obsbody"></tbody></table></div>
+    </div>
+
     <h2>The queue <span class="hint">the shared queue, by priority, split by instrument (LLAMAS and LDSS3 are parallel systems) &mdash; pick a program to filter. Your own rows are editable.</span></h2>
     <div class="filters" id="filters"></div>
     <div id="qgroups"></div>

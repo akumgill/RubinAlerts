@@ -343,6 +343,78 @@ function renderAll() {
   renderQueue();
   renderFoot();
   probeSelectionNav();
+  loadObserved();
+}
+
+// ---- observed repository (item F): what actually went on sky ----------
+let OBS_ROWS = [];          // this night's ingested observation rows
+let OBSERVED_TARGETS = {};  // target_id (string) -> latest observed night
+let obsNightLoaded = null;  // avoid refetch loops for the same night
+
+async function loadObserved() {
+  if (usingSample) return;
+  const key = NIGHT.date;
+  if (obsNightLoaded === key) { renderObserved(); return; }
+  try {
+    const [rNight, rAll] = await Promise.all([
+      fetch("/v1/observations?night=" + encodeURIComponent(NIGHT.date),
+            { credentials: "include" }),
+      fetch("/v1/observations", { credentials: "include" }),
+    ]);
+    if (!rNight.ok || !rAll.ok) return;      // 401 etc: leave section hidden
+    OBS_ROWS = (await rNight.json()).observations || [];
+    OBSERVED_TARGETS = (await rAll.json()).observed_targets || {};
+    obsNightLoaded = key;
+    renderObserved();
+    renderQueue();                            // adds the observed ✓ markers
+  } catch (e) { /* offline: section stays hidden */ }
+}
+
+// ut20260816 -> "Aug 16 2026" for the queue marker
+function prettyStamp(stamp) {
+  const m = /^ut(\d{4})(\d{2})(\d{2})$/.exec(stamp || "");
+  if (!m) return stamp || "";
+  return monthAbbr[+m[2] - 1] + " " + (+m[3]) + " " + m[1];
+}
+
+function renderObserved() {
+  const has = OBS_ROWS.length > 0;
+  $("obs-h").hidden = !has;
+  $("obs-section").hidden = !has;
+  if (!has) return;
+  // aggregate per target (unassociated rows grouped by their raw name)
+  const groups = {};
+  OBS_ROWS.forEach((o) => {
+    const key = o.target_name || (o.object_name_raw || "?") + " (raw)";
+    const g = groups[key] = groups[key] || {
+      name: o.target_name || o.object_name_raw || "?",
+      program: o.program, method: o.assoc_method,
+      n: 0, sec: 0, ams: [] };
+    g.n += 1;
+    g.sec += o.exptime_s || 0;
+    if (o.airmass != null) g.ams.push(o.airmass);
+  });
+  const unassoc = OBS_ROWS.filter((o) => o.assoc_method === "unassociated");
+  $("obs-callout").innerHTML = unassoc.length
+    ? `<div class="banner">⚠ ${unassoc.length} exposure${unassoc.length === 1 ? "" : "s"} could not be
+       associated with any queue target (pointing &gt;1&prime; from everything, no name match) —
+       ${unassoc.map((o) => esc(o.object_name_raw || o.filename)).join(", ")}. Unassociated time is not charged.</div>`
+    : "";
+  $("obsbody").innerHTML = Object.values(groups)
+    .sort((a, b) => b.sec - a.sec)
+    .map((g) => {
+      const am = g.ams.length
+        ? (g.ams.reduce((x, y) => x + y, 0) / g.ams.length).toFixed(2) : "—";
+      const method = g.method === "unassociated"
+        ? '<span style="color:var(--err)">unassociated</span>'
+        : esc(g.method);
+      return `<tr><td><span class="tname">${esc(g.name)}</span></td>
+        <td>${g.program ? `<span class="dot" style="background:${RAW[g.program] || "var(--slate)"}"></span>${esc(g.program)}` : "—"}</td>
+        <td class="num">${g.n}</td>
+        <td class="num">${Math.round(g.sec / 60)}m</td>
+        <td>${method}</td>
+        <td class="num">${am}</td></tr>`;
+    }).join("");
 }
 
 // Show the "SN Ia target selection" nav link only to programs the selection
@@ -680,8 +752,14 @@ function queueRow(t, caller, brk) {
       : `<span class="st st-over"><span class="d" style="background:var(--faint)"></span>${esc(t.status || "queued")}</span>`;
   const mine = caller && t.program === caller;
   const manage = mine ? editControls(t) : `<span class="readonly-note">read-only</span>`;
+  // observed marker (item F): this target has ingested on-sky history
+  const obsNight = OBSERVED_TARGETS[String(t.id)];
+  const obsMark = obsNight
+    ? ` <span style="color:var(--ok);font-size:.72rem;white-space:nowrap"
+         title="ingested observation(s); latest ${esc(prettyStamp(obsNight))}">observed ✓ ${esc(prettyStamp(obsNight))}</span>`
+    : "";
   return `<tr class="q${brk ? " tierbreak" : ""}${mine ? " mine" : ""}" data-prog="${esc(t.program)}">
-    <td>${chip(t.tier)}</td><td>${esc(t.name)}</td>
+    <td>${chip(t.tier)}</td><td>${esc(t.name)}${obsMark}</td>
     <td><span class="dot" style="background:${RAW[t.program] || "var(--slate)"}"></span>${esc(t.program)}</td>
     <td class="num">${t.mag == null ? "—" : esc(t.mag)}</td><td>${st}</td>
     <td>${manage}</td></tr>`;

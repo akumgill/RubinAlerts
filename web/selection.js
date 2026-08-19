@@ -72,6 +72,34 @@ function objectCell(c) {
     (sub ? `<span class="subid">${esc(sub)}</span>` : "");
 }
 
+// ---- observed badge (item F): pointings already ingested on-sky --------
+let OBS_COORDS = [];   // [{ra, dec, night_stamp}] from GET /v1/observations
+
+function sepArcsec(ra1, dec1, ra2, dec2) {
+  const d2r = Math.PI / 180;
+  const dd = (dec2 - dec1) * d2r, dr = (ra2 - ra1) * d2r;
+  const a = Math.sin(dd / 2) ** 2 +
+    Math.cos(dec1 * d2r) * Math.cos(dec2 * d2r) * Math.sin(dr / 2) ** 2;
+  return 2 * Math.asin(Math.min(1, Math.sqrt(a))) / d2r * 3600;
+}
+
+function observedMatch(c) {
+  if (c.ra == null || c.dec == null) return null;
+  for (const o of OBS_COORDS) {
+    if (o.ra != null && sepArcsec(c.ra, c.dec, o.ra, o.dec) <= 60) return o;
+  }
+  return null;
+}
+
+async function loadObservedCoords() {
+  try {
+    const r = await fetch("/v1/observations", { credentials: "include" });
+    if (!r.ok) return;
+    OBS_COORDS = (await r.json()).observed_coords || [];
+    if (OBS_COORDS.length && DATA) renderCandidates();  // add badges
+  } catch (e) { /* offline: no badges */ }
+}
+
 function badges(c) {
   const out = [];
   const t = c.tns_type;
@@ -83,6 +111,8 @@ function badges(c) {
     out.push('<span class="badge freesample" title="already spec-typed and spec-z’d — enters the cosmology sample without a slot">free sample</span>');
   if (c.offset_class === "nuclear") out.push('<span class="badge nuclear">nuclear</span>');
   if (c.n_points != null && c.n_points <= 8) out.push('<span class="badge sparse">sparse</span>');
+  const obs = observedMatch(c);
+  if (obs) out.push(`<span class="badge observed" title="an ingested observation points within 1 arcmin (latest ${esc(obs.night_stamp)})">observed</span>`);
   return out.join("");
 }
 
@@ -117,6 +147,7 @@ async function boot() {
   NIGHT_IX = 0;
   SHOW_ALL = false;
   renderAll();
+  loadObservedCoords();   // non-blocking: adds "observed" badges when it lands
 }
 
 function showDenied(detail) {

@@ -186,13 +186,13 @@ def test_pseudo_target_naming_and_build():
                                      exposure_minutes=6.0)
     assert len(items) == 2 * 3
     names = [i["name"] for i in items]
-    assert "FAKE-GD71@am1.0-1.3" in names and "FAKE-LTT3864@am1.7-2.3" in names
+    assert "FAKE-STD1@am1.0-1.3" in names and "FAKE-STD2@am1.7-2.3" in names
     first = items[0]
     assert (first["airmass_min"], first["airmass_max"]) == (1.0, 1.3)
     assert first["priority"] == "P2" and first["instrument"] == "LLAMAS"
     # per-row exposure column wins over the CLI default
-    gd71 = next(i for i in items if i["name"].startswith("FAKE-GD71"))
-    assert gd71["exposure_minutes"] == 6.0
+    std1 = next(i for i in items if i["name"].startswith("FAKE-STD1"))
+    assert std1["exposure_minutes"] == 6.0
     # bad bins rejected
     with pytest.raises(ValueError):
         mod.parse_bins("0.8-1.3")

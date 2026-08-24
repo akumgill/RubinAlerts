@@ -912,10 +912,29 @@ let etcSuggested = null;   // the last value WE wrote into t-exp
 async function suggestExposure() {
   const magS = $("t-mag").value.trim();
   const note = $("etc-note");
-  if (magS === "" || isNaN(Number(magS))) return;
   const expEl = $("t-exp");
   const cur = expEl.value.trim();
   if (cur !== "" && cur !== etcSuggested) return;   // user owns this value
+
+  // A filled airmass range marks this as a spectrophotometric standard, and
+  // this ETC must not size one: its curve is a SN Ia PEAK-SPECTRUM calc
+  // indexed by r, while a standard is limited by SATURATION, not S/N (the
+  // bright CALSPEC primaries would likely saturate at the floor exposure).
+  // Leave the field blank and say why — an empty box beats a confidently
+  // wrong number on the calibration reference.
+  const isStandard = $("t-amin").value.trim() !== "" ||
+                     $("t-amax").value.trim() !== "";
+  if (isStandard) {
+    if (cur !== "" && cur === etcSuggested) expEl.value = "";  // drop ours only
+    etcSuggested = null;
+    note.textContent = "airmass range set — treating this as a "
+      + "spectrophotometric standard, so no exposure is suggested: the ETC "
+      + "curve is a SN Ia calculation and standards are saturation-limited. "
+      + "Enter the integration you want.";
+    note.hidden = false;
+    return;
+  }
+  if (magS === "" || isNaN(Number(magS))) return;
   try {
     const r = await fetch("/v1/etc?mag=" + encodeURIComponent(magS),
                           { credentials: "include" });
@@ -923,12 +942,27 @@ async function suggestExposure() {
     const b = await r.json();
     etcSuggested = String(Math.round(b.minutes));
     expEl.value = etcSuggested;
+    // Name the binding constraint. At the default binned S/N target the floor
+    // wins for every magnitude we observe, so reporting only the total reads
+    // as a calculation when it is a policy.
+    let why;
+    if (b.binding === "floor") {
+      why = `S/N needs ${b.snr_minutes} min — recommending the `
+          + `${b.floor_minutes}-min operational floor (~2× target-switch overhead)`;
+    } else if (b.binding === "cap") {
+      why = `S/N needs ${b.snr_minutes} min — capped at the `
+          + `${b.cap_minutes}-min per-target limit; consider dropping this target`;
+    } else {
+      why = `S/N-limited at binned S/N ${b.snr}`;
+    }
     note.textContent = `suggested for mag ${magS} (editable): `
-      + `${b.n_exposures} × ${Math.round(b.exposure_seconds)} s ≈ ${b.minutes} min `
-      + `(LLAMAS ETC, binned S/N ${b.snr})`
+      + `${b.n_exposures} × ${Math.round(b.exposure_seconds)} s ≈ ${b.minutes} min — `
+      + why
       + (b.extrapolated ? " — outside the calibrated range, treat as rough" : "");
     note.hidden = false;
   } catch (e) { /* offline / no backend: leave the field alone */ }
 }
 $("t-mag").addEventListener("change", suggestExposure);
+$("t-amin").addEventListener("change", suggestExposure);
+$("t-amax").addEventListener("change", suggestExposure);
 boot();

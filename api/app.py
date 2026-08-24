@@ -239,8 +239,17 @@ def withdraw(request: Request, target_id: int, authorization: str = Header(None)
 def etc_suggest(request: Request, mag: float, authorization: str = Header(None)):
     """Suggested LLAMAS exposure for an anticipated magnitude, expressed as
     the canonical cosmic-ray-rejection triplet: 3 equal sub-exposures rounded
-    to the nearest 10 s. Returns {minutes, n_exposures, exposure_seconds,
-    snr, n_bin, extrapolated}."""
+    to the nearest 10 s.
+
+    Reports the S/N requirement and the operational floor SEPARATELY, plus
+    which of them ``binding`` the recommendation. They are different kinds of
+    number and conflating them was misleading: at the default binned S/N target
+    the floor wins for every magnitude we actually observe (r < ~22), so a bare
+    ``minutes`` looked like a calculation when it was a policy. Callers should
+    surface the distinction — "S/N needs 2.5 min, recommending 10 (floor)".
+
+    Returns {minutes, n_exposures, exposure_seconds, snr, n_bin, extrapolated,
+    snr_minutes, floor_minutes, cap_minutes, binding}."""
     _identity(request, authorization)
     try:
         from core.snr_etc import (snr_exposure_minutes, MIN_EXPOSURE_MINUTES,
@@ -257,11 +266,17 @@ def etc_suggest(request: Request, mag: float, authorization: str = Header(None))
     if not math.isfinite(t):
         raise HTTPException(422, "ETC could not size an exposure for this mag")
     minutes = float(min(MAX_EXPOSURE_MIN, max(MIN_EXPOSURE_MINUTES, t)))
+    binding = ("cap" if t > MAX_EXPOSURE_MIN
+               else "floor" if t < MIN_EXPOSURE_MINUTES else "snr")
     # canonical CR-median protocol: 3 equal sub-exposures, each a multiple of 10 s
     sub_s = max(10.0, round(minutes * 60.0 / 3.0 / 10.0) * 10.0)
     return {"minutes": round(3 * sub_s / 60.0, 2), "n_exposures": 3,
             "exposure_seconds": sub_s, "snr": DEFAULT_TARGET_SNR,
-            "n_bin": DEFAULT_N_BIN, "extrapolated": bool(extrapolated)}
+            "n_bin": DEFAULT_N_BIN, "extrapolated": bool(extrapolated),
+            "snr_minutes": round(t, 2),
+            "floor_minutes": MIN_EXPOSURE_MINUTES,
+            "cap_minutes": MAX_EXPOSURE_MIN,
+            "binding": binding}
 
 
 # ---------------------------------------------------------------------------

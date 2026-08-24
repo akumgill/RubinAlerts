@@ -132,6 +132,28 @@ def test_etc_suggestion_endpoint(client):
     assert client.get("/v1/etc?mag=nan", headers=STUBBS).status_code == 422
 
 
+def test_etc_names_the_binding_constraint(client):
+    """The S/N requirement and the operational floor are different kinds of
+    number. At the default binned S/N target the floor wins for every
+    magnitude we actually observe, so reporting only the total made a policy
+    look like a calculation."""
+    b = client.get("/v1/etc?mag=19", headers=STUBBS).json()
+    # a mag-19 SN needs far less than the floor -> floor binds, and both
+    # numbers are reported so the caller can say which is which
+    assert b["binding"] == "floor"
+    assert b["snr_minutes"] < b["floor_minutes"]
+    assert b["minutes"] == pytest.approx(b["floor_minutes"], abs=0.5)
+    # faint enough and the calculation actually binds
+    faint = client.get("/v1/etc?mag=23.5", headers=STUBBS).json()
+    assert faint["binding"] == "snr"
+    assert faint["snr_minutes"] > faint["floor_minutes"]
+    assert faint["minutes"] > b["minutes"]
+    # the floor is never silently exceeded downward
+    bright = client.get("/v1/etc?mag=13", headers=STUBBS).json()
+    assert bright["minutes"] >= bright["floor_minutes"]
+    assert bright["binding"] == "floor"
+
+
 def test_login_cookie_auth(client):
     # program list is public (populates the login screen)
     assert client.get("/v1/programs").json()["programs"] == ["CfA-Stubbs", "UA"]

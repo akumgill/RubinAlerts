@@ -1,5 +1,82 @@
 # RubinAlerts Lab Notebook
 
+## 2026-08-24 — Standards path was broken; fixed, prod loaded, demo scoped
+
+Chris's 08-18 homework (enqueue spectrophotometric standards, observe each at
+several airmasses) **had never actually run**. `scripts/enqueue_standards.py`
+crashed on `ref/boyd2025_wdfs_standards.csv` — the file's five `#` provenance
+lines went straight into `csv.DictReader`, so the first comment became the
+header (`KeyError: 'name'`). The 08-19 test only exercised the clean synthetic
+fixture, so 415-green hid it. `--names`, documented in the 08-19 handoff, had
+never been implemented either. Both fixed (2d76a4a); suite 415 → **420**.
+
+### Standards are LIVE in prod (first real ones)
+
+Computed all 35 Boyd standards against the 2026-09-06 LCO night (23:49–09:31
+UT): **23 reachable, 11 hit all three airmass bins**. Enqueued two chosen to
+cover the night from opposite directions:
+
+- **WDFS1930-52** (mag 17.7, transits 01:14 UT) — caught *setting*, airmass
+  1.12 → 1.33 → 1.76
+- **WDFS0122-30** (mag 18.7, transits 07:02 UT) — caught *rising*, airmass
+  2.18 → 1.64 → 1.27
+
+6/6 scheduled, every visit inside its requested bin, 1.1h of the Stubbs LLAMAS
+budget. This is the first non-mock content in the prod queue beyond the Villar
+seed. GD71 — the obvious first pick by name recognition — is the *wrong* star
+for September: it never reaches the low bins from LCO.
+
+### Silent drops fixed (7fb60b1)
+
+`compute_observability` dropped unobservable targets on a debug log, and the
+API's `overflow` only carried `plan.backup` + unschedulable P0s. Six submitted,
+four planned, nothing explaining the gap — the same silent-failure class Chris
+caught live on 08-18. Now an optional `dropped` out-param → `plan.not_observable`
+→ `overflow` + `write_summary`. The two reasons read distinctly ("never inside
+airmass 1.0-1.3" vs "only 3 min inside 1.3-1.7; needs 11"), which turns the
+behaviour into a feature: the tool tells you your standard is wrong for the
+month. A test now asserts `scheduled | overflow == everything submitted`.
+
+Plan sheet also stamps the window into the **notes** column ("observe
+01:59-02:48 UT (airmass 1.7-2.3)") — three bins of one standard are three
+identical pointings otherwise. Notes, not a new column: the 12-column
+LDSS_ObsPlan_Generator convention stays byte-compatible (pinned by test).
+Found in passing: `/v1/obsplan` built its Targets *without* airmass_min/max, so
+its batch ordering ignored the bins entirely. Fixed.
+
+### OPEN: exposure sizing for standards (the next real decision)
+
+`--exposure-minutes 10` is the ETC's number but NOT a calculation: at mag 11.7
+–22 the `MIN_EXPOSURE_MINUTES = 10.0` operational floor dominates every single
+target, so "auto-populate from magnitude" is currently a constant in the whole
+range we observe. Two consequences: the mag-13 CALSPEC primaries (G191B2B,
+GD153, GD71) would likely **saturate** at 10 min, and the ETC curve is an SN Ia
+*peak* calc being applied to DA white dwarfs. Design discussion pending — see
+the 2026-08-24 exposure-sizing thread.
+
+### Operational gotcha
+
+A uvicorn from **Aug 18 19:28** was still listening on `localhost:8901` with
+pre-airmass-feature code in memory, and its DB file had been replaced under it
+on Aug 19 (serving from an orphaned inode). It silently drops airmass_min/max
+and dedupes the three bins into one — i.e. it reproduces exactly the broken
+behaviour Chris saw. Killed. Check for stale servers before demoing on
+localhost.
+
+### Demo video plan (agreed with Akum)
+
+Record against **prod** for beats 1–5; beat 6 (FITS ingest) needs a throwaway
+local instance — mocks must never touch prod. No seeded local environment
+needed. Seven beats, ~5 min: (1) the standards command that failed, now working;
+(2) the airmass ladder across one night + GD71 rejected; (3) name resolution +
+ETC prefill + triplets (his other catches); (4) one-click enqueue and **AT
+2026ydy now #1 over AT 2026xle** — his east-rising input changing the answer;
+(5) plan bundle for a 4–6 target batch; (6) FITS → association → burndown
+(labelled mock); (7) the asks: Simcoe macro dialect, where FITS land,
+service-observer triplet conventions, target binned S/N, standards exposure.
+Label every stand-in on screen.
+
+
 ## 2026-08-19 — Stamped batch SHIPPED (items 1–8 all done; dry-run ready)
 
 Eight commits (7abc565..07d0ccc), suite 389 → **415 passed** (+26). Pushed;

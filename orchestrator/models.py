@@ -170,6 +170,13 @@ class ObsPlan:
     # never reach the airmass limit tonight (physics, not policy). Surfaced in
     # the summary so a non-negotiable target never silently vanishes.
     unschedulable_mandatory: List[Target] = field(default_factory=list)
+    # Targets dropped before ranking because tonight's sky rules them out —
+    # never inside their requested airmass range, or a window too short for the
+    # exposure. Each entry is ``(target, reason)``. Carried so a submitted
+    # target never silently disappears from the plan: an airmass-binned
+    # standard whose bin the star cannot reach tonight is a normal outcome, but
+    # the observer still has to be told which bin was skipped and why.
+    not_observable: List[tuple] = field(default_factory=list)
 
     standards_start: Optional[dict] = None
     standards_end: Optional[dict] = None

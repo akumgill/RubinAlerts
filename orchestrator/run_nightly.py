@@ -268,14 +268,17 @@ def run_nightly(date: str,
     evening, morning = calculate_twilight(date, config=config)
 
     # 5. Compute observability (only over the pending, not-yet-satisfied set)
+    not_observable: list = []
     observable = compute_observability(pending, evening, morning, config=config,
-                                       primary_program=primary_program)
+                                       primary_program=primary_program,
+                                       dropped=not_observable)
     if not observable:
         logger.error("No targets observable on %s", date)
         plan = ObsPlan(date=date, moon_phase=moon_phase,
                        evening_twilight=evening, morning_twilight=morning)
         plan.completed = completed
         plan.multi_group_alerts = multi_group_alerts
+        plan.not_observable = not_observable
         return plan
 
     # 6. Rank targets with composite scoring. The ledger folds each target's
@@ -300,6 +303,7 @@ def run_nightly(date: str,
     )
     plan.completed = completed
     plan.multi_group_alerts = multi_group_alerts
+    plan.not_observable = not_observable
 
     # 8. Write outputs
     out_dir = Path(output_dir)

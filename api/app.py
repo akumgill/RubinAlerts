@@ -374,6 +374,7 @@ def _obsplan_row(t) -> dict:
             "ra": t.canonical_ra, "dec": t.canonical_dec,
             "mag": t.mag if _math.isfinite(t.mag) else None,
             "priority": t.priority, "instrument": t.instrument,
+            "airmass_min": t.airmass_min, "airmass_max": t.airmass_max,
             "n_exp": n_exp, "exp_sec": exp_sec, "notes": t.notes or ""}
 
 
@@ -383,6 +384,7 @@ def obsplan(request: Request, payload: dict = Body(...),
     """Render 1-6 queue targets as an observing bundle: {catalog_cat,
     plan_txt, instrument_macro, order, date}. Ordered by tonight's
     observability (window start); input order when planning is unavailable."""
+    import math
     from datetime import datetime, timezone
     _identity(request, authorization)
     ids = payload.get("target_ids") or []
@@ -407,12 +409,45 @@ def obsplan(request: Request, payload: dict = Body(...),
         from orchestrator.models import Target as OTarget
         evening, morning = calculate_twilight(date)
         ots = [OTarget(name=r["name"], ra_deg=r["ra"], dec_deg=r["dec"],
-                       exposure_minutes=r["n_exp"] * r["exp_sec"] / 60.0)
+                       exposure_minutes=r["n_exp"] * r["exp_sec"] / 60.0,
+                       airmass_min=r.get("airmass_min", float("nan")),
+                       airmass_max=r.get("airmass_max", float("nan")))
                for r in rows]
-        obs = compute_observability(ots, evening, morning)
+        not_obs: list = []
+        obs = compute_observability(ots, evening, morning, dropped=not_obs)
         start_mjd = {t.name: t.window_start.mjd for t in obs
                      if t.window_start is not None}
         rows.sort(key=lambda r: start_mjd.get(r["name"], float("inf")))
+        # Stamp WHEN to shoot each row into the notes column. Three pseudo-
+        # targets of one standard are three identical pointings on the sheet —
+        # without the window the observer cannot tell which to take at 02:00.
+        # Goes in notes (free text) rather than a new column: the 12-column
+        # LDSS_ObsPlan_Generator convention stays byte-compatible.
+        _win = {t.name: t for t in obs}
+        _dropped = {t.name: reason for t, reason in not_obs}
+        for r in rows:
+            t = _win.get(r["name"])
+            if t is None or t.window_start is None or t.window_end is None:
+                # The operator put it in the batch and it cannot be shot
+                # tonight — say so on the sheet rather than leaving a row that
+                # looks identical to its schedulable siblings.
+                reason = _dropped.get(r["name"])
+                if reason:
+                    stamp = f"NOT OBSERVABLE — {reason}"
+                    r["notes"] = (f"{r['notes']}; {stamp}" if r["notes"]
+                                  else stamp)
+                continue
+            span = (f"{t.window_start.datetime.strftime('%H:%M')}-"
+                    f"{t.window_end.datetime.strftime('%H:%M')} UT")
+            lo, hi = r.get("airmass_min"), r.get("airmass_max")
+            if lo is not None and hi is not None and math.isfinite(lo) \
+                    and math.isfinite(hi):
+                stamp = f"observe {span} (airmass {lo:.1f}-{hi:.1f})"
+            elif math.isfinite(t.min_airmass):
+                stamp = f"observe {span} (min airmass {t.min_airmass:.2f})"
+            else:
+                stamp = f"observe {span}"
+            r["notes"] = f"{r['notes']}; {stamp}" if r["notes"] else stamp
     except Exception as e:
         logger.warning("obsplan: observability ordering failed (%s); "
                        "keeping input order", e)

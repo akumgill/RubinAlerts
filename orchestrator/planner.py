@@ -209,7 +209,8 @@ def _is_honored_mustsee(t: Target, primary_program: Optional[str]) -> bool:
 def compute_observability(targets: List[Target], evening: Time,
                           morning: Time,
                           config: LLAMASConfig = None,
-                          primary_program: Optional[str] = None) -> List[Target]:
+                          primary_program: Optional[str] = None,
+                          dropped: Optional[list] = None) -> List[Target]:
     """Populate observability windows and filter unobservable targets.
 
     Parameters
@@ -224,6 +225,13 @@ def compute_observability(targets: List[Target], evening: Time,
         must-see targets (mandatory AND allowed by the primary rule) are exempt
         from the short-window drop below so their guarantee actually holds — see
         ``_is_honored_mustsee``. None (the default) honors all must-see targets.
+    dropped : list, optional
+        Out-parameter. When given, every filtered-out target is appended as
+        ``(target, reason)`` so callers can report WHY a submitted target is
+        absent from the plan instead of letting it vanish on a debug log. This
+        matters most for airmass-binned standards, where a bin the star never
+        reaches tonight is a routine and expected outcome that the observer
+        still needs told about.
 
     Returns
     -------
@@ -246,6 +254,9 @@ def compute_observability(targets: List[Target], evening: Time,
             # unschedulable_mandatory + warn in create_schedule. Drop it so it
             # is not carried forward as observable.
             logger.debug("Not observable: %s", t.name)
+            if dropped is not None:
+                dropped.append((t, f"never inside airmass {am_lo:.1f}-{am_hi:.1f} "
+                                   f"tonight"))
             continue
 
         t.transit_time = transit
@@ -271,6 +282,10 @@ def compute_observability(targets: List[Target], evening: Time,
             else:
                 logger.debug("Window too short for %s (%.0f < %.0f min)",
                              t.name, window_min, needed)
+                if dropped is not None:
+                    dropped.append((t, f"only {window_min:.0f} min inside "
+                                       f"airmass {am_lo:.1f}-{am_hi:.1f} "
+                                       f"tonight; needs {needed:.0f} min"))
                 continue
 
         observable.append(t)

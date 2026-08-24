@@ -256,6 +256,16 @@ def preview_plan(service, date: str, moon: str = None,
             "tier": _tier_of(tgt, id_to_tier),
             "reason": "P0 guaranteed but not observable tonight (never reaches airmass limit)",
         })
+    # Ruled out by tonight's sky before ranking (never inside the requested
+    # airmass range, or too short a window). Without this the target would be
+    # absent from BOTH the timeline and the overflow — submitted, then silently
+    # gone. Routine for airmass-binned standards; still has to be visible.
+    for tgt, reason in getattr(plan, "not_observable", []):
+        overflow.append({
+            "target": tgt.name, "program": tgt.program,
+            "tier": _tier_of(tgt, id_to_tier),
+            "reason": reason,
+        })
 
     sci_hours = sum(e.charged_minutes for e in plan.scheduled
                     if math.isfinite(e.charged_minutes)) / 60.0

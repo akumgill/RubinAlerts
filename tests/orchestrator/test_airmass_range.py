@@ -232,3 +232,69 @@ def test_names_filter_selects_a_nightly_subset():
     with pytest.raises(ValueError):
         mod.select_names(stds, "GD71,NOT-A-STANDARD")
 
+
+def test_dropped_targets_are_reported_with_a_reason():
+    """compute_observability must be able to say WHY it filtered a target.
+
+    Without the out-parameter an unreachable airmass bin vanished from both the
+    timeline and the overflow — submitted, then silently gone.
+    """
+    dec = CFG.latitude + math.degrees(math.asin(1 / 1.8) - math.pi / 2) * -1
+    # asks for a low-airmass bin this target never reaches (it culminates ~1.8)
+    unreachable = OTarget(name="unreachable", ra_deg=_zenith_ra_deg(),
+                          dec_deg=dec, exposure_minutes=10.0,
+                          airmass_min=1.0, airmass_max=1.3)
+    reachable = OTarget(name="reachable", ra_deg=_zenith_ra_deg(),
+                        dec_deg=dec, exposure_minutes=10.0,
+                        airmass_min=1.7, airmass_max=2.3)
+    dropped: list = []
+    obs = compute_observability([unreachable, reachable], EVENING, MORNING,
+                               CFG, dropped=dropped)
+    assert [t.name for t in obs] == ["reachable"]
+    assert len(dropped) == 1
+    tgt, reason = dropped[0]
+    assert tgt.name == "unreachable"
+    assert "1.0-1.3" in reason            # names the range it could not reach
+    # backward compatible: callers that pass no list still just get the survivors
+    assert len(compute_observability([unreachable, reachable], EVENING,
+                                     MORNING, CFG)) == 1
+
+
+def test_unreachable_bin_appears_in_the_plan_overflow(client):
+    """A bin the star cannot reach must show up in the plan's overflow with a
+    reason — the demo failure mode was 6 submitted, 4 planned, 0 explained."""
+    # GD71 (dec +15.9) from LCO in September: reaches the 1.7-2.3 band but
+    # never the low ones.
+    for lo, hi in ((1.0, 1.3), (1.7, 2.3)):
+        client.post("/v1/targets", headers=STUBBS, json=[
+            _item(f"GD71@am{lo}-{hi}", ra=88.115437, dec=15.886239,
+                  exposure_minutes=10, airmass_min=lo, airmass_max=hi)])
+    plan = client.get("/v1/plan/preview?date=2026-09-06&instrument=LLAMAS",
+                      headers=STUBBS).json()
+    scheduled = {e["target"] for e in plan["timeline"]}
+    assert "GD71@am1.7-2.3" in scheduled
+    over = {o["target"]: o["reason"] for o in plan["overflow"]}
+    assert "GD71@am1.0-1.3" in over
+    assert "1.0-1.3" in over["GD71@am1.0-1.3"]
+    # nothing may be silently absent: every submission is scheduled or explained
+    assert scheduled | set(over) == {"GD71@am1.0-1.3", "GD71@am1.7-2.3"}
+
+
+def test_plan_sheet_stamps_when_to_shoot_each_pointing(client):
+    """Three pseudo-targets of one standard are three IDENTICAL pointings on
+    the sheet; the notes column has to carry the window (and say so when a row
+    cannot be shot at all). The 12-column convention must not change."""
+    ids = []
+    for lo, hi in ((1.0, 1.3), (1.7, 2.3)):
+        r = client.post("/v1/targets", headers=STUBBS, json=[
+            _item(f"GD71@am{lo}-{hi}", ra=88.115437, dec=15.886239,
+                  exposure_minutes=10, airmass_min=lo, airmass_max=hi)])
+        ids.append(r.json()[0]["id"])
+    bundle = client.post("/v1/obsplan", headers=STUBBS, json={
+        "date": "2026-09-06", "instrument": "LLAMAS", "target_ids": ids}).json()
+    rows = [ln.split("\t") for ln in bundle["plan_txt"].strip().split("\n")]
+    assert {len(r) for r in rows} == {12}      # convention preserved
+    notes = {r[0]: r[10] for r in rows}
+    assert "observe" in notes["GD71@am1.7-2.3"]
+    assert "UT" in notes["GD71@am1.7-2.3"]
+    assert "NOT OBSERVABLE" in notes["GD71@am1.0-1.3"]

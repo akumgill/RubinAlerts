@@ -270,6 +270,15 @@ def write_summary(plan: ObsPlan, path: str, accountant=None, ledger=None) -> Non
         lines.append("!" * width)
         lines.append("")
 
+    # Ruled out by tonight's sky before ranking. Not a warning — an airmass-
+    # binned standard that cannot reach a bin tonight is expected — but the
+    # observer has to see WHICH request was skipped and why.
+    if getattr(plan, 'not_observable', None):
+        lines.append("Not observable tonight (excluded before ranking):")
+        for t, reason in plan.not_observable:
+            lines.append(f"  {t.name:<24} P{t.priority} — {reason}")
+        lines.append("")
+
     # Completed targets excluded for sufficient integration (W11). With a
     # ledger, append the per-phase integration breakdown (W12).
     if plan.completed:

@@ -13,8 +13,10 @@ Input: a CSV (or JSON list) of standards with columns/keys
 (ra/dec in decimal degrees). See ref/standards_example.csv.
 
 Usage:
-  python scripts/enqueue_standards.py ref/standards_example.csv \
-      --api http://localhost:8000 --key <bearer> --exposure-minutes 6
+  # the nightly case: one or two RA-appropriate standards, three airmass bins
+  python scripts/enqueue_standards.py ref/boyd2025_wdfs_standards.csv \
+      --names GD71,GD153 --api http://localhost:8000 --key <bearer> \
+      --exposure-minutes 6
   # custom bins / tier:
   ... --bins 1.0-1.3,1.3-1.7,1.7-2.3 --priority P2 --dry-run
 
@@ -56,13 +58,21 @@ def parse_bins(spec: str) -> list[tuple[float, float]]:
 
 
 def load_standards(path: str) -> list[dict]:
-    """CSV (name, ra, dec, mag[, exposure_minutes]) or a JSON list of dicts."""
+    """CSV (name, ra, dec, mag[, exposure_minutes]) or a JSON list of dicts.
+
+    Leading ``#`` comment lines and blank lines are skipped — the shipped
+    catalogues carry a provenance header (see
+    ref/boyd2025_wdfs_standards.csv), and DictReader would otherwise take the
+    first comment line as the field names.
+    """
     if path.lower().endswith(".json"):
         with open(path) as f:
             rows = json.load(f)
     else:
         with open(path, newline="") as f:
-            rows = list(csv.DictReader(f))
+            lines = [ln for ln in f
+                     if ln.strip() and not ln.lstrip().startswith("#")]
+        rows = list(csv.DictReader(lines))
     out = []
     for r in rows:
         out.append({
@@ -74,6 +84,36 @@ def load_standards(path: str) -> list[dict]:
                                  else None),
         })
     return out
+
+
+def select_names(standards: list[dict], spec: str | None) -> list[dict]:
+    """Keep only the named standards, in the order given on the command line.
+
+    The nightly workflow is "pick one or two RA-appropriate standards", not
+    "enqueue the whole catalogue" — a 35-object catalogue times 3 airmass bins
+    would be 105 pseudo-targets. Matching is case-insensitive; an unknown name
+    is an error rather than a silent omission.
+    """
+    if not spec:
+        return standards
+    by_name = {s["name"].upper(): s for s in standards}
+    wanted, missing = [], []
+    for raw in spec.split(","):
+        name = raw.strip()
+        if not name:
+            continue
+        std = by_name.get(name.upper())
+        if std is None:
+            missing.append(name)
+        else:
+            wanted.append(std)
+    if missing:
+        raise ValueError(
+            f"unknown standard(s) {', '.join(missing)} — catalogue has: "
+            f"{', '.join(s['name'] for s in standards)}")
+    if not wanted:
+        raise ValueError("--names matched nothing")
+    return wanted
 
 
 def _amfmt(x: float) -> str:
@@ -121,6 +161,9 @@ def main(argv=None) -> int:
     ap.add_argument("--api", required=True, help="API base URL")
     ap.add_argument("--key", required=True,
                     help="bearer key — its program owns the pseudo-targets")
+    ap.add_argument("--names", default=None,
+                    help="comma-separated subset to enqueue (e.g. GD71,GD153); "
+                         "default: the whole file")
     ap.add_argument("--bins", default=DEFAULT_BINS,
                     help=f"comma-separated lo-hi airmass bins (default {DEFAULT_BINS})")
     ap.add_argument("--priority", default="P2", help="queue tier (default P2)")
@@ -132,7 +175,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    items = build_pseudo_targets(load_standards(args.standards),
+    items = build_pseudo_targets(select_names(load_standards(args.standards),
+                                              args.names),
                                  parse_bins(args.bins),
                                  priority=args.priority,
                                  exposure_minutes=args.exposure_minutes,

@@ -198,3 +198,37 @@ def test_pseudo_target_naming_and_build():
         mod.parse_bins("0.8-1.3")
     with pytest.raises(ValueError):
         mod.parse_bins("1.7-1.3")
+
+
+def test_loads_the_shipped_catalogue_with_its_comment_header():
+    """The real Boyd et al. 2025 file carries a '#' provenance header — the
+    loader must skip it rather than reading it as the field names (which made
+    the documented nightly command crash with KeyError: 'name')."""
+    mod = _load_script()
+    stds = mod.load_standards(
+        os.path.join(_REPO, "ref", "boyd2025_wdfs_standards.csv"))
+    assert len(stds) == 35
+    names = {s["name"] for s in stds}
+    assert {"GD71", "GD153", "G191B2B"} <= names
+    gd71 = next(s for s in stds if s["name"] == "GD71")
+    assert gd71["ra"] == pytest.approx(88.115437, abs=1e-6)
+    assert gd71["dec"] == pytest.approx(15.886239, abs=1e-6)
+    assert gd71["mag"] == pytest.approx(13.0, abs=1e-3)
+
+
+def test_names_filter_selects_a_nightly_subset():
+    """The nightly workflow is one or two RA-appropriate standards, so --names
+    must subset the catalogue (order preserved, case-insensitive) and reject an
+    unknown name instead of silently dropping it."""
+    mod = _load_script()
+    stds = mod.load_standards(
+        os.path.join(_REPO, "ref", "boyd2025_wdfs_standards.csv"))
+    picked = mod.select_names(stds, "gd153,GD71")
+    assert [s["name"] for s in picked] == ["GD153", "GD71"]
+    assert len(mod.select_names(stds, None)) == 35
+    items = mod.build_pseudo_targets(picked, mod.parse_bins("1.0-1.3,1.3-1.7"),
+                                     exposure_minutes=6.0)
+    assert len(items) == 2 * 2
+    with pytest.raises(ValueError):
+        mod.select_names(stds, "GD71,NOT-A-STANDARD")
+

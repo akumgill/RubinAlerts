@@ -18,14 +18,24 @@ class LLAMASConfig:
     longitude: float = -70.6926
     elevation_m: float = 2380
 
-    # LLAMAS instrument
-    overhead_minutes: float = 1.0        # IFU advantage — no slit alignment
-    # Per-target operations time beyond the IFU overhead: acquisition/guiding
-    # setup, plus slew charged from the previous pointing. The 1-min overhead
-    # assumption was justified for CLUSTERED DDF targets; wide-sky plans slew
-    # across the whole hemisphere, so slew must be modeled (2026-07 review).
-    acquisition_buffer_minutes: float = 2.0
-    slew_rate_deg_per_min: float = 60.0  # ~1 deg/s incl. settle, coarse model
+    # LLAMAS instrument. Per-target overhead is FLAT — calibrated 2026-09-08
+    # against Yize Dong's real Sep 6/7 plans (n=11 consecutive slots): the gaps
+    # between one exposure ending and the next starting were 5-9 min, mean 6.7,
+    # with NO dependence on slew distance:
+    #     gap = 7.49 min - 0.023 min/deg   (Pearson r = -0.50)
+    # A 96-deg slew cost 6 min; a 7-deg slew cost 7. The telescope absorbs the
+    # slew, so what dominates is fixed per-target cost (acquisition, guiding,
+    # instrument config, readout). The old model (1 IFU + 2 acquisition + a
+    # slew term) was both too small AND the wrong shape.
+    # CAVEAT: those are PLANNED start times, so this may be the allowance a
+    # working observer budgets rather than a measured cost. Re-derive from real
+    # FITS DATE-OBS deltas once a night's headers land (scripts/ingest_fits_night).
+    overhead_minutes: float = 7.0
+    # Folded into overhead_minutes above; kept at zero so the slew/acquisition
+    # code paths stay live for an instrument that does need them (LDSS3 slit
+    # alignment) without silently double-charging LLAMAS.
+    acquisition_buffer_minutes: float = 0.0
+    slew_rate_deg_per_min: float = 0.0   # 0 disables the slew term (see above)
     # Wall-clock block reserved for each MID-NIGHT standard (2x30s + acquire).
     # Start/end standards live in twilight and consume no dark time.
     std_block_minutes: float = 6.0

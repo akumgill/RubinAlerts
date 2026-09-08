@@ -466,11 +466,33 @@ def obsplan(request: Request, payload: dict = Body(...),
     except Exception as e:
         logger.warning("obsplan: observability ordering failed (%s); "
                        "keeping input order", e)
-    from orchestrator.obsfiles import tcs_catalog, plan_sheet, llamas_macro
+    # Sequential start times for the observer's night plan: each target begins
+    # when the previous exposure ends plus the measured per-target overhead
+    # (LLAMASConfig.overhead_minutes — flat, calibrated against real plans).
+    # The batch starts at evening twilight or the first target's window,
+    # whichever is later.
+    try:
+        from datetime import timedelta
+        from orchestrator.config import LLAMAS_CONFIG
+        over = timedelta(minutes=float(LLAMAS_CONFIG.overhead_minutes))
+        cursor = evening.datetime
+        first = _win.get(rows[0]["name"]) if rows else None
+        if first is not None and first.window_start is not None:
+            cursor = max(cursor, first.window_start.datetime)
+        for r in rows:
+            r["start"] = cursor
+            cursor = cursor + timedelta(
+                seconds=r["n_exp"] * r["exp_sec"]) + over
+    except Exception as e:      # no twilight solve — night plan degrades to '—'
+        logger.warning("obsplan: could not assign start times (%s)", e)
+
+    from orchestrator.obsfiles import (tcs_catalog, plan_sheet, llamas_macro,
+                                       night_plan)
     return {"date": date, "instrument": instrument,
             "order": [r["name"] for r in rows],
             "catalog_cat": tcs_catalog(rows),
             "plan_txt": plan_sheet(rows, date, instrument),
+            "night_plan": night_plan(rows),
             "instrument_macro": llamas_macro(rows)}
 
 

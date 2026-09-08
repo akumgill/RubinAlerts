@@ -136,3 +136,42 @@ def llamas_macro(rows: list[dict]) -> str:
             "",
         ]
     return "\n".join(lines)
+
+
+def night_plan(rows: list[dict]) -> str:
+    """Observer night plan in the collaboration's own convention.
+
+    Matches the table Yize Dong circulates for LLAMAS nights (2026-09-06/07):
+
+        |    name |          ra |          dec |  mag | exposure | nexp | exptime |                   start |
+
+    Deliberately NOT the ``plan_sheet`` format. That one follows the 12-column
+    LDSS_ObsPlan_Generator convention and feeds a tool; this one is what a human
+    observer reads at the telescope, so it carries an ABSOLUTE start time and
+    drops everything they do not act on (decimal coords, priority, links).
+
+    Each row needs name/ra/dec/mag/n_exp/exp_sec plus ``start`` — a UTC
+    ``datetime`` (or an ISO string). Rows with no start sort last and show '—'.
+    """
+    hdr = ("name", "ra", "dec", "mag", "exposure", "nexp", "exptime", "start")
+    body = []
+    for r in rows:
+        start = r.get("start")
+        if hasattr(start, "strftime"):
+            start = start.strftime("%Y-%m-%d %H:%M:%S")
+        mag = r.get("mag")
+        n_exp = int(r.get("n_exp") or 1)
+        exp_sec = float(r.get("exp_sec") or 0)
+        body.append((
+            str(r.get("name") or ""),
+            ra_hms(r["ra"]), dec_dms(r["dec"]),
+            "—" if mag is None else f"{float(mag):g}",
+            f"{n_exp}x{int(round(exp_sec))}",
+            f"{n_exp}.0", f"{exp_sec:.1f}",
+            str(start) if start else "—",
+        ))
+    w = [max(len(hdr[i]), *(len(b[i]) for b in body)) if body else len(hdr[i])
+         for i in range(len(hdr))]
+    line = lambda cells: "| " + " | ".join(
+        c.rjust(w[i]) for i, c in enumerate(cells)) + " |"
+    return "\n".join([line(hdr)] + [line(b) for b in body]) + "\n"

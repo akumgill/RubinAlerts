@@ -7,14 +7,14 @@ nights:
   - date: 2026-08-04
     instrument: LLAMAS
     observer: Conor Ransome
-    program: CfA-Villar
+    program: UA
     length: full
     status: cancelled
     note: storm — LCO suspended (restart Aug 11)
   - date: 2026-08-07
     instrument: LDSS3
     observer: Conor Ransome
-    program: CfA-Villar
+    program: UA
     length: full
     status: cancelled
     note: storm — LCO suspended (restart Aug 11)
@@ -50,7 +50,7 @@ nights:
   - date: 2026-09-12
     instrument: LDSS3
     observer: Conor Ransome
-    program: CfA-Villar
+    program: UA
     length: full
   - date: 2026-10-03
     instrument: LLAMAS
@@ -60,17 +60,17 @@ nights:
   - date: 2026-10-05
     instrument: LDSS3
     observer: Conor Ransome
-    program: CfA-Villar
+    program: UA
     length: full
   - date: 2026-11-02
     instrument: LLAMAS
     observer: Conor Ransome
-    program: CfA-Villar
+    program: UA
     length: full
   - date: 2026-12-08
     instrument: LLAMAS
     observer: Conor Ransome
-    program: CfA-Villar
+    program: UA
     length: full
   - date: 2026-12-15
     instrument: LLAMAS

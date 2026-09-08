@@ -755,7 +755,10 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
             sep_deg = 0.0
             if prev_coord is not None:
                 sep_deg = prev_coord.separation(t.coord).deg
-                slew_min = sep_deg / config.slew_rate_deg_per_min
+                # rate <= 0 disables the slew term (LLAMAS: measured flat
+                # overhead, no slew dependence — see LLAMASConfig)
+                if config.slew_rate_deg_per_min > 0:
+                    slew_min = sep_deg / config.slew_rate_deg_per_min
             ops_min = config.acquisition_buffer_minutes + slew_min
             dur = (exp_min + config.overhead_minutes + ops_min) * u.minute
 

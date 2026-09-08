@@ -134,3 +134,39 @@ def test_obsplan_endpoint(client):
     # ordering follows tonight's observability windows: RA 280 rises (and
     # sets) before RA 290 on any night, so SN-0 precedes SN-2
     assert b["order"].index("SN-0") < b["order"].index("SN-2")
+
+
+def test_night_plan_matches_the_collaboration_convention():
+    """The observer's night plan follows the table Yize circulates: pipe-
+    delimited name/ra/dec/mag/exposure/nexp/exptime/start, absolute UTC start,
+    and none of the plan-sheet's tool-facing columns."""
+    from datetime import datetime
+    from orchestrator.obsfiles import night_plan
+    rows = [{"name": "LTT6248", "ra": 234.749167, "dec": -28.592778,
+             "mag": 11.797, "n_exp": 1, "exp_sec": 60,
+             "start": datetime(2026, 9, 5, 23, 35, 35)},
+            {"name": "2024lwa", "ra": 338.196074, "dec": -9.447009,
+             "mag": 20, "n_exp": 3, "exp_sec": 900,
+             "start": datetime(2026, 9, 6, 0, 17, 35)}]
+    out = night_plan(rows).strip().split("\n")
+    assert out[0].split("|")[1].strip() == "name"
+    assert [c.strip() for c in out[0].split("|")[1:-1]] == [
+        "name", "ra", "dec", "mag", "exposure", "nexp", "exptime", "start"]
+    first = [c.strip() for c in out[1].split("|")[1:-1]]
+    assert first[0] == "LTT6248"
+    assert first[4] == "1x60" and first[5] == "1.0" and first[6] == "60.0"
+    assert first[7] == "2026-09-05 23:35:35"
+    # a row with no start is tolerated rather than crashing the bundle
+    assert "—" in night_plan([{"name": "x", "ra": 10.0, "dec": -5.0,
+                               "mag": None, "n_exp": 3, "exp_sec": 900}])
+
+
+def test_overhead_is_flat_with_no_slew_term():
+    """Calibrated against real plans: a 96-deg slew cost no more than a 7-deg
+    one, so the slew term is disabled and must not reintroduce itself (nor
+    divide by a zero rate)."""
+    from orchestrator.config import LLAMASConfig
+    c = LLAMASConfig()
+    assert c.overhead_minutes == 7.0
+    assert c.acquisition_buffer_minutes == 0.0
+    assert c.slew_rate_deg_per_min == 0.0

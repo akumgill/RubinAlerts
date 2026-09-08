@@ -269,7 +269,10 @@ def test_unreachable_bin_appears_in_the_plan_overflow(client):
         client.post("/v1/targets", headers=STUBBS, json=[
             _item(f"GD71@am{lo}-{hi}", ra=88.115437, dec=15.886239,
                   exposure_minutes=10, airmass_min=lo, airmass_max=hi)])
-    plan = client.get("/v1/plan/preview?date=2026-09-06&instrument=LLAMAS",
+    # 2026-09-20 is deliberately OFF the observing calendar, so it plans as a
+    # full night: GD71's only reachable bin sits at ~08:20 UT, which a
+    # first-half night (like the real 2026-09-06) would correctly exclude.
+    plan = client.get("/v1/plan/preview?date=2026-09-20&instrument=LLAMAS",
                       headers=STUBBS).json()
     scheduled = {e["target"] for e in plan["timeline"]}
     assert "GD71@am1.7-2.3" in scheduled
@@ -298,3 +301,38 @@ def test_plan_sheet_stamps_when_to_shoot_each_pointing(client):
     assert "observe" in notes["GD71@am1.7-2.3"]
     assert "UT" in notes["GD71@am1.7-2.3"]
     assert "NOT OBSERVABLE" in notes["GD71@am1.0-1.3"]
+
+
+def test_half_night_shortens_the_scheduling_window(client):
+    """Magellan nights are routinely split. A first-half night must not book
+    time in the second half — GD71's only reachable airmass bin from LCO in
+    September falls at ~08:20 UT, so it is schedulable on the full night and
+    NOT on the first half of the very same night."""
+    client.post("/v1/targets", headers=STUBBS, json=[
+        _item("GD71@am1.7-2.3", ra=88.115437, dec=15.886239,
+              exposure_minutes=10, airmass_min=1.7, airmass_max=2.3)])
+    # 2026-09-06 is on the calendar as first-half; 2026-09-20 is not on it at all
+    half = client.get("/v1/plan/preview?date=2026-09-06&instrument=LLAMAS",
+                      headers=STUBBS).json()
+    full = client.get("/v1/plan/preview?date=2026-09-20&instrument=LLAMAS",
+                      headers=STUBBS).json()
+    assert full["dark_hours"] > 1.9 * half["dark_hours"] - 0.5
+    assert "GD71@am1.7-2.3" in {e["target"] for e in full["timeline"]}
+    assert "GD71@am1.7-2.3" not in {e["target"] for e in half["timeline"]}
+    # and it is still explained rather than silently missing
+    assert "GD71@am1.7-2.3" in {o["target"] for o in half["overflow"]}
+
+
+def test_night_window_splits_at_the_midpoint():
+    from astropy.time import Time
+    from orchestrator.planner import night_window
+    ev, mo = Time("2026-09-06 23:49:00"), Time("2026-09-07 09:31:00")
+    assert night_window(ev, mo, "full") == (ev, mo)
+    s1, e1 = night_window(ev, mo, "first-half")
+    s2, e2 = night_window(ev, mo, "second-half")
+    assert s1 == ev and e2 == mo and e1 == s2          # contiguous, no overlap
+    assert abs((e1 - s1).to_value("hr") - (e2 - s2).to_value("hr")) < 1e-6
+    # legacy/garbage values degrade rather than raise
+    assert night_window(ev, mo, "half")[1] == e1       # ambiguous -> first half
+    assert night_window(ev, mo, "weird") == (ev, mo)   # unknown -> full night
+    assert night_window(ev, mo, "FIRST_HALF")[1] == e1

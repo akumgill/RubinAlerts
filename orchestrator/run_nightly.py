@@ -17,7 +17,8 @@ from .models import ObsPlan
 from .normalize import (load_from_rubinalerts, load_targets_csv,
                         estimate_llamas_exposure, load_primary_program)
 from .output import write_timeline, write_catalog, write_summary
-from .planner import calculate_twilight, compute_observability, create_schedule
+from .planner import (calculate_twilight, compute_observability,
+                      create_schedule, night_window)
 from .prioritizer import rank_targets
 from .target_ledger import TargetLedger, phase_bucket
 
@@ -119,7 +120,8 @@ def run_nightly(date: str,
                 from_rubinalerts: bool = True,
                 config: LLAMASConfig = None,
                 target_ledger_path: str = None,
-                nights_path: str = None) -> ObsPlan:
+                nights_path: str = None,
+                night_length: str = 'full') -> ObsPlan:
     """Full nightly run: load candidates, apply budgets, generate plan.
 
     Parameters
@@ -149,6 +151,10 @@ def run_nightly(date: str,
         only tonight's primary program's must-see (override) targets are
         guaranteed scheduling; everyone else's go through normal prioritization.
         When None, all must-see targets are honored (backward-compatible).
+    night_length : str
+        'full' (default), 'first-half' or 'second-half'. Magellan nights are
+        routinely split between programs; scheduling twilight-to-twilight on a
+        half night books time the program does not own. See planner.night_window.
 
     Returns
     -------
@@ -264,8 +270,14 @@ def run_nightly(date: str,
         plan.multi_group_alerts = multi_group_alerts
         return plan
 
-    # 4. Calculate twilight
+    # 4. Calculate twilight, then narrow to the part of the night this program
+    # actually owns (Magellan nights are routinely split between programs).
     evening, morning = calculate_twilight(date, config=config)
+    evening, morning = night_window(evening, morning, night_length)
+    if str(night_length or 'full').lower() != 'full':
+        logger.info("Night length %s: scheduling %s-%s UT (%.2f h)",
+                    night_length, evening.iso[11:16], morning.iso[11:16],
+                    (morning - evening).to_value('hr'))
 
     # 5. Compute observability (only over the pending, not-yet-satisfied set)
     not_observable: list = []

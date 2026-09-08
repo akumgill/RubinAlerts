@@ -8,6 +8,7 @@ and the overflow of submitted-but-unscheduled targets).
 """
 from __future__ import annotations
 
+import contextlib
 import csv
 import logging
 import math
@@ -82,6 +83,23 @@ def load_nights() -> list:
 # reservation the orchestrator already implements. P1>P2>P3 are ordinary.
 _TIER_MAP = {"P0": (1, True), "P1": (1, False), "P2": (2, False),
              "P3": (3, False), "P4": (4, False), "P5": (5, False)}
+
+
+def night_length_for(date: str, instrument: str = None) -> str:
+    """The observing calendar's night length for ``date`` ('full' by default).
+
+    Half nights are the norm rather than the exception on this run, and a plan
+    built over full twilight would promise roughly twice the time the program
+    owns. Matches on date (and instrument, when the calendar distinguishes).
+    """
+    for n in load_nights():
+        if str(n.get("date", "")) != str(date):
+            continue
+        if instrument and n.get("instrument") and \
+                str(n["instrument"]).upper() != instrument.upper():
+            continue
+        return str(n.get("length") or "full")
+    return "full"
 
 
 def _moon_phase_for(date: str) -> str:
@@ -185,10 +203,17 @@ def _empty_night(date: str, moon: str, instrument: str, cfg) -> dict:
 
 
 def preview_plan(service, date: str, moon: str = None,
-                 instrument: str = "LLAMAS") -> dict:
+                 instrument: str = "LLAMAS", work_dir: str = None) -> dict:
     """Run the orchestrator over the live queue for one instrument; return the
     preview dict. LLAMAS and LDSS3 are parallel systems: only this instrument's
-    targets (plus EITHER) are scheduled, with this instrument's overhead."""
+    targets (plus EITHER) are scheduled, with this instrument's overhead.
+
+    ``work_dir`` is the scratch directory holding the run's target ledger and
+    time-accounting state. It defaults to a fresh temp dir, so a preview is
+    stateless. ``preview_block`` passes ONE directory for a run of nights so
+    the ledger and the budget carry between them — that is what stops the same
+    target being planned twice across consecutive nights.
+    """
     from orchestrator.run_nightly import run_nightly
     from orchestrator.config import LLAMASConfig
 
@@ -215,14 +240,16 @@ def preview_plan(service, date: str, moon: str = None,
         key_name = t.name or f"{t.program}-{t.id}"
         id_to_tier[(t.program, key_name)] = t.priority
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with (contextlib.nullcontext(work_dir) if work_dir
+          else tempfile.TemporaryDirectory()) as tmp:
         csv_path = str(Path(tmp) / "queue.csv")
         _materialize_csv(active, csv_path)
         plan = run_nightly(
             date=date, candidates_path=csv_path,
             allocations_path=service.allocations_path,
             moon_phase=moon, output_dir=tmp, from_rubinalerts=False,
-            config=cfg,
+            config=cfg, night_length=night_length_for(date, instrument),
+            target_ledger_path=str(Path(tmp) / "block_ledger.json"),
         )
 
     def _hhmm(t):
@@ -549,3 +576,69 @@ def dashboard_data(service, date: str, instrument: str = "LLAMAS",
             cache[key] = (rev, payload)
 
     return {**payload, "caller_program": caller_program}
+
+
+def night_blocks(instrument: str = None) -> list:
+    """Group the observing calendar into BLOCKS of consecutive nights.
+
+    A block is a run of calendar-adjacent nights (gap <= 1 day) on the same
+    instrument. Sep 6 + Sep 7 is one block; Dec 15 and Jan 12 are two.
+
+    Blocks matter because scheduling adjacent nights independently produces
+    nearly the SAME plan twice — 24 h apart the sky barely moves, so the greedy
+    pick is almost identical. A human planner spreads the pool across the run
+    instead. Backtested against Yize Dong's Sep 6/7 plans (2026-09-08): our
+    per-night scheduler picked his Sep-7 targets on BOTH nights.
+    """
+    from datetime import date as _date, timedelta
+    rows = [n for n in load_nights()
+            if not instrument or str(n.get("instrument", "")).upper()
+            == instrument.upper()]
+    blocks: list = []
+    for n in rows:
+        try:
+            d = _date.fromisoformat(str(n.get("date")))
+        except (TypeError, ValueError):
+            continue
+        if blocks:
+            prev = blocks[-1][-1]
+            same_inst = prev.get("instrument") == n.get("instrument")
+            adjacent = (d - _date.fromisoformat(str(prev["date"]))).days <= 1
+            if same_inst and adjacent:
+                blocks[-1].append(n)
+                continue
+        blocks.append([n])
+    return blocks
+
+
+def block_for(date: str, instrument: str = None) -> list:
+    """The block of consecutive nights containing ``date`` (that night alone if
+    it stands on its own, and an empty list if it is not on the calendar)."""
+    for b in night_blocks(instrument):
+        if any(str(n.get("date")) == str(date) for n in b):
+            return b
+    return []
+
+
+def preview_block(service, date: str, instrument: str = "LLAMAS",
+                  moon: str = None) -> dict:
+    """Plan every night of ``date``'s block in one pass, sharing state.
+
+    Nights are scheduled in calendar order through ONE work directory, so the
+    per-target ledger and the time accounting carry forward: a target planned
+    on the first night is already satisfied when the second is scheduled, and
+    the budget drains across the run. That is the whole point — it turns two
+    near-identical greedy plans into a spread across the block.
+
+    Greedy and order-dependent by construction: the first night gets first
+    pick. Returns {block, instrument, nights: [<plan>, ...]} where each plan is
+    the same shape ``preview_plan`` returns.
+    """
+    instrument = (instrument or "LLAMAS").upper()
+    block = block_for(date, instrument) or [{"date": date,
+                                             "instrument": instrument}]
+    dates = [str(n.get("date")) for n in block]
+    with tempfile.TemporaryDirectory() as shared:
+        nights = [preview_plan(service, d, moon=moon, instrument=instrument,
+                               work_dir=shared) for d in dates]
+    return {"block": dates, "instrument": instrument, "nights": nights}

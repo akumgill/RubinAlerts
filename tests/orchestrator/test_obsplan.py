@@ -170,3 +170,46 @@ def test_overhead_is_flat_with_no_slew_term():
     assert c.overhead_minutes == 7.0
     assert c.acquisition_buffer_minutes == 0.0
     assert c.slew_rate_deg_per_min == 0.0
+
+
+def test_block_planning_spreads_targets_across_consecutive_nights(client):
+    """Adjacent nights must not be planned independently.
+
+    24 h apart the sky barely moves, so scheduling each night on its own picks
+    almost the same targets twice — which is exactly what our planner did when
+    backtested against Yize Dong's real Sep 6/7 plans. Sharing the ledger
+    across the block makes the pool spread instead.
+    """
+    # a pool of well-placed targets, more than one night can hold
+    pool = [("blk-a", 320.0), ("blk-b", 324.0), ("blk-c", 328.0),
+            ("blk-d", 332.0), ("blk-e", 336.0), ("blk-f", 340.0)]
+    for name, ra in pool:
+        r = client.post("/v1/targets", headers=STUBBS, json=[{
+            "name": name, "ra": ra, "dec": -29.0, "mag": 20.0,
+            "priority": "P2", "instrument": "LLAMAS",
+            "n_exposures": 3, "exposure_seconds": 900}])
+        assert r.json()[0]["status"] == "ok"
+
+    blk = client.get("/v1/plan/block?date=2026-09-06&instrument=LLAMAS",
+                     headers=STUBBS).json()
+    # Sep 6 + Sep 7 are calendar-adjacent LLAMAS nights -> one block
+    assert blk["block"] == ["2026-09-06", "2026-09-07"]
+    per_night = [{e["target"] for e in n["timeline"]} for n in blk["nights"]]
+    assert all(per_night), "each night of the block should schedule something"
+    # THE point: no target is planned twice across the block
+    assert not (per_night[0] & per_night[1]), (
+        f"target scheduled on both nights: {per_night[0] & per_night[1]}")
+    # and the block genuinely covers more of the pool than one night alone
+    solo = {e["target"] for e in client.get(
+        "/v1/plan/preview?date=2026-09-06&instrument=LLAMAS",
+        headers=STUBBS).json()["timeline"]}
+    assert len(per_night[0] | per_night[1]) > len(solo)
+
+
+def test_block_for_isolated_night_is_just_that_night(client):
+    from api.scheduler_bridge import block_for, night_blocks
+    assert [str(n["date"]) for n in block_for("2026-12-15", "LLAMAS")] == \
+        ["2026-12-15"]
+    # blocks never merge across instruments or non-adjacent dates
+    for b in night_blocks():
+        assert len({n.get("instrument") for n in b}) == 1

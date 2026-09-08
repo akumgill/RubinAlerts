@@ -295,6 +295,20 @@ def plan_preview(request: Request, date: str, instrument: str = "LLAMAS",
     return _guard(lambda: svc.plan_preview(date, moon, instrument))
 
 
+@app.get("/v1/plan/block")
+def plan_block(request: Request, date: str, instrument: str = "LLAMAS",
+               authorization: str = Header(None)):
+    """Plan every night in ``date``'s block of consecutive nights at once.
+
+    Scheduling adjacent nights independently yields nearly the same plan twice
+    (24 h apart the sky barely moves). This shares the target ledger and the
+    budget across the run, so the pool spreads over the block the way a human
+    planner spreads it. Returns {block, instrument, nights: [<plan>, ...]}."""
+    _identity(request, authorization)
+    from .scheduler_bridge import preview_block
+    return preview_block(svc, date, instrument=instrument)
+
+
 @app.get("/v1/dashboard")
 def dashboard(request: Request, instrument: str = "LDSS3",
               date: str = "2026-08-13", authorization: str = Header(None)):

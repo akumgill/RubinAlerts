@@ -110,6 +110,48 @@ def calculate_twilight(date_str: str,
 # Airmass utilities
 # ---------------------------------------------------------------------------
 
+# Night-length specs accepted from the observing calendar. Magellan nights are
+# routinely SPLIT between programs — 3 of the next 4 MAGNETS LLAMAS nights are
+# halves — so a plan built over full twilight would schedule into time the
+# program does not own and over-promise by ~2x.
+NIGHT_LENGTHS = ("full", "first-half", "second-half")
+
+
+def night_window(evening: Time, morning: Time,
+                 length: str = "full") -> Tuple[Time, Time]:
+    """Narrow a twilight-to-twilight span to the part this program owns.
+
+    ``length`` is one of ``full`` / ``first-half`` / ``second-half`` (also
+    accepts ``first_half``, ``firsthalf``, ``1st-half``, and the bare legacy
+    ``half``). The split point is the midpoint between astronomical twilights,
+    which is the convention LCO half-nights use.
+
+    A bare ``half`` is AMBIGUOUS. It is read as the first half — the observed
+    convention in the plans we have — and warned about, so a calendar entry
+    that never got disambiguated is visible rather than silently assumed.
+
+    Unknown values fall back to the full night with a warning: a scheduling
+    window is not the place to raise on a typo in a reference file.
+    """
+    key = str(length or "full").strip().lower().replace("_", "-")
+    key = {"firsthalf": "first-half", "1st-half": "first-half",
+           "secondhalf": "second-half", "2nd-half": "second-half"}.get(key, key)
+    if key == "full":
+        return evening, morning
+    midpoint = evening + (morning - evening) / 2
+    if key == "half":
+        logger.warning("night length 'half' is ambiguous — reading it as "
+                       "first-half; set first-half/second-half explicitly")
+        return evening, midpoint
+    if key == "first-half":
+        return evening, midpoint
+    if key == "second-half":
+        return midpoint, morning
+    logger.warning("unknown night length %r — scheduling the full night",
+                   length)
+    return evening, morning
+
+
 def _get_airmass(coord: SkyCoord, time: Time, location) -> float:
     """Compute airmass for a single coordinate at a single time."""
     alt = coord.transform_to(AltAz(obstime=time, location=location)).alt.deg

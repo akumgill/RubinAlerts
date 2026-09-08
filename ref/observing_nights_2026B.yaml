@@ -41,12 +41,12 @@ nights:
     instrument: LLAMAS
     observer: Yize Dong
     program: CfA-Villar
-    length: half
+    length: first-half
   - date: 2026-09-07
     instrument: LLAMAS
     observer: Yize Dong
     program: CfA-Villar
-    length: half
+    length: first-half
   - date: 2026-09-12
     instrument: LDSS3
     observer: Conor Ransome

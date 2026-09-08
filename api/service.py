@@ -14,7 +14,7 @@ import threading
 from dataclasses import fields as _dc_fields
 from typing import Callable, Optional
 
-from .models import Target, TIERS, INSTRUMENTS
+from .models import Target, TIERS, INSTRUMENTS, BANDS, MAG_KINDS
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +268,20 @@ class TargetQueueService:
             return {"status": "error",
                     "error": f"instrument must be one of {INSTRUMENTS}"}
 
+        # Band and magnitude KIND. The collaboration sheet quotes magnitudes in
+        # mixed bands and, for host/TDE-host targets, as surface brightnesses.
+        # Both have to survive submission: the ETC curve is indexed by apparent
+        # r for a POINT source, so flattening either one to a bare float
+        # silently mis-sizes the exposure.
+        band = str(raw.get("band") or "r").strip()
+        if band not in BANDS:
+            return {"status": "error",
+                    "error": f"band must be one of {BANDS}"}
+        mag_kind = str(raw.get("mag_kind") or "point").strip().lower()
+        if mag_kind not in MAG_KINDS:
+            return {"status": "error",
+                    "error": f"mag_kind must be one of {MAG_KINDS}"}
+
         ra = raw.get("ra", float("nan"))
         dec = raw.get("dec", float("nan"))
         ra = float(ra) if ra is not None else float("nan")
@@ -352,17 +366,24 @@ class TargetQueueService:
                 existing.name = name
             if raw.get("valid_until"):
                 existing.valid_until = raw["valid_until"]
+            existing.band = band
+            existing.mag_kind = mag_kind
+            for fld in ("requested_by", "link", "notes"):
+                if raw.get(fld):
+                    setattr(existing, fld, str(raw[fld]))
             t = existing
             updated = True
         else:
             t = Target(
                 priority=pri, instrument=inst, name=name, ra=ra, dec=dec, mag=mag,
-                band=str(raw.get("band", "r")), redshift=redshift,
+                band=band, mag_kind=mag_kind, redshift=redshift,
                 exposure_minutes=exp_min, n_exposures=n_exp,
                 exposure_seconds=exp_sec,
                 airmass_min=am_lo, airmass_max=am_hi,
                 valid_until=raw.get("valid_until"),
                 notes=str(raw.get("notes", "")),
+                requested_by=str(raw.get("requested_by", "")),
+                link=str(raw.get("link", "")),
                 id=self._next_id, program=program, status="queued",
                 canonical_ra=ra, canonical_dec=dec, resolved_from=resolved_from,
             )

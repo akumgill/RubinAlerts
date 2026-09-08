@@ -336,3 +336,43 @@ def test_night_window_splits_at_the_midpoint():
     assert night_window(ev, mo, "half")[1] == e1       # ambiguous -> first half
     assert night_window(ev, mo, "weird") == (ev, mo)   # unknown -> full night
     assert night_window(ev, mo, "FIRST_HALF")[1] == e1
+
+
+def test_band_and_mag_kind_round_trip_and_validate(client):
+    """A magnitude without its band and kind is not enough information. The
+    sheet mixes g and r freely and quotes host targets as surface
+    brightnesses; flattening either to a float mis-sizes the exposure."""
+    ok = client.post("/v1/targets", headers=STUBBS, json=[
+        _item("sb-host", ra=12.0, dec=-20.0, mag=22.1, band="r",
+              mag_kind="surface_brightness", requested_by="Wenkai (UA)",
+              link="https://example.org/x")])
+    assert ok.json()[0]["status"] == "ok"
+    row = next(t for t in client.get("/v1/targets", headers=STUBBS).json()
+               if t["name"] == "sb-host")
+    assert row["band"] == "r" and row["mag_kind"] == "surface_brightness"
+    assert row["requested_by"] == "Wenkai (UA)"
+    assert row["link"] == "https://example.org/x"
+    # defaults stay point/r so existing submitters are unaffected
+    client.post("/v1/targets", headers=STUBBS, json=[
+        _item("plain", ra=13.0, dec=-20.0, mag=20.0)])
+    plain = next(t for t in client.get("/v1/targets", headers=STUBBS).json()
+                 if t["name"] == "plain")
+    assert plain["band"] == "r" and plain["mag_kind"] == "point"
+    # nonsense is rejected rather than coerced
+    bad = client.post("/v1/targets", headers=STUBBS, json=[
+        _item("bad-kind", ra=14.0, dec=-20.0, mag=20.0, mag_kind="vibes")])
+    assert bad.json()[0]["status"] == "error"
+    bad2 = client.post("/v1/targets", headers=STUBBS, json=[
+        _item("bad-band", ra=15.0, dec=-20.0, mag=20.0, band="q")])
+    assert bad2.json()[0]["status"] == "error"
+
+
+def test_etc_refuses_what_it_cannot_legitimately_size(client):
+    """The curve is apparent-r, point-source. Returning a confident number for
+    a g magnitude or a surface brightness is worse than refusing."""
+    assert client.get("/v1/etc?mag=20", headers=STUBBS).status_code == 200
+    g = client.get("/v1/etc?mag=20&band=g", headers=STUBBS)
+    assert g.status_code == 422 and "apparent r" in g.json()["detail"]
+    sb = client.get("/v1/etc?mag=22.1&mag_kind=surface_brightness",
+                    headers=STUBBS)
+    assert sb.status_code == 422 and "POINT" in sb.json()["detail"]

@@ -236,7 +236,8 @@ def withdraw(request: Request, target_id: int, authorization: str = Header(None)
 # ever silently auto-sized.
 # ---------------------------------------------------------------------------
 @app.get("/v1/etc")
-def etc_suggest(request: Request, mag: float, authorization: str = Header(None)):
+def etc_suggest(request: Request, mag: float, band: str = "r",
+                mag_kind: str = "point", authorization: str = Header(None)):
     """Suggested LLAMAS exposure for an anticipated magnitude, expressed as
     the canonical cosmic-ray-rejection triplet: 3 equal sub-exposures rounded
     to the nearest 10 s.
@@ -262,6 +263,19 @@ def etc_suggest(request: Request, mag: float, authorization: str = Header(None))
     import math
     if not math.isfinite(mag):
         raise HTTPException(422, "mag must be a finite magnitude")
+    # The curve is indexed by apparent r for a POINT source. Refuse rather than
+    # quietly return a number for inputs it cannot represent: a surface
+    # brightness is not a point-source magnitude at all, and a non-r band is
+    # off by the colour term (g-r ~ 0-0.3 for a Ia near peak, more when
+    # reddened or late, which at 2.5x/mag is a 20-100% exposure error).
+    if str(mag_kind).lower() != "point":
+        raise HTTPException(
+            422, f"this ETC sizes POINT sources; mag_kind={mag_kind!r} needs an "
+                 "extended-source calculation — enter the exposure manually")
+    if str(band) != "r":
+        raise HTTPException(
+            422, f"this ETC is calibrated on apparent r; mag is in {band!r}. "
+                 "Convert to r or enter the exposure manually")
     t, extrapolated = snr_exposure_minutes(mag)
     if not math.isfinite(t):
         raise HTTPException(422, "ETC could not size an exposure for this mag")

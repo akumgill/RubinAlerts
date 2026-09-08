@@ -24,6 +24,19 @@ STATUSES = ("queued", "scheduled", "observed", "withdrawn")
 # EITHER means the target may go on whichever instrument's night comes first.
 INSTRUMENTS = ("LLAMAS", "LDSS3", "EITHER")
 
+# Photometric bands a submitted magnitude may be quoted in. The collaboration
+# sheet mixes them freely ("22 in r", "20.5 in g"), and it matters: the LLAMAS
+# ETC curve is indexed by apparent *r*, so a g magnitude fed to it silently
+# mis-sizes the exposure by the colour term.
+BANDS = ("u", "g", "r", "i", "z", "y", "V", "B", "R", "I", "c", "o", "G")
+
+# What KIND of quantity `mag` is. Two of the nineteen targets on the 2026-09
+# sheet are surface brightnesses, not point-source magnitudes
+# ("22.1 mag arcsec^-2 in r at Re = 3.6\""), because the target is a host or a
+# TDE host rather than a point source. A point-source ETC cannot size those, so
+# the distinction has to survive submission instead of being flattened to a float.
+MAG_KINDS = ("point", "surface_brightness")
+
 
 @dataclass
 class Target:
@@ -42,7 +55,8 @@ class Target:
     ra: float = float("nan")            # deg, ICRS
     dec: float = float("nan")           # deg, ICRS
     mag: float = float("nan")           # anticipated, at observation
-    band: str = "r"                     # band `mag` is in
+    band: str = "r"                     # band `mag` is in (see BANDS)
+    mag_kind: str = "point"             # point | surface_brightness (see MAG_KINDS)
     redshift: float = float("nan")
     exposure_minutes: float = float("nan")   # total requested integration (min)
     n_exposures: Optional[int] = None        # sub-exposure count, e.g. 3 x 600s
@@ -56,6 +70,11 @@ class Target:
     airmass_min: float = float("nan")
     airmass_max: float = float("nan")
     notes: str = ""
+    requested_by: str = ""              # PERSON who asked for it. Programs hold
+                                        # the budget, but the sheet tracks the
+                                        # individual and that is who an observer
+                                        # needs to ask about a target.
+    link: str = ""                      # provenance URL (ALeRCE/ANTARES/TNS/DP2)
 
     # --- system-assigned ---
     id: Optional[int] = None

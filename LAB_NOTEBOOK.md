@@ -1,5 +1,145 @@
 # RubinAlerts Lab Notebook
 
+## 2026-09-08 — Yize's real plans as ground truth: overhead, half nights, blocks, urgency, sheet schema
+
+Yize circulated his LLAMAS plans for Sep 6/7 (first-half nights) plus the
+collaboration's target workbook. Both are the first REAL artifacts we've had to
+calibrate and backtest against instead of guessing. Four commits
+(5128731..cbeb7a5); suite 421 → **435**. All pushed; Render deployed.
+
+### THE FRAMING (Akum, and it holds up)
+
+Two related projects, and conflating them is what made the exposure discussion
+muddy for two sessions:
+
+- **Project A — the orchestrator. Ia-AGNOSTIC.** Everyone submits sources, we
+  schedule, we account. Group organisation.
+- **Project B — our own SN Ia selection.** Brokers, SALT2, score = P×V(z)×G×U×E,
+  the selection page.
+
+Confirmed hard by the workbook: **19 targets, ZERO Ia.** Type II, IIn, IIb,
+SLSN, a TDE host, an LBV/impostor, anomaly-detection objects, from five people
+across three programs. Project A's real input is a pool where our Ia targets
+would be a minority contributed by one program.
+
+The clean test of the boundary is exposure time: it is an **input** to A (Villar
+submits 3x900 because Yize decided; the scheduler only needs the number, so
+**the orchestrator never needs an ETC**) and an **output** of B. The bug that
+follows: a Project-A operational constant (the 10-min floor, set for
+overhead efficiency) was silently setting a Project-B science policy (delivered
+binned S/N 91 at r=18 down to 15 at r=21.5 — nobody chose that).
+
+### Program attribution was wrong (accounting bug)
+
+Both allocations files put Ransome's six nights under **UA** (LLAMAS Aug 4 /
+Nov 2 / Dec 8; LDSS3 Aug 7 / Sep 12 / Oct 5); `observing_nights_2026B.yaml`
+tagged every one `CfA-Villar`, so UA had a 45 h budget and zero nights. Those
+nights billed Villar and UA never drew down, which skews the %-remaining P-tier
+tie-break in UA's favour. Confirmed by Akum, all six reassigned.
+
+### Overhead is FLAT ~7 min, and we had the shape wrong too
+
+Regressed his inter-target gaps against real slew angle (n=11):
+
+    gap = 7.49 min - 0.023 min/deg    (Pearson r = -0.50)
+
+A 96-deg slew cost 6 min; a 7-deg slew cost 7. **No slew dependence at all**
+across a 14x range in angle. Old model was 1 IFU + 2 acquisition + slew/60
+≈ 3.7 min: half the real cost AND slew-shaped. Now flat 7.0 with the slew term
+disabled (rate 0, guarded against the division). Costs one target per half
+night, which is the over-promising the old number was hiding.
+CAVEAT: PLANNED start times, so this may be the allowance he budgets rather
+than a measured cost. Re-derive from FITS DATE-OBS deltas when headers land.
+
+### Half nights (were not modelled AT ALL)
+
+3 of the next 4 MAGNETS LLAMAS nights are halves, and we were building every
+plan over full twilight — promising ~2x the time the program owns.
+`planner.night_window()` splits at the twilight midpoint (full / first-half /
+second-half); `run_nightly` takes `night_length`; the API reads it per
+date+instrument from the calendar. A bare legacy `half` reads as first-half
+WITH a warning. Sep 6/7 set to first-half (evidenced: his plans run twilight to
+~04:30 against 23:49-09:31). **Oct 3 is still a bare `half` — ASK YIZE.**
+
+### Multi-night block planning
+
+Backtest found our scheduler picking his Sep-7 targets on BOTH nights: 24 h
+apart the sky barely moves, so two independent greedy plans are nearly
+identical, while a human spreads the pool. `preview_block()` schedules
+calendar-adjacent same-instrument nights in order through ONE work dir, so the
+ledger and budget carry forward. `GET /v1/plan/block`.
+
+    before:  Sep 6 1/5, Sep 7 3/4, same 3 targets planned twice
+    after:   Sep 6 3/5, Sep 7 2/4, ZERO repeats (5/8 same-night matches)
+
+### At-risk urgency — HONEST MIXED RESULT
+
+He opened Sep 6 with 2026ejy (P2): a 56-min window needing 37 min of it, **19
+min of slack against 224** for everything else. We took the lowest-airmass P1
+and lost it. A closing window is a LOSS, not a preference, and no bounded bonus
+can express that — the codebase convention caps nudges below one priority tier,
+and this needs to cross one. Implemented as a MULTIPLIER on the value term
+(at-risk P2 300→600 beats comfortable P1 400; at-risk P5 value 0 preempts
+nothing). Penalties stay additive so urgent targets aren't punished for being
+low in the west.
+
+Horizon is NOT a sensitive knob: slack at twilight is bimodal (0/19/26 min for
+three targets, 110+ for the other thirteen), so anything in ~27-109 picks the
+same set.
+
+**But block agreement went 5/8 → 4/8.** It also grabs 2024afyu and 2026kyv,
+urgent targets he chose to LOSE rather than spend 60 min on at airmass 1.4.
+Deliberately not tuned further: n=8 slots against one observer's judgement is
+not a benchmark worth fitting. The real question it surfaces — should urgency
+scale with COST, so a cheap urgent target is grabbed and an expensive one let
+go — is for Chris and Yize, not for us to guess from two nights.
+
+### Output format now matches what the collaboration circulates
+
+`obsfiles.night_plan()` renders his table shape (name/ra/dec/mag/exposure/
+nexp/exptime + ABSOLUTE start), added as a fourth bundle output with sequential
+starts from twilight using the calibrated overhead. `plan_sheet` deliberately
+left alone: it follows the 12-column LDSS_ObsPlan_Generator convention and
+feeds a tool, while this is what a human reads at the telescope.
+
+### Submission schema + sheet importer (POST-MEETING PRIORITY #1)
+
+The July deliverable was blocked on not knowing what the real interface looked
+like. The workbook IS that interface, so it's now formalised against something
+real. `mag` was a bare float; the sheet quotes mixed bands AND surface
+brightnesses (2 of 19, for host/TDE-host targets). Target gains `mag_kind`
+(point|surface_brightness) beside `band`, plus `requested_by` (the PERSON —
+programs hold budget, but an observer needs to know who to ask) and `link`.
+`/v1/etc` now takes band/mag_kind and **422s** on a non-r band or a surface
+brightness rather than returning a confident wrong number.
+
+`scripts/import_sheet.py` reads the workbook and POSTs it: **19/19 accepted**.
+Adoption is the point — nobody retypes 19 targets into our form while the sheet
+works. Doubles as a drift detector: when the sheet changes, its warnings say
+how the real interface moved.
+
+### Still open
+
+1. **Oct 3**: which half? (Yize)
+2. **Target binned S/N** (Chris) — now askable with zero Project-A
+   contamination: "our floor gives 91 at r=18 and 15 at r=21.5; what should
+   typing get, flat?" Table of where the calc starts to bind is in the
+   2026-09-08 session.
+3. **Cost-scaled urgency** — Chris/Yize design question, see above.
+4. **Lifecycle fields** — the sheet's `Spec Dates`, `Phot? (bands)`,
+   `Best Observed (UTC)`, `Reduction Status`, `Reduced By`, `Uploaded to
+   YSE-PZ?`, `Uploaded to TNS?`. Pure Project A, never modelled; our ingestion
+   stops at "observed, time charged". Needs a conversation with Yize about the
+   real reduction workflow before it's worth building.
+5. **Standards exposure model** — still queued; needs a LLAMAS full-well /
+   saturation number before it can be anything but a guess.
+6. Two stale reference files worth a look: `observing_nights_example.csv` still
+   uses the OLD program names (`MAGNETS-Villar` vs `CfA-Villar`) and is what
+   `load_primary_program` reads, while the live calendar is the YAML; and the
+   LDSS3 allocations comment claims Villar's 15 h covers "Aug 10 full, Oct 3
+   half" though the nights file has both as LLAMAS.
+
+
 ## 2026-08-24 — Standards path was broken; fixed, prod loaded, demo scoped
 
 Chris's 08-18 homework (enqueue spectrophotometric standards, observe each at

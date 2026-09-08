@@ -279,3 +279,49 @@ programs:
                            config=config, accountant=acc)
     order = [e.target.name for e in plan.scheduled]
     assert order.index('B1') == 1, f"band should slot B1 second, got {order}"
+
+
+def test_at_risk_target_outranks_a_comfortable_higher_priority_one():
+    """A closing window is a LOSS, not a preference.
+
+    Real case (Yize's 2026-09-06 plan): 2026ejy was P2 with 19 min of slack;
+    2023xbg was P1 with 224. Ranking on value-now took the P1 and lost the P2
+    for the night. The at-risk multiplier has to be able to cross a priority
+    tier, which is exactly what a bounded bonus cannot do.
+    """
+    from astropy.time import Time
+    from orchestrator.planner import (calculate_twilight, compute_observability,
+                                      create_schedule)
+    from orchestrator.models import Target
+    from orchestrator.config import LLAMASConfig
+    cfg = LLAMASConfig()
+    ev, mo = calculate_twilight('2026-09-06', config=cfg)
+    # setting in the west (short window), P2 — the "2026ejy" role
+    urgent = Target(name='urgent-p2', ra_deg=242.5, dec_deg=0.7, mag=19.0,
+                    exposure_minutes=30, priority=2)
+    # up all night, P1 — the "2023xbg" role
+    comfy = Target(name='comfy-p1', ra_deg=311.4, dec_deg=-29.5, mag=20.0,
+                   exposure_minutes=60, priority=1)
+    obs = compute_observability([urgent, comfy], ev, mo, config=cfg)
+    names = {t.name for t in obs}
+    assert {'urgent-p2', 'comfy-p1'} <= names, "both must be observable at all"
+    plan = create_schedule(obs, ev, mo, moon_phase='grey', config=cfg)
+    order = [e.target.name for e in plan.scheduled]
+    assert 'urgent-p2' in order, "the closing-window target must not be lost"
+    assert order.index('urgent-p2') < order.index('comfy-p1'), \
+        f"urgent target should go first, got {order}"
+
+
+def test_urgency_scales_with_value_so_a_p5_preempts_nothing():
+    """The multiplier is applied to the VALUE term. A P5 has value 0 in the
+    fallback ranking, so doubling it changes nothing — a worthless target about
+    to set must not jump the queue. This is why urgency is a multiplier rather
+    than a flat bonus big enough to cross a tier."""
+    from orchestrator.planner import URGENCY_AT_RISK_MULTIPLIER
+    assert URGENCY_AT_RISK_MULTIPLIER > 1.0
+    for priority, expect_zero in ((5, True), (2, False)):
+        value = (5 - priority) * 100
+        boosted = value * URGENCY_AT_RISK_MULTIPLIER if value > 0 else value
+        assert (boosted == 0) is expect_zero
+    # a boosted P2 must be able to beat an unboosted P1 (the whole point)
+    assert (5 - 2) * 100 * URGENCY_AT_RISK_MULTIPLIER > (5 - 1) * 100

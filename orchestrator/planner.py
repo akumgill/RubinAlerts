@@ -43,6 +43,22 @@ SLEW_PENALTY = 0.5
 EXPOSURE_DENSITY_BONUS = 5.0
 EXPOSURE_DENSITY_REF_MIN = 45.0
 
+# Urgency: a target whose observable window is about to close is not merely a
+# worse pick if deferred — it is LOST. Every other nudge here answers "which
+# target is best now"; this one answers "which target will still be there
+# later", which no amount of tuning a goodness-now bonus can express.
+#
+# Motivated by the 2026-09-08 backtest against Yize Dong's real Sep 6 plan. He
+# opened the night with 2026ejy (P2), which had a 56-min window and needed 37
+# min of it: 19 minutes of slack against 224 for everything else. Our scheduler
+# took the lowest-airmass P1 instead and lost 2026ejy entirely.
+#
+# Applied as a MULTIPLIER on the value term, not a flat bonus, so it scales
+# with what is actually at stake: a P2 about to set outranks a comfortable P1,
+# while a P5 about to set (value 0) still preempts nothing. A flat bonus large
+# enough to save the P2 would also have let the P5 jump the queue.
+URGENCY_AT_RISK_MULTIPLIER = 2.0
+
 # Within-night fairness nudge (PI policy, 2026-07-13): a multi-program split
 # should stay "at least close" to the allocation shares without being a hard
 # wall — the most interesting target can still win, and reconcile trues up
@@ -860,13 +876,27 @@ def create_schedule(targets: List[Target], evening: Time, morning: Time,
                 if tol > 0 and deficit_after < -tol:
                     over_band = True
 
-            # Score: use prioritizer if available, else priority-based
+            # Urgency: would deferring this pick LOSE the target tonight?
+            # Slack = leeway left in its window if we schedule something else
+            # first. Below the horizon (roughly one short exposure block) the
+            # next pick eats the window, so weight the value at stake.
+            slack_min = ((t.window_end - current).to_value('min')
+                         - dur.to_value('min'))
+            at_risk = slack_min < getattr(
+                config, 'urgency_horizon_minutes', 30.0)
+            risk_mult = URGENCY_AT_RISK_MULTIPLIER if at_risk else 1.0
+
+            # Score: use prioritizer if available, else priority-based. The
+            # urgency multiplier scales the VALUE term only — doubling the
+            # airmass/slew penalties too would punish urgent targets for being
+            # where urgent targets necessarily are (low in the west).
             if prioritizer_scores and t.name in prioritizer_scores:
-                score = (prioritizer_scores[t.name] - am * 10 - slew_pen
-                         + density + balance)
+                value = prioritizer_scores[t.name]
             else:
-                score = ((5 - t.priority) * 100 - am * 10 - slew_pen
-                         + density + balance)
+                value = (5 - t.priority) * 100
+            if at_risk and value > 0:
+                value *= risk_mult
+            score = value - am * 10 - slew_pen + density + balance
             if over_band:
                 # feasible but over the fairness band: only eligible if no
                 # within-band candidate exists this slot

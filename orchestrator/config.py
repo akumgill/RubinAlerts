@@ -36,6 +36,12 @@ class LLAMASConfig:
     # alignment) without silently double-charging LLAMAS.
     acquisition_buffer_minutes: float = 0.0
     slew_rate_deg_per_min: float = 0.0   # 0 disables the slew term (see above)
+    # A target with less than this much slack left in its observing window is
+    # treated as AT RISK: scheduling anything else first would lose it. Set to
+    # roughly one short exposure block, which is what the next pick costs.
+    # 30 min cleanly separates the real case it was built for (2026ejy, 19 min
+    # of slack) from the comfortable field (224 min) — see planner.py.
+    urgency_horizon_minutes: float = 30.0
     # Wall-clock block reserved for each MID-NIGHT standard (2x30s + acquire).
     # Start/end standards live in twilight and consume no dark time.
     std_block_minutes: float = 6.0

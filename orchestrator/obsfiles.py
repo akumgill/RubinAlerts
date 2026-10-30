@@ -32,6 +32,7 @@ protocol) but any (n_exp, exp_sec) is rendered faithfully.
 from __future__ import annotations
 
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -175,3 +176,230 @@ def night_plan(rows: list[dict]) -> str:
     line = lambda cells: "| " + " | ".join(
         c.rjust(w[i]) for i, c in enumerate(cells)) + " |"
     return "\n".join([line(hdr)] + [line(b) for b in body]) + "\n"
+
+
+# --- Magellan CfA observing request package (LaTeX) -------------------------
+# The observer (Yuri Beletsky) asks for the plan as the CfA LaTeX template,
+# compiled to PDF. The package is a FOLDER, not a single file — the reference
+# Yize circulated for 2026-10-03 is:
+#
+#     Dong_Magellan_1003_2026/
+#         LDSS_20261003_Dong.pdf          <- the compiled template
+#         ObsPlan/Dong_Magellan_1003_catalog
+#         ObsPlan/Dong_Magellan_1003_timeline
+#         Finders/                        <- one finder chart per target
+#
+# so the PDF's "Observing Catalog" and "Finder Charts" sections are POINTERS to
+# sibling files rather than embedded content. We already generate the catalog
+# (tcs_catalog) and the timeline (night_plan); this renders the document that
+# wraps them.
+
+# Longest acceptable single sub-exposure. The collaboration's own plans use
+# 900 s and 1200 s and vary the COUNT, never the length: Yize's Sep 6/7 and
+# Oct 3 packages run 2x900, 3x900, 3x1200, 4x1200, 5x1200. A 2140 s sub-
+# exposure (which naive total/3 produces for a mag-22 target) would be
+# unusable for cosmic rays and tracking.
+MAX_SUB_EXPOSURE_SEC = 1200
+MIN_SUB_EXPOSURES = 3          # the CR-rejection triplet is the floor
+
+
+def split_subexposures(total_minutes, max_sub_sec: int = MAX_SUB_EXPOSURE_SEC,
+                       min_n: int = MIN_SUB_EXPOSURES) -> tuple:
+    """Total integration -> (n_exposures, seconds each), rounded to 10 s.
+
+    Splits by COUNT, keeping each sub-exposure at or under ``max_sub_sec``,
+    with at least ``min_n`` so cosmic rays can always be median-filtered.
+    """
+    try:
+        total_sec = float(total_minutes) * 60.0
+    except (TypeError, ValueError):
+        return min_n, 0.0
+    if not (total_sec > 0):
+        return min_n, 0.0
+    n = max(min_n, math.ceil(total_sec / float(max_sub_sec)))
+    return n, max(10.0, round(total_sec / n / 10.0) * 10.0)
+
+
+_ORDINALS = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th", 5: "5th"}
+
+
+def _tex_escape(s) -> str:
+    """Escape the characters that bite in target names and notes.
+
+    Underscores are the live hazard: the collaboration writes photometry
+    entries as ``2026adpo_image``, which is a subscript in LaTeX and a compile
+    error outside maths mode.
+    """
+    out = []
+    for ch in str(s):
+        if ch in "&%$#_{}":
+            out.append("\\" + ch)
+        elif ch == "~":
+            out.append("\\textasciitilde{}")
+        elif ch == "^":
+            out.append("\\textasciicircum{}")
+        elif ch == "\\":
+            out.append("\\textbackslash{}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _priority_phrase(priority) -> str:
+    """'P2' / 2 -> '(2nd Priority)'; blank for an unknown tier."""
+    n = _pri_num(priority)
+    try:
+        return f"({_ORDINALS[int(n)]} Priority)"
+    except (ValueError, KeyError):
+        return ""
+
+
+def _target_block(r: dict) -> list:
+    """One target as the reference package writes it: a bullet carrying name,
+    priority and anticipated magnitude, then the numbered observation(s)."""
+    mag = r.get("mag")
+    mag_s = "" if mag is None else f" mag $\\sim$ {float(mag):g}"
+    if r.get("is_standard"):
+        head = (f"Spectroscopic Standard Star {_tex_escape(r['name'])}"
+                + (f" (V mag = {float(mag):g})" if mag is not None else ""))
+    else:
+        head = f"{_tex_escape(r['name'])} {_priority_phrase(r.get('priority'))}{mag_s}"
+    lines = [f"\\item {head}", "\\begin{enumerate}"]
+    for obs in (r.get("observations") or [f"Spectrum: {exp_str(r)}"]):
+        lines.append(f"\\item {_tex_escape(obs)}")
+    lines += ["\\end{enumerate}", ""]
+    return lines
+
+
+def request_package(nights: list, meta: dict) -> str:
+    """Render the Magellan CfA observing request package as LaTeX.
+
+    ``nights`` is one entry per observing night::
+
+        {"date": "2026-11-02",            # ISO; shown as "November 02, 2026"
+         "label": "...",                  # optional subsection heading override
+         "targets": [ {name, priority, mag, n_exp, exp_sec,
+                       is_standard?, observations?: ["Spectrum: 3x900s", ...]} ]}
+
+    Content from ``meta`` is treated as AUTHORED LaTeX and passed through
+    verbatim: it is prose the PI wrote, and it legitimately contains maths like
+    ``$\\sim 20{,}000$``. Only GENERATED content — target names out of the
+    queue, filenames, observation strings — is escaped, because that is where a
+    stray underscore (``2026adpo_image``) comes from.
+
+    ``meta`` carries the standing content the template asks for — see
+    ``ref/request_package_stubbs.yaml`` for our program's copy. Everything in
+    it is prose the PI owns, deliberately NOT generated: an observing request
+    is a document a person signs their name to.
+
+    Required meta keys: pi, instrument, contact_name, contact_email,
+    contact_phone, science_program, catalog_file. Optional: instruments_text,
+    strategy, strategy_subsections ({title: body}), finders_dir, backup_intro,
+    backup (same target shape as a night), calibrations_day, calibrations_night,
+    timeline_intro, data_transfer.
+
+    Returns the .tex source. Compile with pdflatex (twice is unnecessary — the
+    document has no cross-references or table of contents).
+    """
+    need = ("pi", "instrument", "contact_name", "contact_email",
+            "contact_phone", "science_program", "catalog_file")
+    missing = [k for k in need if not meta.get(k)]
+    if missing:
+        raise ValueError(f"request_package: meta is missing {missing}")
+    if not nights:
+        raise ValueError("request_package: no nights given")
+
+    def _pretty(d):
+        from datetime import date as _d
+        try:
+            return _d.fromisoformat(str(d)).strftime("%B %d, %Y")
+        except (TypeError, ValueError):
+            return str(d)
+
+    dates = [_pretty(n.get("date")) for n in nights]
+    title_dates = dates[0] if len(dates) == 1 else f"{dates[0]} -- {dates[-1]}"
+    inst = _tex_escape(meta["instrument"])
+
+    L = [
+        "\\documentclass[a4paper]{article}",
+        "\\usepackage[colorlinks=true, allcolors=blue]{hyperref}",
+        "\\usepackage[a4paper,top=2cm,bottom=2cm,left=2cm,right=2cm,"
+        "marginparwidth=1.75cm]{geometry}",
+        f"\\title{{{title_dates} {inst} {_tex_escape(meta['pi'])} "
+        "Observing Request Package}",
+        "\\date{}",
+        "",
+        "\\begin{document}",
+        "\\maketitle",
+        "",
+        "\\section{Requested Instruments}",
+        (meta.get("instruments_text")
+         or f"{meta['instrument']} will be used for all targets."),
+        "",
+        "\\section{Contact Info}",
+        "",
+        f"{meta['contact_name']} \\\\",
+        f"{meta['contact_email']} \\\\",
+        f"{meta['contact_phone']}",
+        "",
+        "\\section{Description of Science Program}",
+        meta["science_program"],
+        "",
+        "\\section{Observing Strategy and Expected Products}",
+        meta.get("strategy", ""),
+        "",
+    ]
+    for title, body in (meta.get("strategy_subsections") or {}).items():
+        L += [f"\\subsection{{{title}}}", body, ""]
+
+    L += [
+        "\\section{Observing Catalog}",
+        f"See file called \\texttt{{{_tex_escape(meta['catalog_file'])}}}.",
+        "",
+        "\\section{Finder Charts}",
+        f"See folder called \\texttt{{{_tex_escape(meta.get('finders_dir', 'Finders'))}}}.",
+        "",
+        "\\section{Backup Program}",
+    ]
+    backup = meta.get("backup") or []
+    if meta.get("backup_intro"):
+        L += [meta["backup_intro"], ""]
+    if backup:
+        L.append("\\begin{itemize}")
+        for r in backup:
+            L += _target_block(r)
+        L.append("\\end{itemize}")
+    else:
+        L.append("No backup targets are queued for this run.")
+    L += ["", "\\section{Calibration Plan}", ""]
+    for sub, items in (("Daytime Calibrations", meta.get("calibrations_day")),
+                       ("Nighttime Calibrations", meta.get("calibrations_night"))):
+        if not items:
+            continue
+        L += [f"\\subsection{{{sub}}}", "\\begin{itemize}"]
+        L += [f"\\item {i}" for i in items]
+        L += ["\\end{itemize}", ""]
+
+    L += ["\\section{Observing Timeline}",
+          (meta.get(
+              "timeline_intro",
+              "Listed in desired observing order. Please modify as necessary "
+              "due to weather.")),
+          ""]
+    for night, pretty in zip(nights, dates):
+        L += [f"\\subsection{{{_tex_escape(night.get('label') or pretty)}}}",
+              "\\begin{itemize}"]
+        for r in night.get("targets", []):
+            L += _target_block(r)
+        L += ["\\end{itemize}", ""]
+
+    L += ["\\section{Data Transfer}",
+          (meta.get(
+              "data_transfer",
+              "Please upload the resulting data to Google Drive and send us a "
+              "link. Live transfer is not required; uploading in the morning "
+              "is fine.")),
+          "",
+          "\\end{document}",
+          ""]
+    return "\n".join(L)

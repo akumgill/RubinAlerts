@@ -1,0 +1,76 @@
+# Standing content for the Magellan CfA observing request package
+# (CfA-Stubbs / MAGNETS SN Ia program, LLAMAS).
+#
+# This file is PROSE THE PI OWNS. None of it is generated: an observing request
+# is a document a person signs their name to, and the observer reads it as a
+# statement of intent, not as pipeline output. Only the catalogue, the backup
+# list and the timeline come from the scheduler.
+#
+# Modelled on the reference package Yize circulated for 2026-10-03
+# (LDSS_20261003_Dong.pdf). Instrument-setup lines marked PROVISIONAL are the
+# LLAMAS equivalents of LDSS3 settings we have not confirmed — ask Rob Simcoe
+# or the service observer before the first real submission.
+
+pi: Stubbs
+instrument: LLAMAS
+contact_name: Akum Gill
+contact_email: akum@g.harvard.edu
+contact_phone: "TODO — observer asks for a number reachable during the night"
+
+instruments_text: >-
+  LLAMAS will be used for all targets. All observations are integral-field
+  spectroscopy; no imaging is requested.
+
+science_program: >-
+  This is a spectroscopic classification program for Type Ia supernovae in
+  support of cosmology with the Vera C. Rubin Observatory. Candidates are
+  selected nightly from a multi-broker alert pipeline (Fink, ALeRCE, ANTARES,
+  ATLAS and TNS), light-curve fitted with SALT2, and ranked by an
+  expected-value score combining the probability that the object is a Type Ia,
+  the scarcity of its redshift in the existing sample, the information a
+  spectrum would add, and the urgency set by its light-curve phase. Distances
+  come from the photometric light-curve fit, so the spectrum supplies type and
+  redshift only; a spectrum is therefore valuable only for an object whose
+  light curve can be completed, which is why we prefer targets rising in the
+  east at the start of the night.
+
+strategy: >-
+  All observations are integral-field spectroscopy with LLAMAS. No slit
+  alignment or parallactic-angle setting is required. Each target is observed
+  as a sequence of equal sub-exposures rather than a single integration so
+  that cosmic rays can be removed by median filtering; the sequence is given
+  per target in the timeline below as (number)x(seconds).
+
+strategy_subsections:
+  Spectroscopy: >-
+    PROVISIONAL pending confirmation with the instrument team: standard LLAMAS
+    IFU configuration, 1x1 binning, fast readout. Please take acquisition
+    images in r unless the timeline says otherwise. If the signal-to-noise is
+    marginal on a first-priority target, please add sub-exposures rather than
+    dropping the target.
+
+backup_intro: >-
+  If conditions are poor, or if a target is fainter than anticipated, the
+  following targets may be substituted. They are ranked below the main
+  timeline and may be observed in any order.
+
+calibrations_day:
+  - 11 bias frames
+  - 10 Qh spectroscopic flats with peak counts of $\sim 20{,}000 - 30{,}000$
+  - 3 arc lamp exposures
+
+calibrations_night:
+  - One arc lamp and one flat-field exposure after each spectroscopic sequence
+  - >-
+    Spectrophotometric standard stars as listed in the timeline, observed at
+    the stated point in the night
+
+timeline_intro: >-
+  Listed in desired observing order. Please modify as necessary due to
+  weather. Anticipated magnitudes are predicted for the night of observation,
+  not at light-curve peak, so a target may be fainter than quoted if it has
+  faded faster than the fit implies. Priorities are ranked from 1st (highest).
+
+data_transfer: >-
+  Please upload the resulting data to Google Drive and send us a link. Live
+  transfer is not required; uploading in the morning is fine.

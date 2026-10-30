@@ -213,3 +213,58 @@ def test_block_for_isolated_night_is_just_that_night(client):
     # blocks never merge across instruments or non-adjacent dates
     for b in night_blocks():
         assert len({n.get("instrument") for n in b}) == 1
+
+
+def test_split_subexposures_matches_the_collaboration_convention():
+    """Their plans vary the COUNT and keep sub-exposures at 900-1200 s. Naive
+    total/3 produced a 2140 s sub-exposure for a mag-22 target, which is
+    unusable for cosmic rays and tracking."""
+    from orchestrator.obsfiles import split_subexposures as sx
+    assert sx(30) == (3, 600.0)      # these three strings appear verbatim
+    assert sx(45) == (3, 900.0)      # in Yize's Sep 6/7 and Oct 3 packages
+    assert sx(60) == (3, 1200.0)
+    n, sec = sx(107)
+    assert sec <= 1200 and n * sec == pytest.approx(107 * 60, abs=60)
+    assert sx(None)[0] == 3 and sx(0)[1] == 0.0     # degrades, never divides by 0
+
+
+def test_request_package_escapes_generated_names_but_not_authored_prose():
+    """The YAML is LaTeX the PI wrote and legitimately contains maths; target
+    names come out of the queue and legitimately contain underscores. Escaping
+    the first breaks the document, not escaping the second breaks the build."""
+    from orchestrator.obsfiles import request_package
+    meta = {"pi": "Stubbs", "instrument": "LLAMAS", "contact_name": "A Gill",
+            "contact_email": "a@example.org", "contact_phone": "555",
+            "science_program": r"Counts of $\sim 20{,}000$ per frame.",
+            "catalog_file": "Stubbs_Magellan_1102_catalog",
+            "calibrations_day": [r"flats at $\sim 30{,}000$"]}
+    night = {"date": "2026-11-02", "targets": [
+        {"name": "2026adpo_image", "priority": "P1", "mag": 22.0,
+         "n_exp": 3, "exp_sec": 1200},
+        {"name": "LTT9239", "mag": 12.07, "is_standard": True,
+         "n_exp": 1, "exp_sec": 60}]}
+    tex = request_package([night], meta)
+    # authored maths survives verbatim
+    assert r"$\sim 20{,}000$" in tex and r"flats at $\sim 30{,}000$" in tex
+    # generated underscore is escaped, or pdflatex fails
+    assert r"2026adpo\_image" in tex
+    assert r"Stubbs\_Magellan\_1102\_catalog" in tex
+    # the shapes the reference package uses
+    assert "November 02, 2026 LLAMAS Stubbs Observing Request Package" in tex
+    assert "(1st Priority)" in tex
+    assert "Spectroscopic Standard Star LTT9239 (V mag = 12.07)" in tex
+    assert "Spectrum: 3x1200s" in tex
+    assert tex.rstrip().endswith(r"\end{document}")
+
+
+def test_request_package_refuses_an_incomplete_submission():
+    """An observing request goes out under the PI's name; a half-filled one is
+    worse than an error."""
+    from orchestrator.obsfiles import request_package
+    with pytest.raises(ValueError, match="missing"):
+        request_package([{"date": "2026-11-02", "targets": []}],
+                        {"pi": "Stubbs", "instrument": "LLAMAS"})
+    with pytest.raises(ValueError, match="no nights"):
+        request_package([], {"pi": "S", "instrument": "L", "contact_name": "n",
+                             "contact_email": "e", "contact_phone": "p",
+                             "science_program": "s", "catalog_file": "c"})

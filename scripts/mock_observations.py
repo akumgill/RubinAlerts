@@ -24,6 +24,7 @@ import logging
 import math
 import os
 import sys
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,6 @@ class _RemoteTarget:
 
 def targets_from_api(api: str, key: str, instrument: str = "LLAMAS") -> list:
     """Live queue rows for ``instrument`` (plus EITHER), still queued."""
-    import urllib.request
     req = urllib.request.Request(
         api.rstrip("/") + "/v1/targets",
         headers={"Authorization": f"Bearer {key}"})

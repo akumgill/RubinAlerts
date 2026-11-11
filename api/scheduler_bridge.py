@@ -190,48 +190,14 @@ def _empty_night(date: str, moon: str, instrument: str, cfg) -> dict:
         local_start, local_end, tz_off = _night_local(evening, morning)
     except Exception as e:
         logger.warning("could not compute twilight for %s: %s", date, e)
-    # Ladder integrity. An airmass-binned standard is a MULTI-POINT
-    # measurement: >=2 legs of one star give an extinction curve, one leg gives
-    # only a flux-calibration visit. A partially-scheduled ladder is therefore a
-    # silent null result, so say so rather than letting the plan look complete.
-    warnings = []
-    ladders: dict = {}
-    for name in [e["target"] for e in timeline]:
-        if "@am" in str(name):
-            ladders.setdefault(str(name).split("@am")[0], []).append(name)
-    submitted: dict = {}
-    for t in targets:
-        nm = t.name or ""
-        if "@am" in nm:
-            submitted.setdefault(nm.split("@am")[0], []).append(nm)
-    for star, subs in submitted.items():
-        got = len(ladders.get(star, []))
-        if len(subs) >= 2 and got == 1:
-            warnings.append(
-                f"{star}: only 1 of {len(subs)} airmass legs scheduled — that "
-                f"is a flux-calibration visit, NOT an extinction curve. "
-                f"Enqueue the ladder at P0 so every leg is reserved.")
-        elif len(subs) >= 2 and got == 0:
-            warnings.append(f"{star}: no airmass leg scheduled at all.")
-    for star, got in ladders.items():
-        if len(got) >= 2:
-            ams = sorted(e["airmass"] for e in timeline
-                         if str(e["target"]).startswith(star + "@am")
-                         and e.get("airmass") is not None)
-            if ams and (ams[-1] - ams[0]) < 0.5:
-                warnings.append(
-                    f"{star}: {len(got)} legs scheduled but the airmass span is "
-                    f"only {ams[-1] - ams[0]:.2f} ({ams[0]:.2f}-{ams[-1]:.2f}) — "
-                    f"too short a lever arm to fit extinction.")
-
     return {
         "date": date, "moon": moon, "instrument": instrument,
-        "warnings": warnings,
         "twilight_start": twi_start, "twilight_end": twi_end,
         "twilight_start_local": local_start, "twilight_end_local": local_end,
         "tz_offset": tz_off,
         "dark_hours": dark_h,
         "requested_hours": {}, "scheduled_hours": {},
+        "warnings": [],
         "scheduled_science_hours": 0.0, "n_scheduled": 0,
         "timeline": [], "overflow": [], "note": "nothing queued for this instrument yet",
     }
@@ -348,6 +314,38 @@ def preview_plan(service, date: str, moon: str = None,
             sched_by_prog[e.program] = sched_by_prog.get(e.program, 0.0) + e.charged_minutes / 60.0
     sched_by_prog = {k: round(v, 2) for k, v in sched_by_prog.items()}
 
+    # Ladder integrity. An airmass-binned standard is a MULTI-POINT
+    # measurement: >=2 legs of one star give an extinction curve, one leg gives
+    # only a flux-calibration visit. A partially-scheduled ladder is therefore
+    # a silent null result, so say so rather than letting the plan look done.
+    warnings = []
+    scheduled_legs: dict = {}
+    for e in timeline:
+        nm = str(e.get("target") or "")
+        if "@am" in nm:
+            scheduled_legs.setdefault(nm.split("@am")[0], []).append(e)
+    submitted_legs: dict = {}
+    for t in active:
+        nm = t.name or ""
+        if "@am" in nm:
+            submitted_legs.setdefault(nm.split("@am")[0], []).append(nm)
+    for star, subs in submitted_legs.items():
+        got = scheduled_legs.get(star, [])
+        if len(subs) >= 2 and len(got) == 1:
+            warnings.append(
+                f"{star}: only 1 of {len(subs)} airmass legs scheduled — that is "
+                f"a flux-calibration visit, NOT an extinction curve. Enqueue the "
+                f"ladder at P0 so every leg is reserved.")
+        elif len(subs) >= 2 and not got:
+            warnings.append(f"{star}: no airmass leg scheduled at all.")
+        elif len(got) >= 2:
+            ams = sorted(e["airmass"] for e in got if e.get("airmass") is not None)
+            if ams and (ams[-1] - ams[0]) < 0.5:
+                warnings.append(
+                    f"{star}: {len(got)} legs scheduled but the airmass span is "
+                    f"only {ams[-1] - ams[0]:.2f} ({ams[0]:.2f}-{ams[-1]:.2f}) — "
+                    f"too short a lever arm to fit extinction.")
+
     return {
         "date": date, "moon": moon, "instrument": instrument,
         "twilight_start": twi_start, "twilight_end": twi_end,
@@ -355,6 +353,7 @@ def preview_plan(service, date: str, moon: str = None,
         "tz_offset": tz_off,
         "dark_hours": dark_h,
         "requested_hours": requested,
+        "warnings": warnings,
         "scheduled_hours": sched_by_prog,
         "scheduled_science_hours": round(sci_hours, 2),
         "n_scheduled": len(plan.scheduled),

@@ -376,3 +376,20 @@ def test_etc_refuses_what_it_cannot_legitimately_size(client):
     sb = client.get("/v1/etc?mag=22.1&mag_kind=surface_brightness",
                     headers=STUBBS)
     assert sb.status_code == 422 and "POINT" in sb.json()["detail"]
+
+
+def test_partial_ladder_is_flagged_by_the_real_preview(client):
+    """Drive preview_plan itself rather than re-implementing its logic."""
+    # two legs submitted, but the high one is unreachable on this date, so only
+    # one can ever be scheduled -> the preview must say the ladder is incomplete
+    for lo, hi in ((1.0, 1.3), (2.4, 2.6)):
+        client.post("/v1/targets", headers=STUBBS, json=[{
+            "name": f"LADDER@am{lo}-{hi}", "ra": 20.503021, "dec": -30.867764,
+            "mag": 18.7, "priority": "P0", "instrument": "LLAMAS",
+            "exposure_minutes": 10, "airmass_min": lo, "airmass_max": hi}])
+    plan = client.get("/v1/plan/preview?date=2026-12-15&instrument=LLAMAS",
+                      headers=STUBBS).json()
+    assert "warnings" in plan, "preview must carry the integrity result"
+    sched = [e["target"] for e in plan["timeline"] if "LADDER" in e["target"]]
+    if len(sched) < 2:
+        assert any("LADDER" in w for w in plan["warnings"]), plan["warnings"]

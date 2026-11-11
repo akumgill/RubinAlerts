@@ -20,10 +20,38 @@
 let NIGHT = { date: "2026-08-13", instrument: "LDSS3" };
 let NIGHT_SNAPPED = false;
 
+// ?date=YYYY-MM-DD&instrument=LLAMAS pins the view to one night.
+// Two reasons this exists. A night is worth LINKING to — "look at this plan" is
+// a thing people say. And the calendar strip can only ever offer nights that
+// someone wrote into the YAML, so a rehearsal or tabletop night (2026-11-14,
+// which belongs to Chile, not to us) is otherwise unreachable in the UI even
+// when its data is sitting in the database.
+function nightFromUrl() {
+  try {
+    const q = new URLSearchParams(window.location.search);
+    const date = q.get("date");
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    const inst = (q.get("instrument") || "LLAMAS").toUpperCase();
+    return { date, instrument: inst };
+  } catch (e) { return null; }
+}
+
+function pushNightToUrl(night) {
+  try {
+    const u = new URL(window.location.href);
+    u.searchParams.set("date", night.date);
+    u.searchParams.set("instrument", night.instrument);
+    window.history.replaceState({}, "", u);
+  } catch (e) { /* non-fatal: the view still works, it just is not linkable */ }
+}
+
 // First non-cancelled calendar night on/after today (local clock), else the
 // last non-cancelled night. Returns null if the payload carries no calendar.
 function upcomingNight(nights) {
-  const usable = (nights || []).filter((n) => n.status !== "cancelled" && n.date);
+  // mock/rehearsal nights are reachable but must never be what the dashboard
+  // lands on by itself — the default view should always be real time.
+  const usable = (nights || []).filter(
+    (n) => n.status !== "cancelled" && n.status !== "mock" && n.date);
   if (!usable.length) return null;
   const today = new Date().toISOString().slice(0, 10);
   return usable.find((n) => n.date >= today) || usable[usable.length - 1];
@@ -98,6 +126,16 @@ async function boot() {
   // next upcoming night from the calendar and re-fetch once.
   if (!NIGHT_SNAPPED) {
     NIGHT_SNAPPED = true;
+    // An explicit ?date= wins over snapping to the next calendar night.
+    const pinned = nightFromUrl();
+    if (pinned) {
+      if (pinned.date !== NIGHT.date || pinned.instrument !== NIGHT.instrument) {
+        NIGHT = pinned;
+        await refresh();
+      }
+      renderAll();
+      return;
+    }
     const up = upcomingNight(DATA && DATA.nights);
     if (up && (up.date !== NIGHT.date || up.instrument !== NIGHT.instrument)) {
       NIGHT = { date: up.date, instrument: up.instrument };
@@ -477,6 +515,7 @@ function selectNight(date, instrument) {
   }
   if (NIGHT.date === date && NIGHT.instrument === instrument) return;
   NIGHT = { date, instrument };
+  pushNightToUrl(NIGHT);       // keep the view linkable
   PLAN_PICKS.clear();          // plan batches are per night/instrument
   if (usingSample) { renderNights(); return; }  // no backend to re-fetch
   $("nights").classList.add("loading");
@@ -504,22 +543,26 @@ function renderNights() {
   box.innerHTML = nights.map((n) => {
     const on = n.date === cur.date && n.instrument === cur.instrument;
     const cancelled = n.status === "cancelled";
+    const mock = n.status === "mock";
     const past = !cancelled && n.date < new Date().toISOString().slice(0, 10);
     const half = HALF_LABEL[n.length]
       ? `<span class="nl">${HALF_LABEL[n.length]}</span>` : "";
     const cls = "night" + (on ? " on" : "") + (cancelled ? " cancelled" : "")
-      + (past ? " past" : "");
+      + (mock ? " mock" : "") + (past ? " past" : "");
     const title = esc((cancelled ? (n.note || "cancelled")
                        : (past ? "observed · " : "") + (n.observer || ""))
                       + (n.program ? " · " + n.program : "")
                       + (HALF_TITLE[n.length] ? " · " + HALF_TITLE[n.length] : ""));
-    const mark = cancelled ? `<span class="nx" aria-label="cancelled">✕</span>` : "";
+    const mark = cancelled ? `<span class="nx" aria-label="cancelled">✕</span>`
+      : mock ? `<span class="nmock" aria-label="mock night">MOCK</span>` : "";
     return `<button type="button" class="${cls}"${cancelled ? " disabled" : ""}
         onclick="selectNight('${esc(n.date)}','${esc(n.instrument)}')" title="${title}">
       ${mark}
       <span class="nd">${esc(prettyDate(n.date))}</span>
       <span class="ni ni-${esc((n.instrument || "").toLowerCase())}">${esc(n.instrument)}</span>${half}
-      <span class="no">${esc(cancelled ? "cancelled" : (past ? "done · " : "") + (n.observer || ""))}</span>
+      <span class="no">${esc(cancelled ? "cancelled"
+        : mock ? "not real time"
+        : (past ? "done · " : "") + (n.observer || ""))}</span>
     </button>`;
   }).join("");
 

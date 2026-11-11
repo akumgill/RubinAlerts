@@ -207,3 +207,12 @@ td.readonly-note{color:var(--faint);font-size:.74rem;}
   .am-svg path.trace{transition:none;}
   .toast{animation:none;}
 }
+/* Mock / rehearsal night: reachable in the strip but unmistakably not real
+   telescope time. Dashed amber rather than the solid hairline of a real night,
+   and a MOCK tag in the corner. It is also excluded from the auto-selected
+   default night, so the dashboard never opens on fabricated data. */
+.night.mock{border:1px dashed var(--copper);background:transparent;position:relative;}
+.night.mock .nd{color:var(--copper);}
+.night.mock .no{color:var(--copper);font-style:italic;}
+.night .nmock{position:absolute;top:.15rem;right:.3rem;font-family:var(--mono);
+  font-size:.55rem;letter-spacing:.06em;color:var(--copper);opacity:.9;}

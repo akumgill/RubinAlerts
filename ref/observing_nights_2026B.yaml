@@ -93,6 +93,22 @@ nights:
     note: >-
       Carnegie schedule: Arizona/ASU split — Ransome[LLAMAS] (BoN-4:26),
       Guo[LLAMAS] (4:26-EoN). Corrected from "full" 2026-11-11.
+  # NOT A REAL ALLOCATION. 2026-11-14 belongs to Chile (Tejos) on the Carnegie
+  # schedule. It is carried here only so the tabletop rehearsal is reachable in
+  # the web UI, which can only offer nights that appear in this file. Marked
+  # status: mock so it renders as obviously fake and is skipped when the
+  # dashboard picks a default night. Delete this block and the matching
+  # DELETE /v1/observations?night=2026-11-14 to remove the rehearsal entirely.
+  - date: 2026-11-14
+    instrument: LLAMAS
+    observer: Tabletop rehearsal
+    program: CfA-Stubbs
+    length: full
+    status: mock
+    note: >-
+      MOCK night — not real telescope time. Chris's tabletop exercise
+      (2026-11-11), staged from the ut20261111 selection run with magnitudes
+      faded to this date.
   - date: 2026-12-08
     instrument: LLAMAS
     observer: Conor Ransome

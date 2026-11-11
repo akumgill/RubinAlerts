@@ -149,20 +149,20 @@ def test_high_airmass_anchor_may_exceed_the_normal_ceiling():
     assert cfg.std_max_airmass < cfg.std_high_airmass <= cfg.std_spread_max_airmass
 
 
-def test_partial_airmass_ladder_is_reported_not_silently_accepted():
-    """One leg of a ladder is a flux-calibration visit, not an extinction
-    curve. A plan that schedules one of two legs has silently produced a null
-    result, so the preview has to say so."""
-    import api.scheduler_bridge as sb
-    plan = {"timeline": [{"target": "WDFS0122-30@am1.0-1.3", "airmass": 1.02}],
-            "overflow": []}
-    # emulate the integrity block over a two-leg submission
-    submitted = ["WDFS0122-30@am1.0-1.3", "WDFS0122-30@am1.7-2.3"]
-    got = [e["target"] for e in plan["timeline"]]
-    assert len(submitted) == 2 and len(got) == 1
-    # the real check lives in preview_plan; assert the helper it relies on
-    assert all("@am" in s for s in submitted)
-    assert submitted[0].split("@am")[0] == submitted[1].split("@am")[0]
+def test_empty_night_still_returns_a_plan(tmp_path, monkeypatch):
+    """A night with nothing queued must return its geometry, not raise.
+
+    This is the regression that an emulated test missed: the ladder-integrity
+    block was inserted into _empty_night instead of preview_plan, so every
+    unqueued night 500'd and the real check never ran at all.
+    """
+    from api.scheduler_bridge import _empty_night
+    from orchestrator.config import LLAMASConfig
+    out = _empty_night("2026-12-15", "dark", "LLAMAS", LLAMASConfig())
+    assert out["date"] == "2026-12-15"
+    assert out["n_scheduled"] == 0 and out["timeline"] == []
+    assert out["warnings"] == []          # key present so callers can rely on it
+    assert out["dark_hours"] and out["dark_hours"] > 0
 
 
 def test_enqueue_standards_defaults_to_a_reserved_tier():

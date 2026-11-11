@@ -18,7 +18,7 @@ nights:
     instrument: LLAMAS
     observer: Conor Ransome
     program: UA
-    length: full
+    length: second-half
     status: cancelled
     note: storm — LCO suspended (restart Aug 11)
   - date: 2026-08-07
@@ -29,10 +29,13 @@ nights:
     status: cancelled
     note: storm — LCO suspended (restart Aug 11)
   - date: 2026-08-10
-    instrument: LLAMAS
+    instrument: LDSS3
     observer: Yize Dong
     program: CfA-Villar
     length: full
+    note: >-
+      Instrument corrected LLAMAS -> LDSS3 2026-11-11: Carnegie schedule has
+      Harvard/Dong on Clay with LDSS3; Baade that night was Carnegie MagE.
     status: cancelled
     note: storm — LCO suspended (restart Aug 11)
   - date: 2026-08-13
@@ -63,15 +66,25 @@ nights:
     program: UA
     length: full
   - date: 2026-10-03
-    instrument: LLAMAS
+    instrument: LDSS3
     observer: Yize Dong
     program: CfA-Villar
-    length: half
+    length: first-half
+    note: >-
+      Corrected 2026-11-11: Carnegie schedule has Harvard/JHU on Clay,
+      Dong[LDSS3] (BoN-4:21). Independently confirmed by Yize's own package
+      LDSS_20261003_Dong.pdf. Was recorded as LLAMAS, ambiguous "half".
   - date: 2026-10-05
     instrument: LDSS3
     observer: Conor Ransome
     program: UA
     length: full
+    status: unconfirmed
+    note: >-
+      DOES NOT MATCH the Carnegie schedule (2026-11-11): that night Clay/LDSS3
+      is NAU/Trilling and Baade is Carnegie/Senchyna/LLAMAS — Ransome appears
+      nowhere. The LDSS3 allocations file claims UA holds Aug 7, Sep 12, Oct 5;
+      the first two check out, this one does not. Ask Conor before charging it.
   - date: 2026-11-02
     instrument: LLAMAS
     observer: Conor Ransome

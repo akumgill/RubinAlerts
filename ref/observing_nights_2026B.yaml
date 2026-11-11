@@ -33,11 +33,11 @@ nights:
     observer: Yize Dong
     program: CfA-Villar
     length: full
-    note: >-
-      Instrument corrected LLAMAS -> LDSS3 2026-11-11: Carnegie schedule has
-      Harvard/Dong on Clay with LDSS3; Baade that night was Carnegie MagE.
     status: cancelled
-    note: storm — LCO suspended (restart Aug 11)
+    note: >-
+      storm — LCO suspended (restart Aug 11). Instrument corrected
+      LLAMAS -> LDSS3 2026-11-11: Carnegie schedule has Harvard/Dong on Clay
+      with LDSS3; Baade that night was Carnegie MagE.
   - date: 2026-08-13
     instrument: LLAMAS
     observer: Yuri Beletsky

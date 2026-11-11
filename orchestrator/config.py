@@ -64,6 +64,18 @@ class LLAMASConfig:
     std_max_vmag: float = 12.0
     std_ideal_vmag: float = 10.5
     std_max_airmass: float = 1.5
+    # Spectrophotometric standards are observed to measure the ATMOSPHERE, and
+    # an extinction fit needs a lever arm in airmass. Minimising airmass at
+    # every anchor — the old behaviour — produced 1.04/1.04/1.18 on a real
+    # night: a span of 0.14, useless for a fit. With spread on, the end-of-night
+    # anchor deliberately targets HIGH airmass and prefers re-observing the SAME
+    # star seen at low airmass, since the star-times-telescope product is
+    # invariant and only the atmosphere differs between the two
+    # (Chris Stubbs, 2026-08-18 and 2026-11-11).
+    std_airmass_spread: bool = True
+    std_high_airmass: float = 2.0        # airmass the high anchor aims for
+    std_spread_max_airmass: float = 2.6  # ceiling when chasing the high anchor
+    std_same_star_bonus: float = 12.0    # favours continuity for the fit
     # Cadence for mid-night standard insertion. In addition to the start/end
     # standards, insert one standard roughly every this many hours of night
     # so a long (6+ hr) night carries 2-3 standards for spectrophotometric

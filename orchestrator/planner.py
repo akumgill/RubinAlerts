@@ -401,24 +401,42 @@ def _parse_standards(filename: str) -> list:
 
 
 def _best_standard_at(suitable: list, obs_time: Time, config: LLAMASConfig,
-                      exclude: set = None) -> Tuple[Optional[dict], Optional[float]]:
+                      exclude: set = None, target_airmass: float = None,
+                      prefer: str = None, max_airmass: float = None
+                      ) -> Tuple[Optional[dict], Optional[float]]:
     """Pick the highest-scoring suitable standard observable at ``obs_time``.
 
-    Scoring favours low airmass and proximity to the ideal V magnitude.
+    By default scoring favours LOW airmass and proximity to the ideal V
+    magnitude — right for a flux-calibration visit.
+
+    Pass ``target_airmass`` to aim at a particular airmass instead, which is
+    what an extinction measurement needs: the fit wants a lever arm, not three
+    visits all at the zenith. ``prefer`` names a star already chosen earlier in
+    the night and bonuses it, because the cleanest extinction constraint comes
+    from the SAME star at two airmasses (its intrinsic spectrum cancels).
+    ``max_airmass`` overrides the usual ceiling, which is otherwise low enough
+    to forbid the high-airmass end of the ladder outright.
+
     Returns (std, airmass) or (None, None) if none is observable.
     """
     exclude = exclude or set()
     best = None
     best_score = -np.inf
     best_am = None
+    cap = max_airmass if max_airmass is not None else config.std_max_airmass
     for std in suitable:
         if std['name'] in exclude:
             continue
         am = _get_airmass(std['coord'], obs_time, config.location)
-        if am > config.std_max_airmass or am < 1.0:
+        if am > cap or am < 1.0:
             continue
         mag_penalty = abs(std['vmag'] - config.std_ideal_vmag)
-        score = -am * 10 - mag_penalty * 2
+        if target_airmass is None:
+            score = -am * 10 - mag_penalty * 2
+        else:
+            score = -abs(am - target_airmass) * 10 - mag_penalty * 2
+        if prefer and std['name'] == prefer:
+            score += getattr(config, 'std_same_star_bonus', 0.0)
         if score > best_score:
             best_score = score
             best = std
@@ -493,6 +511,19 @@ def select_standards(standards_path: str, evening: Time, morning: Time,
     else:
         logger.warning("No suitable start standard found")
 
+    # The end-of-night anchor is the other obvious place for the high-airmass
+    # leg: a star near the horizon at dawn is exactly what the fit needs, and
+    # re-using the start standard makes the comparison intrinsic-spectrum-free.
+    if getattr(config, 'std_airmass_spread', False) and start_dict:
+        alt_end, alt_end_am = _best_standard_at(
+            suitable, morning, config,
+            target_airmass=config.std_high_airmass,
+            prefer=start_dict.get('name'),
+            max_airmass=config.std_spread_max_airmass)
+        if alt_end is not None and (
+                best_end_am is None or alt_end_am > best_end_am):
+            best_end, best_end_am = alt_end, alt_end_am
+
     end_dict = None
     if best_end:
         end_dict = _std_dict(best_end, best_end_am)
@@ -514,8 +545,20 @@ def select_standards(standards_path: str, evening: Time, morning: Time,
             obs_time = evening + (k * cadence) * u.hour
             if obs_time >= morning:
                 break
-            best_mid, best_mid_am = _best_standard_at(
-                suitable, obs_time, config)
+            # With spread on, the LAST mid anchor chases high airmass and
+            # prefers the star already taken at low airmass — that pair is the
+            # extinction measurement. Earlier anchors stay low-airmass flux
+            # calibrations.
+            spread = getattr(config, 'std_airmass_spread', False)
+            if spread and k == n_mid:
+                best_mid, best_mid_am = _best_standard_at(
+                    suitable, obs_time, config,
+                    target_airmass=config.std_high_airmass,
+                    prefer=(start_dict or {}).get('name'),
+                    max_airmass=config.std_spread_max_airmass)
+            else:
+                best_mid, best_mid_am = _best_standard_at(
+                    suitable, obs_time, config)
             if best_mid is None:
                 logger.debug("No suitable mid standard at %s", obs_time.iso[11:16])
                 continue

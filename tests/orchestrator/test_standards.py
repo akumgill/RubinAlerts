@@ -112,3 +112,38 @@ def test_mid_standards_lie_between_science_observations(tmp_path):
     last_sci = max(e.end.mjd for e in plan.scheduled)
     for s in plan.standards_mid:
         assert first_sci < s['time'].mjd < last_sci
+
+
+def test_airmass_spread_beats_minimising_airmass(tmp_path):
+    """Standards measure the ATMOSPHERE, so the set needs a lever arm.
+
+    Minimising airmass at every anchor — the old behaviour — gave 1.04/1.04/1.18
+    on the real 2026-11-14 night: a span of 0.14, which no extinction fit can
+    use. Spread mode must do materially better on the same night and catalogue.
+    """
+    from orchestrator.planner import (calculate_twilight, select_standards,
+                                      DEFAULT_STANDARDS_PATH)
+    from orchestrator.config import LLAMASConfig
+
+    def span(spread):
+        cfg = LLAMASConfig(std_airmass_spread=spread)
+        ev, mo = calculate_twilight('2026-11-14', config=cfg)
+        s0, s1, mid = select_standards(str(DEFAULT_STANDARDS_PATH), ev, mo, cfg)
+        ams = [d['airmass'] for d in [s0] + (mid or []) + [s1] if d]
+        assert len(ams) >= 2, "a night should still get its standards"
+        return max(ams) - min(ams)
+
+    narrow, wide = span(False), span(True)
+    assert wide > narrow
+    assert wide > 0.5, f"lever arm still too short to fit extinction: {wide:.2f}"
+
+
+def test_high_airmass_anchor_may_exceed_the_normal_ceiling():
+    """The usual std_max_airmass exists to keep flux-calibration visits near
+    the zenith. It must not also forbid the high-airmass leg of the ladder,
+    which is the whole point of the measurement."""
+    from orchestrator.config import LLAMASConfig
+    cfg = LLAMASConfig()
+    assert cfg.std_airmass_spread is True
+    assert cfg.std_spread_max_airmass > cfg.std_max_airmass
+    assert cfg.std_max_airmass < cfg.std_high_airmass <= cfg.std_spread_max_airmass

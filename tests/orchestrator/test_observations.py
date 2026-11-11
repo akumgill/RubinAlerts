@@ -266,3 +266,45 @@ def test_delete_night_reverses_an_ingest_including_the_burndown(tmp_path):
     assert sum(h for inst in after.values() for h in inst.values()) == 0
     # deleting again is a no-op rather than an error
     assert store.delete_night("2026-11-14") == 0
+
+
+def test_mock_generator_reads_a_live_queue(monkeypatch):
+    """Seeding a remote site used to need the same night staged twice — once
+    there, once locally for the mock generator — with the two free to drift
+    apart silently. Reading the live queue removes the second copy."""
+    import importlib.util, json, os, sys, io, math
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    spec = importlib.util.spec_from_file_location(
+        "mock_observations", os.path.join(repo, "scripts", "mock_observations.py"))
+    m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m
+    spec.loader.exec_module(m)
+
+    rows = [
+        {"id": 1, "name": "SN-A", "priority": "P1", "status": "queued",
+         "instrument": "LLAMAS", "canonical_ra": 150.0, "canonical_dec": -29.0,
+         "exposure_minutes": 30.0, "n_exposures": 3, "exposure_seconds": 600.0,
+         "airmass_min": None, "airmass_max": None},
+        {"id": 2, "name": "STD@am1.0-1.3", "priority": "P0", "status": "queued",
+         "instrument": "LLAMAS", "ra": 20.5, "dec": -30.8,          # no canonical_*
+         "exposure_minutes": 10.0, "airmass_min": 1.0, "airmass_max": 1.3},
+        {"id": 3, "name": "withdrawn", "priority": "P2", "status": "withdrawn",
+         "instrument": "LLAMAS", "canonical_ra": 1.0, "canonical_dec": 1.0},
+        {"id": 4, "name": "other-inst", "priority": "P2", "status": "queued",
+         "instrument": "LDSS3", "canonical_ra": 2.0, "canonical_dec": 2.0},
+    ]
+
+    class _Resp:
+        def read(self): return json.dumps(rows).encode()
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(m.urllib.request, "urlopen", lambda *a, **k: _Resp())
+
+    got = m.targets_from_api("http://x", "k")
+    names = [t.name for t in got]
+    assert names == ["SN-A", "STD@am1.0-1.3"], names   # drops withdrawn + LDSS3
+    # falls back to submitted coords when canonical_* is absent
+    std = got[1]
+    assert std.canonical_ra == 20.5 and std.canonical_dec == -30.8
+    assert math.isfinite(std.airmass_min) and math.isfinite(std.airmass_max)
+    # a plain science target must not look like a standard
+    assert not math.isfinite(got[0].airmass_min)

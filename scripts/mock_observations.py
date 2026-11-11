@@ -19,6 +19,7 @@ then ingest with scripts/ingest_fits_night.py.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 import os
@@ -85,13 +86,86 @@ def _utc(date: str, hours: float) -> str:
     return f"{date}T{h:02d}:{m:02d}:00"
 
 
-def generate(db_path: str, date: str, out_dir: str, n_targets: int = 4) -> list:
-    """Write the mock night's FITS files; returns the written paths."""
-    from api.service import TargetQueueService
+
+class _RemoteTarget:
+    """Minimal stand-in for a queue Target, built from a /v1/targets row.
+
+    The mock generator decides what to shoot by reading a LOCAL queue, which
+    means seeding a remote instance used to need the same night staged twice —
+    once there, once locally — with the two silently free to drift apart. This
+    reads the remote queue directly, so the frames are generated against the
+    exact rows the ingest will associate them with.
+    """
+
+    __slots__ = ("id", "name", "priority", "canonical_ra", "canonical_dec",
+                 "exposure_minutes", "n_exposures", "exposure_seconds",
+                 "airmass_min", "airmass_max", "instrument", "status")
+
+    def __init__(self, row: dict):
+        def _f(k):
+            v = row.get(k)
+            return float(v) if isinstance(v, (int, float)) else float("nan")
+        self.id = row.get("id") or 0
+        self.name = row.get("name") or ""
+        self.priority = str(row.get("priority") or "P3")
+        # canonical_* is the resolved position and the key the ingest
+        # associates on; fall back to the submitted coords for older rows.
+        self.canonical_ra = _f("canonical_ra")
+        self.canonical_dec = _f("canonical_dec")
+        if not math.isfinite(self.canonical_ra):
+            self.canonical_ra = _f("ra")
+        if not math.isfinite(self.canonical_dec):
+            self.canonical_dec = _f("dec")
+        self.exposure_minutes = _f("exposure_minutes")
+        n = row.get("n_exposures")
+        self.n_exposures = int(n) if isinstance(n, int) else None
+        self.exposure_seconds = _f("exposure_seconds")
+        self.airmass_min = _f("airmass_min")
+        self.airmass_max = _f("airmass_max")
+        self.instrument = str(row.get("instrument") or "LLAMAS").upper()
+        self.status = str(row.get("status") or "queued")
+
+
+def targets_from_api(api: str, key: str, instrument: str = "LLAMAS") -> list:
+    """Live queue rows for ``instrument`` (plus EITHER), still queued."""
+    import urllib.request
+    req = urllib.request.Request(
+        api.rstrip("/") + "/v1/targets",
+        headers={"Authorization": f"Bearer {key}"})
+    with urllib.request.urlopen(req) as r:
+        rows = json.loads(r.read())
+    out = []
+    for row in rows:
+        t = _RemoteTarget(row)
+        if t.status not in ("queued", "scheduled"):
+            continue
+        if t.instrument not in (instrument.upper(), "EITHER"):
+            continue
+        if not (math.isfinite(t.canonical_ra) and math.isfinite(t.canonical_dec)):
+            logger.warning("%s has no usable coordinates; skipped", t.name)
+            continue
+        out.append(t)
+    logger.info("read %d live target(s) from %s", len(out), api)
+    return out
+
+
+def generate(db_path: str = None, date: str = None, out_dir: str = None,
+             n_targets: int = 4, api: str = None, key: str = None) -> list:
+    """Write the mock night's FITS files; returns the written paths.
+
+    Targets come from a local SQLite queue (``db_path``) or, when ``api`` and
+    ``key`` are given, straight from a live instance — which is what you want
+    when seeding a remote site, since the frames must be generated against the
+    same rows the ingest will associate them with.
+    """
     os.makedirs(out_dir, exist_ok=True)
-    svc = TargetQueueService({}, "ref/allocations_LLAMAS_2026B.yaml",
-                             db_path=db_path)
-    active = svc.active(instrument="LLAMAS")
+    if api and key:
+        active = targets_from_api(api, key)
+    else:
+        from api.service import TargetQueueService
+        svc = TargetQueueService({}, "ref/allocations_LLAMAS_2026B.yaml",
+                                 db_path=db_path)
+        active = svc.active(instrument="LLAMAS")
     is_std = lambda t: (math.isfinite(t.airmass_min)
                         or math.isfinite(t.airmass_max))
     science = sorted([t for t in active if not is_std(t)],
@@ -156,13 +230,19 @@ def generate(db_path: str, date: str, out_dir: str, n_targets: int = 4) -> list:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--db", required=True, help="queue SQLite file")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--db", help="queue SQLite file (local)")
+    src.add_argument("--api", help="live API base URL — read its queue instead")
+    ap.add_argument("--key", help="bearer key, required with --api")
     ap.add_argument("--date", required=True, help="UT date, e.g. 2026-08-16")
     ap.add_argument("--out", required=True, help="output directory for FITS")
     ap.add_argument("--n-targets", type=int, default=4)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    files = generate(args.db, args.date, args.out, args.n_targets)
+    if args.api and not args.key:
+        ap.error("--key is required with --api")
+    files = generate(db_path=args.db, date=args.date, out_dir=args.out,
+                     n_targets=args.n_targets, api=args.api, key=args.key)
     print(f"{len(files)} files -> {args.out}")
     return 0
 

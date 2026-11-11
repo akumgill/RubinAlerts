@@ -3,6 +3,16 @@
 # length: full | half.  program: the PI budget the night draws against.
 # Source: observing-nights-2026b memory. Rubin downtime (early–end Aug 2026)
 # overlaps several August nights → those lean on ZTF-fed alerts.
+#
+# AUTHORITATIVE SCHEDULE: https://schedule.obs.carnegiescience.edu/2026/
+# (2026B = runs 7-13; run 11 = Oct 31-Nov 29, run 12 = Nov 30-Dec 30,
+# run 13 = Dec 31-Jan 16). That calendar is INSTITUTIONAL — it says which
+# partner owns each night (Harvard, Arizona, MIT, Chile, Carnegie, ...) — while
+# this file is the MAGNETS PROGRAM view, i.e. which program budget a night
+# draws against. The two are different things and only overlap where MAGNETS
+# uses a night; do not treat a night missing here as missing there.
+# Verified against that calendar 2026-11-11: Nov 2, Dec 8, Dec 15 and Jan 12
+# all reconciled (two length corrections, below).
 nights:
   - date: 2026-08-04
     instrument: LLAMAS
@@ -66,19 +76,27 @@ nights:
     instrument: LLAMAS
     observer: Conor Ransome
     program: UA
-    length: full
+    length: first-half
+    note: >-
+      Carnegie schedule: Arizona/ASU split — Ransome[LLAMAS] (BoN-4:26),
+      Guo[LLAMAS] (4:26-EoN). Corrected from "full" 2026-11-11.
   - date: 2026-12-08
     instrument: LLAMAS
     observer: Conor Ransome
     program: UA
-    length: full
+    length: second-half
+    note: >-
+      Carnegie schedule: ASU/Arizona split — Guo[LLAMAS] (BoN-4:34),
+      Ransome[LLAMAS] (4:34-EoN). Corrected from "full" 2026-11-11.
   - date: 2026-12-15
     instrument: LLAMAS
     observer: Chris Stubbs
     program: CfA-Stubbs
     length: full
+    note: Confirmed against the Carnegie schedule 2026-11-11 (Harvard, Stubbs, LLAMAS, full).
   - date: 2027-01-12
     instrument: LLAMAS
     observer: Chris Stubbs
     program: CfA-Stubbs
     length: full
+    note: Confirmed against the Carnegie schedule 2026-11-11 (Harvard, Stubbs, LLAMAS, full).

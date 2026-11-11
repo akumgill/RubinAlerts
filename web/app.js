@@ -483,6 +483,19 @@ function selectNight(date, instrument) {
   refresh().finally(() => $("nights").classList.remove("loading"));
 }
 
+// Night-length badges. The calendar carries first-half / second-half (and a
+// legacy bare "half"); which half matters to an observer, so show it rather
+// than a single ½ for all of them.
+const HALF_LABEL = { "half": "½", "first-half": "1st ½", "second-half": "2nd ½" };
+const HALF_TITLE = { "half": "half night",
+                     "first-half": "first half of the night",
+                     "second-half": "second half of the night" };
+
+// Which night the calendar strip last scrolled to, so a re-render does not
+// fight a scroll the user made by hand — we only move when the SELECTION
+// changes.
+let NIGHTS_SCROLLED_TO = null;
+
 function renderNights() {
   const box = $("nights");
   const nights = (DATA && DATA.nights) || [];
@@ -492,12 +505,14 @@ function renderNights() {
     const on = n.date === cur.date && n.instrument === cur.instrument;
     const cancelled = n.status === "cancelled";
     const past = !cancelled && n.date < new Date().toISOString().slice(0, 10);
-    const half = (n.length === "half") ? `<span class="nl">½</span>` : "";
+    const half = HALF_LABEL[n.length]
+      ? `<span class="nl">${HALF_LABEL[n.length]}</span>` : "";
     const cls = "night" + (on ? " on" : "") + (cancelled ? " cancelled" : "")
       + (past ? " past" : "");
     const title = esc((cancelled ? (n.note || "cancelled")
                        : (past ? "observed · " : "") + (n.observer || ""))
-                      + (n.program ? " · " + n.program : ""));
+                      + (n.program ? " · " + n.program : "")
+                      + (HALF_TITLE[n.length] ? " · " + HALF_TITLE[n.length] : ""));
     const mark = cancelled ? `<span class="nx" aria-label="cancelled">✕</span>` : "";
     return `<button type="button" class="${cls}"${cancelled ? " disabled" : ""}
         onclick="selectNight('${esc(n.date)}','${esc(n.instrument)}')" title="${title}">
@@ -507,6 +522,21 @@ function renderNights() {
       <span class="no">${esc(cancelled ? "cancelled" : (past ? "done · " : "") + (n.observer || ""))}</span>
     </button>`;
   }).join("");
+
+  // Bring the selected night into view. The strip is a horizontal scroller and
+  // the season runs past the right edge, so by December the current night sits
+  // off-screen and has to be hunted for. Scroll the CONTAINER rather than
+  // calling scrollIntoView, which would also jump the whole page.
+  const key = cur.date + "|" + cur.instrument;
+  if (NIGHTS_SCROLLED_TO !== key) {
+    NIGHTS_SCROLLED_TO = key;
+    const sel = box.querySelector(".night.on");
+    if (sel) {
+      const r = sel.getBoundingClientRect(), b = box.getBoundingClientRect();
+      const delta = (r.left - b.left) - (b.width - r.width) / 2;
+      box.scrollLeft = Math.max(0, box.scrollLeft + delta);
+    }
+  }
 }
 
 function renderSummary() {

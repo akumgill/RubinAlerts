@@ -75,7 +75,18 @@ def plan_to_night(plan: dict) -> dict:
             "n_exp": n_exp, "exp_sec": exp_sec,
             "is_standard": _is_standard(e.get("target", "")),
         })
-    return {"date": plan.get("date"), "targets": targets}
+    # The early-night calibration stack. Chris's real-time tool needs darks, a
+    # twilight sky flat (fibre wavelength registration) and a continuum source
+    # for flux normalisation, and the flat has to be taken IN TWILIGHT, so it
+    # heads the timeline rather than sitting in the calibration section alone.
+    pre = [
+        {"what": "Twilight sky flat (evening twilight, before first target)",
+         "detail": "Required for per-fibre wavelength registration; please "
+                   "take before the first science target."},
+        {"what": "Bright flux standard (continuum reference)",
+         "detail": "Spectrum: 1x60s"},
+    ]
+    return {"date": plan.get("date"), "targets": targets, "pre_night": pre}
 
 
 def plan_to_backup(plan: dict, queue: dict = None) -> list:
@@ -149,6 +160,8 @@ def main(argv=None) -> int:
     else:
         logger.error("give --plan-json, or --api and --key")
         return 2
+    for w in plan.get("warnings", []):
+        logger.warning("PLAN: %s", w)
     if not plan.get("timeline"):
         logger.error("no targets scheduled for %s — nothing to submit", args.date)
         return 1

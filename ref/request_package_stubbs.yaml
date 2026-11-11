@@ -56,14 +56,31 @@ backup_intro: >-
 
 calibrations_day:
   - 11 bias frames
+  - >-
+    A set of dark frames matching the longest science exposure of the night.
+    These are an input to our real-time quick-look analysis, not only to the
+    final reduction.
   - 10 Qh spectroscopic flats with peak counts of $\sim 20{,}000 - 30{,}000$
   - 3 arc lamp exposures
 
 calibrations_night:
+  - >-
+    \textbf{Twilight sky flat, in evening twilight, before the first science
+    target.} This is required rather than optional: each fibre has its own
+    wavelength solution and the detector has ``smile'', so a fixed wavelength
+    falls on a curve rather than a straight line across the chip. The sky
+    emission lines are what register the fibres against one another, and
+    without that registration co-added spectra are blurred.
+  - >-
+    A spectrum of a bright flux standard early in the night, used as the
+    continuum reference for flux normalisation.
   - One arc lamp and one flat-field exposure after each spectroscopic sequence
   - >-
-    Spectrophotometric standard stars as listed in the timeline, observed at
-    the stated point in the night
+    Spectrophotometric standard stars as listed in the timeline. Note that one
+    star is observed TWICE, at deliberately different airmasses; this is an
+    atmospheric extinction measurement and both visits are required for it to
+    yield anything. Please do not drop one of the pair if the night runs late
+    --- drop a science target instead.
 
 timeline_intro: >-
   Listed in desired observing order. Please modify as necessary due to

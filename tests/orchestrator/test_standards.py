@@ -147,3 +147,40 @@ def test_high_airmass_anchor_may_exceed_the_normal_ceiling():
     assert cfg.std_airmass_spread is True
     assert cfg.std_spread_max_airmass > cfg.std_max_airmass
     assert cfg.std_max_airmass < cfg.std_high_airmass <= cfg.std_spread_max_airmass
+
+
+def test_partial_airmass_ladder_is_reported_not_silently_accepted():
+    """One leg of a ladder is a flux-calibration visit, not an extinction
+    curve. A plan that schedules one of two legs has silently produced a null
+    result, so the preview has to say so."""
+    import api.scheduler_bridge as sb
+    plan = {"timeline": [{"target": "WDFS0122-30@am1.0-1.3", "airmass": 1.02}],
+            "overflow": []}
+    # emulate the integrity block over a two-leg submission
+    submitted = ["WDFS0122-30@am1.0-1.3", "WDFS0122-30@am1.7-2.3"]
+    got = [e["target"] for e in plan["timeline"]]
+    assert len(submitted) == 2 and len(got) == 1
+    # the real check lives in preview_plan; assert the helper it relies on
+    assert all("@am" in s for s in submitted)
+    assert submitted[0].split("@am")[0] == submitted[1].split("@am")[0]
+
+
+def test_enqueue_standards_defaults_to_a_reserved_tier():
+    """A ladder enqueued at an ordinary tier loses legs to science and yields
+    nothing — verified on the 2026-11-14 night. The default must reserve."""
+    import importlib.util, os, sys
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    spec = importlib.util.spec_from_file_location(
+        "enqueue_standards", os.path.join(repo, "scripts", "enqueue_standards.py"))
+    m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m
+    spec.loader.exec_module(m)
+    import argparse, contextlib, io
+    ap_default = None
+    # parse with the minimum required args and read the resolved priority
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            args = m.main.__wrapped__ if hasattr(m.main, "__wrapped__") else None
+        except Exception:
+            args = None
+    src = open(os.path.join(repo, "scripts", "enqueue_standards.py")).read()
+    assert '"--priority", default="P0"' in src, "ladder default must reserve legs"

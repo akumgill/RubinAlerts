@@ -389,6 +389,15 @@ def request_package(nights: list, meta: dict) -> str:
     for night, pretty in zip(nights, dates):
         L += [f"\\subsection{{{_tex_escape(night.get('label') or pretty)}}}",
               "\\begin{itemize}"]
+        # Calibrations the observer must take BEFORE the first science target.
+        # They belong in the timeline, not only in the calibration section: a
+        # plan that lists them only as policy is a plan where they get skipped
+        # when the night starts late.
+        for pre in (night.get("pre_night") or []):
+            L += [f"\\item \\textbf{{{_tex_escape(pre['what'])}}}",
+                  "\\begin{enumerate}",
+                  f"\\item {_tex_escape(pre.get('detail', ''))}",
+                  "\\end{enumerate}", ""]
         for r in night.get("targets", []):
             L += _target_block(r)
         L += ["\\end{itemize}", ""]

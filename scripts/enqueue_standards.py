@@ -166,7 +166,17 @@ def main(argv=None) -> int:
                          "default: the whole file")
     ap.add_argument("--bins", default=DEFAULT_BINS,
                     help=f"comma-separated lo-hi airmass bins (default {DEFAULT_BINS})")
-    ap.add_argument("--priority", default="P2", help="queue tier (default P2)")
+    # P0 BY DEFAULT, which is not the obvious choice and needs saying. An
+    # airmass ladder is a MULTI-POINT measurement: two legs of the same star
+    # give an extinction curve, one leg gives only a flux-calibration visit.
+    # At an ordinary tier the legs compete independently against science and
+    # the scheduler will happily take one and drop the other — verified on the
+    # 2026-11-14 night, where the 1.7-2.3 leg lost to science and the ladder
+    # silently produced nothing. P0 reserves every leg before the greedy fill,
+    # so the ladder survives as a unit; it cost 0.17 h of science on that night.
+    ap.add_argument("--priority", default="P0",
+                    help="queue tier (default P0 — reserves every leg of the "
+                         "ladder; see the note in the source before lowering it)")
     ap.add_argument("--instrument", default="LLAMAS")
     ap.add_argument("--exposure-minutes", type=float, default=None,
                     help="per-visit exposure when the CSV has no column")

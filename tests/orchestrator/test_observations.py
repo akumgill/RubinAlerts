@@ -230,3 +230,39 @@ def test_mock_generator_roundtrip(tmp_path):
                 if r.get("target_name", "") and "@am" in (r.get("target_name") or "")]
     for r in std_hits:
         assert r["assoc_method"] == "pointing"
+
+
+def test_delete_night_reverses_an_ingest_including_the_burndown(tmp_path):
+    """A mock night seeded to demo the dashboard must be fully removable.
+
+    Ingestion is append-only and observed time folds into the burndown, so
+    without this a demo night would sit in the shared allocations view as real
+    usage, visible to every program, with no way back through the API.
+    """
+    from api.observations import ObservationStore
+    store = ObservationStore(db_path=str(tmp_path / "obs.db"))
+
+    class T:
+        def __init__(self, i, ra, dec):
+            self.id, self.canonical_ra, self.canonical_dec = i, ra, dec
+            self.name, self.program = f"t{i}", "CfA-Stubbs"
+            self.airmass_min = self.airmass_max = float("nan")
+    targets = [T(1, 150.0, -29.0)]
+    recs = [{"filename": f"m{k}.fits", "object_name": "t1",
+             "ra": 150.0, "dec": -29.0, "exptime_s": 600.0,
+             "utc_start": f"2026-11-14T0{k}:00:00", "instrument": "LLAMAS"}
+            for k in range(1, 4)]
+    store.ingest(targets, recs)
+    assert len(store.night_rows("2026-11-14")) == 3
+    # shape is {program: {instrument: hours}}
+    used = store.used_hours_by_program()
+    assert sum(h for inst in used.values() for h in inst.values()) > 0
+
+    removed = store.delete_night("2026-11-14")
+    assert removed == 3
+    assert store.night_rows("2026-11-14") == []
+    # the charges must go too, or the burndown keeps showing phantom usage
+    after = store.used_hours_by_program()
+    assert sum(h for inst in after.values() for h in inst.values()) == 0
+    # deleting again is a no-op rather than an error
+    assert store.delete_night("2026-11-14") == 0

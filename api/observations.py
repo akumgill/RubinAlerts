@@ -251,6 +251,29 @@ class ObservationStore:
             "ORDER BY utc_start", (normalize_night(night),)).fetchall()
         return [dict(r) for r in rows]
 
+    def delete_night(self, night: str) -> int:
+        """Remove every observation and charge for one night. Returns the row
+        count removed.
+
+        Ingestion is otherwise append-only, which makes a MOCK night seeded for
+        a demo permanent — and because observed time folds into the burndown,
+        a fake night shows up as real usage in the shared allocations view that
+        every program can see. An undo is what makes seeding one safe.
+        """
+        stamp = normalize_night(night)
+        with self._conn:
+            rows = self._conn.execute(
+                "SELECT filename FROM observations WHERE night_stamp = ?",
+                (stamp,)).fetchall()
+            names = [r[0] for r in rows]
+            for fn in names:
+                self._conn.execute(
+                    "DELETE FROM observation_charges WHERE filename = ?", (fn,))
+            self._conn.execute(
+                "DELETE FROM observations WHERE night_stamp = ?", (stamp,))
+        logger.info("deleted %d observation(s) for night %s", len(names), stamp)
+        return len(names)
+
     def observed_coords(self, limit: int = 1000) -> list[dict]:
         """Compact all-time pointing list (newest first) for 'observed'
         badges — no per-exposure history."""

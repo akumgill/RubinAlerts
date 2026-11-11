@@ -565,6 +565,21 @@ def observations(request: Request, night: str = None,
             "observed_targets": observation_store.observed_target_ids()}
 
 
+@app.delete("/v1/observations")
+def delete_observations(request: Request, night: str,
+                        authorization: str = Header(None)):
+    """Remove one night's ingested observations and their time charges.
+
+    Ingestion is append-only, so without this a MOCK night seeded to show the
+    dashboard dynamically would be permanent — and since observed time folds
+    into the burndown, it would sit in the shared allocations view as real
+    usage. ``night`` is required: there is deliberately no way to clear
+    everything in one call."""
+    _identity(request, authorization)
+    removed = _guard(lambda: observation_store.delete_night(night))
+    return {"night_stamp": normalize_night(night), "deleted": removed}
+
+
 def _fold_observed_time(alloc: dict) -> dict:
     """Fold ingested observation charges into the allocations overview's
     'used' (the static YAML overview carries used=0 + tracked=False until

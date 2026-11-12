@@ -62,9 +62,10 @@ def _is_standard(name: str) -> bool:
             or n.startswith("WDFS"))
 
 
-def plan_to_night(plan: dict) -> dict:
+def plan_to_night(plan: dict, queue: dict = None) -> dict:
     """Preview response -> the night dict request_package expects."""
     from orchestrator.obsfiles import split_subexposures
+    queue = queue or {}
     targets = []
     for e in plan.get("timeline", []):
         n_exp, exp_sec = split_subexposures(e.get("exp_min"))
@@ -72,6 +73,7 @@ def plan_to_night(plan: dict) -> dict:
             "name": e.get("target", ""),
             "priority": e.get("tier", ""),
             "mag": e.get("mag"),
+            "band": (queue.get(e.get("target", "")) or {}).get("band"),
             "n_exp": n_exp, "exp_sec": exp_sec,
             "is_standard": _is_standard(e.get("target", "")),
         })
@@ -199,7 +201,7 @@ def main(argv=None) -> int:
     meta["catalog_file"] = cat_name
     queue = fetch_queue(args.api, args.key) if (args.api and args.key) else {}
     meta["backup"] = plan_to_backup(plan, queue)
-    tex = request_package([plan_to_night(plan)], meta)
+    tex = request_package([plan_to_night(plan, queue)], meta)
 
     base = f"{inst}_{args.date.replace('-', '')}_{pi}"
     tex_path = os.path.join(pkg, base + ".tex")

@@ -260,8 +260,14 @@ def _target_block(r: dict) -> list:
     mag = r.get("mag")
     mag_s = "" if mag is None else f" mag $\\sim$ {float(mag):g}"
     if r.get("is_standard"):
+        # Print the band the magnitude is actually in. The classic flux
+        # standards are quoted in V, but the Boyd HST white dwarfs are Gaia
+        # DR3 G, and labelling one as the other is a false statement in a
+        # document the observer acts on.
+        band = str(r.get("band") or "V")
+        label = "Gaia G" if band == "G" else f"{band} mag"
         head = (f"Spectroscopic Standard Star {_tex_escape(r['name'])}"
-                + (f" (V mag = {float(mag):g})" if mag is not None else ""))
+                + (f" ({label} = {float(mag):g})" if mag is not None else ""))
     else:
         head = f"{_tex_escape(r['name'])} {_priority_phrase(r.get('priority'))}{mag_s}"
     lines = [f"\\item {head}", "\\begin{enumerate}"]

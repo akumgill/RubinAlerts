@@ -131,7 +131,8 @@ def build_pseudo_targets(standards: list[dict],
                          bins: list[tuple[float, float]],
                          priority: str = "P2",
                          exposure_minutes: float | None = None,
-                         instrument: str = "LLAMAS") -> list[dict]:
+                         instrument: str = "LLAMAS",
+                         band: str = "G") -> list[dict]:
     """One POST /v1/targets item per standard per airmass bin."""
     items = []
     for std in standards:
@@ -145,6 +146,11 @@ def build_pseudo_targets(standards: list[dict],
                 "name": pseudo_name(std["name"], lo, hi),
                 "ra": std["ra"], "dec": std["dec"],
                 "mag": std.get("mag"),
+                # The shipped Boyd catalogue quotes Gaia DR3 G, not V. Saying
+                # so matters downstream: the observing request prints the band
+                # beside the number, and "V mag = 18.7" for a Gaia G magnitude
+                # is a wrong statement in a document an observer acts on.
+                "band": band,
                 "priority": priority,
                 "instrument": instrument,
                 "exposure_minutes": float(exp),
@@ -178,6 +184,9 @@ def main(argv=None) -> int:
                     help="queue tier (default P0 — reserves every leg of the "
                          "ladder; see the note in the source before lowering it)")
     ap.add_argument("--instrument", default="LLAMAS")
+    ap.add_argument("--band", default="G",
+                    help="photometric band the catalogue's mag is in "
+                         "(default G — ref/boyd2025_wdfs_standards.csv is Gaia DR3 G)")
     ap.add_argument("--exposure-minutes", type=float, default=None,
                     help="per-visit exposure when the CSV has no column")
     ap.add_argument("--dry-run", action="store_true",
@@ -190,7 +199,8 @@ def main(argv=None) -> int:
                                  parse_bins(args.bins),
                                  priority=args.priority,
                                  exposure_minutes=args.exposure_minutes,
-                                 instrument=args.instrument)
+                                 instrument=args.instrument,
+                                 band=args.band)
     if args.dry_run:
         print(json.dumps(items, indent=2))
         return 0

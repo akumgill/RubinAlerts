@@ -268,3 +268,25 @@ def test_request_package_refuses_an_incomplete_submission():
         request_package([], {"pi": "S", "instrument": "L", "contact_name": "n",
                              "contact_email": "e", "contact_phone": "p",
                              "science_program": "s", "catalog_file": "c"})
+
+
+def test_standard_prints_the_band_its_magnitude_is_actually_in():
+    """The classic flux standards are quoted in V, but the Boyd HST white
+    dwarfs are Gaia DR3 G. Printing one as the other is a false statement in a
+    document the observer acts on."""
+    from orchestrator.obsfiles import request_package
+    meta = {"pi": "Stubbs", "instrument": "LLAMAS", "contact_name": "A",
+            "contact_email": "a@b.c", "contact_phone": "1",
+            "science_program": "x", "catalog_file": "cat"}
+    night = {"date": "2026-11-14", "targets": [
+        {"name": "WDFS0122-30@am1.0-1.3", "mag": 18.66, "band": "G",
+         "is_standard": True, "n_exp": 3, "exp_sec": 340},
+        {"name": "LTT9239", "mag": 12.07, "band": "V",
+         "is_standard": True, "n_exp": 1, "exp_sec": 60},
+        {"name": "no-band-given", "mag": 11.0, "is_standard": True,
+         "n_exp": 1, "exp_sec": 60}]}
+    tex = request_package([night], meta)
+    assert "(Gaia G = 18.66)" in tex
+    assert "(V mag = 12.07)" in tex
+    assert "(V mag = 11)" in tex          # V remains the sensible default
+    assert "V mag = 18.66" not in tex     # the bug this covers
